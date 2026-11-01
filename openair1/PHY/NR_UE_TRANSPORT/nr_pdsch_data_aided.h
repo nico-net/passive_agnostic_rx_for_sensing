@@ -77,6 +77,7 @@ extern __thread uint64_t nr_isac_abs_slot_override;
  * @param harq_pid_tag  Disambiguates this TB on the shared nrLDPC coding interface; see the .c file
  * @param rxdataF       Frequency-domain received samples for this slot, per rx antenna
  * @param nvar          Noise variance estimate from the demodulator, for the engine's fusion weight
+ * @param dmrs_snr_db   the grant's combined DM-RS SNR as the decode measured it (NAN = none), exported as the record's snr_db
  * @param decode_G      G the decode that verified `tb_bytes` rate-matched with. The re-encode maps onto every
  *                      non-DM-RS RE of the allocation (no SSB/CSI-RS/PT-RS hole), so any other G means the
  *                      reconstructed X would be misaligned: the call then contributes nothing and counts the
@@ -92,7 +93,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t harq_pid_tag,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                      double nvar,
-                                     uint32_t decode_G);
+                                     uint32_t decode_G,
+                                     float dmrs_snr_db);
 
 /**
  * @brief The same tap, off the decode thread. The consumer thread of a CRC-OK single-layer grant otherwise spends the whole
@@ -113,7 +115,8 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
                                           uint32_t harq_pid_tag,
                                           const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                           double nvar,
-                                          uint32_t decode_G);
+                                          uint32_t decode_G,
+                                          float dmrs_snr_db);
 /// Before the RX fence, on cell `cell`'s thread: the parked worker (armed by _async_init). No-op when sensing is off.
 void nr_isac_pdsch_data_aided_async_prepare(int cell);
 /// Before the RX fence (queue start): the cell's job pool (4 jobs, TB + snapshot buffers prefaulted) and the worker arm. Without it every submit runs inline.

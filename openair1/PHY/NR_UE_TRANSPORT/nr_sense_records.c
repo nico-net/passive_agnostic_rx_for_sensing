@@ -86,7 +86,9 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   put(&j,"]");
   integer(&j,"ports",m->ports); integer(&j,"n_ant",m->n_ant);
   integer(&j,"port_mask",m->port_mask > 0 ? m->port_mask : -1);
-  real(&j,"noise_var",m->noise_var); real(&j,"slot_frac",m->slot_frac);
+  real(&j,"noise_var",m->noise_var > 0.f ? m->noise_var : NAN); real(&j,"slot_frac",m->slot_frac);
+  /* receiver-measured quality: the same DM-RS / post-estimation SNR the grant logs print; null when not estimated */
+  real(&j,"snr_db",m->snr_valid ? m->snr_db : NAN);
   if (frame_id) put(&j,",\"cfr_frame_id\":%" PRIu64,frame_id);
   else put(&j,",\"cfr_frame_id\":null");
   put(&j,",\"truncated\":%s",m->truncated?"true":"false");

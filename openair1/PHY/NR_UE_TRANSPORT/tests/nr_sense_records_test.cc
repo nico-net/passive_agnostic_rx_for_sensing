@@ -406,3 +406,30 @@ TEST(SenseRecords, NoiseEstimateFromSecondDifference)
   for (uint32_t i=0;i<n;i++) k[i]=3*i;
   EXPECT_TRUE(std::isnan(nr_sense_h_noise_var(h.data(),k.data(),l.data(),n,n,nant)));
 }
+
+/* Receiver-measured quality rides every RS record: snr_db is the estimator's DM-RS SNR, null when none (never the -30 floor or a
+ * -99 sentinel), noise_var is the real estimate or null (never the old placeholder 1). */
+TEST(SenseRecords, RsCarriesMeasuredQuality)
+{
+  char line[2048];
+  for (int src=0; src<NR_SENSE_SRC_COUNT; src++) {
+    nr_sense_rs_meta_t m{}; m.noise_var=0.4375f; m.ports=1;
+    nr_sense_meta_set_snr(&m,12.5f);
+    ASSERT_GT(nr_sense_rs_to_json(nr_sense_src_t(src),&m,1,line,sizeof line),0);
+    EXPECT_NE(strstr(line,"\"noise_var\":0.4375,"),nullptr) << src;
+    EXPECT_NE(strstr(line,"\"snr_db\":12.5,"),nullptr) << src;
+  }
+  for (float sentinel : {-30.0f,-99.0f,NAN}) {
+    nr_sense_rs_meta_t m{}; m.noise_var=2; nr_sense_meta_set_snr(&m,sentinel);
+    ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PUSCH_DMRS,&m,1,line,sizeof line),0);
+    EXPECT_NE(strstr(line,"\"snr_db\":null"),nullptr) << sentinel;
+    EXPECT_EQ(strstr(line,"\"snr_db\":-"),nullptr) << sentinel;
+  }
+  nr_sense_rs_meta_t z{};   /* nothing measured: both null */
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DATA,&z,1,line,sizeof line),0);
+  EXPECT_NE(strstr(line,"\"snr_db\":null"),nullptr);
+  EXPECT_NE(strstr(line,"\"noise_var\":null"),nullptr);
+  nr_sense_rs_meta_t neg{}; nr_sense_meta_set_snr(&neg,-6.25f);   /* a real negative SNR is a measurement */
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PUSCH_DMRS,&neg,1,line,sizeof line),0);
+  EXPECT_NE(strstr(line,"\"snr_db\":-6.25,"),nullptr);
+}

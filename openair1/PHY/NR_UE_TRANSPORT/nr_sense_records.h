@@ -17,6 +17,10 @@ typedef struct nr_sense_rs_meta_s {
   int start_rb, nb_rb, n_re, n_ant, ports, ssb_index, k_ssb;
   uint32_t l_sym_mask;
   float noise_var, slot_frac;
+  /* Receiver-measured quality of the exported estimate: DM-RS / post-estimation SNR in dB, only meaningful when snr_valid
+   * (a zero-initialised meta has no estimate and prints null). Set through nr_sense_meta_set_snr(). */
+  float snr_db;
+  bool snr_valid;
   uint64_t abs_slot;
   int frame, slot;
   const char *csirs_resource;
@@ -51,6 +55,18 @@ typedef struct nr_sense_rs_meta_s {
   uint32_t rx_shift_count;
   float rx_gain_db;
 } nr_sense_rs_meta_t;
+
+/* The estimators floor a signal below their noise estimate at -30 dB (nr_ulsch_dmrs_snr_db) and the DL side reports <= -90 for "none":
+ * neither is a measurement, so they leave snr_valid false and the record prints snr_db:null. */
+#define NR_SENSE_SNR_FLOOR_DB (-29.99f)
+static inline void nr_sense_meta_set_snr(nr_sense_rs_meta_t *m, float snr_db)
+{
+  m->snr_valid = (snr_db == snr_db) && snr_db > NR_SENSE_SNR_FLOOR_DB && snr_db < 200.f;
+  m->snr_db = m->snr_valid ? snr_db : 0.f;
+}
+/* meta of the same grant with its measured quality attached (a compound literal cannot call the setter) */
+static inline nr_sense_rs_meta_t nr_sense_meta_with_snr(nr_sense_rs_meta_t m, float snr_db)
+{ nr_sense_meta_set_snr(&m, snr_db); return m; }
 
 /* Hyper-frame-extended slot index (the producer's un-wrapped absolute_slot): ((hfn*1024)+frame)*slots_per_frame+slot.
  * frame_rx alone wraps every 10.24 s. */

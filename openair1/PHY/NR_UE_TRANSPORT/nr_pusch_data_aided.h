@@ -45,6 +45,7 @@ extern "C" {
  * @param nof_ant       receive antennas to extract (per-antenna phases are preserved for AoA)
  * @param slot          the uplink slot, for the rxdataF ring offset
  * @param ta_applied_samples   actual FFT-window advance, for exported CFR phase reference
+ * @param dmrs_snr_db   the grant's DM-RS SNR as the decode measured it (NAN = none), exported as the record's snr_db
  */
 void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      PHY_VARS_gNB *gnb,
@@ -55,7 +56,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t ul_slot_idx,
                                      uint32_t nof_ant,
                                      int slot,
-                                     int ta_applied_samples);
+                                     int ta_applied_samples,
+                                     float dmrs_snr_db);
 
 /// Per-run census: attempts, submissions, and every reason one did not happen.
 void nr_isac_pusch_data_aided_stats_dump(void);

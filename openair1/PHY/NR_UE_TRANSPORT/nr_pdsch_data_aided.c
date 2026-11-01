@@ -115,7 +115,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t harq_pid_tag,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                      double nvar,
-                                     uint32_t decode_G)
+                                     uint32_t decode_G,
+                                     float dmrs_snr_db)
 {
   /* RE-MODEL GUARD. The reconstruction below maps the re-encoded TB onto EVERY non-DM-RS RE of the
    * allocation: its RE model has no hole for an SSB, a CSI-RS or a PT-RS. A decode that rate-matched
@@ -467,11 +468,14 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .dl_center_hz    = fp->dl_CarrierFreq,
                                .pci             = fp->Nid_cell,
                                .slots_per_frame = fp->slots_per_frame};
-  const nr_sense_rs_meta_t rs_meta = {.rnti=rnti,
+  nr_sense_rs_meta_t rs_meta = {.rnti=rnti,
     .start_rb=dlsch_config->BWPStart+freq_alloc->first_rb, .nb_rb=freq_alloc->num_rbs,
     .ports=__builtin_popcount((unsigned)dlsch_config->dmrs_ports), .port_mask=(int)dlsch_config->dmrs_ports, .ssb_index=-1, .k_ssb=-1,
     .ta_est_samples=-1, .transform_precoding=-1,
     .dmrs_type=dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_config->nscid};
+  nr_sense_meta_set_snr(&rs_meta, dmrs_snr_db);
+  /* the demodulator's noise estimate in the units of the exported |Y/X|^2; 0 = none measured (prints null) */
+  const float nvar_f = nvar > 0.0 ? (float)nvar : NAN;
   /* Slow-time index for the CPI grid. `proc->frame_rx` WRAPS at 1024, so the obvious
    * frame*slots_per_frame + slot wraps every 20480 slots. In-line that was benign: submissions
    * arrived in strict slot order and a wrap was just a discontinuity between CPIs. Once the decode
@@ -502,7 +506,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
 
   if (sub_target == 0 || nof_sym <= 1) {
     da_emit(slot_idx, 0.0f, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l, 0, e_nre,
-            (float)nvar);
+            nvar_f);
     return;
   }
 
@@ -531,7 +535,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       // Slice, not copy: ant_stride_re stays the FULL buffer stride so antenna a's slice starts at
       // the same symbol offset within its own plane.
       da_emit(slot_idx, frac, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l,
-              sym_start[g_first], g_out, (float)nvar);
+              sym_start[g_first], g_out, nvar_f);
       emitted++;
       g_first = i + 1;
     } else if (is_last) {
@@ -539,14 +543,14 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       // as one row if nothing has been emitted yet, otherwise fold it into the whole-slot fallback.
       if (emitted == 0) {
         da_emit(slot_idx, 0.0f, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l, 0, e_nre,
-                (float)nvar);
+                nvar_f);
         emitted++;
       } else {
         const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
         const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
         if (g_out > 0)
           da_emit(slot_idx, frac, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l,
-                  sym_start[g_first], g_out, (float)nvar);
+                  sym_start[g_first], g_out, nvar_f);
       }
     }
   }
@@ -564,6 +568,7 @@ typedef struct {
   uint16_t rnti;
   uint32_t harq_tag, G;
   double nvar;
+  float dmrs_snr_db;
   uint64_t abs_slot;
   c16_t *rx; /* nant x stride c16, the layout of the consumer's rxdataF; only the grant's region is written */
   uint8_t *tb;
@@ -648,7 +653,8 @@ static void da_run(void *arg)
   da_pool_t *P = &g_da; /* the worker was bound to the item's cell by nr_bgq_run_one */
   const uint64_t t0 = da_now_ns();
   nr_isac_abs_slot_override = j->abs_slot;
-  nr_isac_pdsch_data_aided_submit(j->ue, &j->proc, &j->cw, &j->dlsch, &j->fa, j->rnti, j->tb, j->harq_tag, (const c16_t(*)[P->stride])j->rx, j->nvar, j->G);
+  nr_isac_pdsch_data_aided_submit(j->ue, &j->proc, &j->cw, &j->dlsch, &j->fa, j->rnti, j->tb, j->harq_tag, (const c16_t(*)[P->stride])j->rx, j->nvar, j->G,
+                                  j->dmrs_snr_db);
   nr_isac_abs_slot_override = 0;
   atomic_fetch_add(&P->run_ns, da_now_ns() - t0);
   const uint64_t n = atomic_fetch_add(&P->done, 1) + 1;
@@ -670,7 +676,8 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
                                           uint32_t harq_pid_tag,
                                           const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                           double nvar,
-                                          uint32_t decode_G)
+                                          uint32_t decode_G,
+                                          float dmrs_snr_db)
 {
   da_pool_t *P = &g_da;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -704,6 +711,7 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
     j->harq_tag = harq_pid_tag;
     j->G = decode_G;
     j->nvar = nvar;
+    j->dmrs_snr_db = dmrs_snr_db;
     j->abs_slot = nr_isac_abs_slot_override;
     memcpy(j->tb, tb_bytes, tb_n);
     if (nr_bgq_push(&g_da_q, da_run, j) == 0) {
@@ -715,6 +723,6 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
   if (j)
     __atomic_fetch_or(&P->free_mask, 1u << j->idx, __ATOMIC_RELEASE);
   atomic_fetch_add(&P->inl, 1);
-  nr_isac_pdsch_data_aided_submit(ue, proc, cw, dlsch_config, freq_alloc, rnti, tb_bytes, harq_pid_tag, rxdataF, nvar, decode_G);
+  nr_isac_pdsch_data_aided_submit(ue, proc, cw, dlsch_config, freq_alloc, rnti, tb_bytes, harq_pid_tag, rxdataF, nvar, decode_G, dmrs_snr_db);
   return 0;
 }

@@ -28,4 +28,10 @@ static inline float nr_ulsch_dmrs_snr_db(double sig2, double resid2)
   const double h2 = sig2 - NR_ULSCH_SMOOTH_G * sigma2;
   return (float)(10.0 * log10((h2 > 1e-3 * sigma2 ? h2 : 1e-3 * sigma2) / sigma2));
 }
+/* Noise variance sigma^2 of one DM-RS LS estimate (E|noise|^2 per RE, channel-estimate units = the units of the exported |H|^2) from the
+ * same nvar residual the SNR above uses: resid2 = (1-g) sigma^2. NAN when there is no estimate. */
+static inline float nr_ulsch_dmrs_noise_var(double resid2)
+{
+  return resid2 > 0.0 ? (float)(resid2 / (1.0 - NR_ULSCH_SMOOTH_G)) : NAN;
+}
 #endif
