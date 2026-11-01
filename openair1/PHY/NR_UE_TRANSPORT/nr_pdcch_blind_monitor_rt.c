@@ -124,6 +124,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "common/utils/threadPool/task_ans.h"             // task_ans_t, init/join/completed_task_ans
 #include "nr_pdcch_discovery_replay.h"
 #include "nr_pdcch_uss_tracker.h"
+#include "nr_pdcch_uss_prune.h"
 #include "nr_pdcch_joint_live.h"
 #include "nr_pdsch_solver.h"
 #include "nr_re_pattern.h" // generic RE-pattern rate-match entries (SLOTPHASE)
@@ -3038,131 +3039,11 @@ static bool janon_hit_scorer(int len, int trial, uint16_t *rnti, uint32_t *hash,
  * every UE of the CORESET: they are FITTED from the accepted DCIs (all must be consistent), then each known RNTI is
  * decoded only at its own hash positions. OTA PCI 415 (2026-10-08 tb_2): ~19 C-RNTIs x 64 candidates of polar decodes
  * per slot gave p99 134 ms per scan; replay: every accepted DCI of four RNTIs fits N_CCE 32/33, p mod 3 = 1, M <= 4. */
-#define USSH_SAMPLES 256
-#define USSH_GEOMS 8
-typedef struct {
-  uint64_t geom;
-  int n, fitted_at, nh;
-  int notes_since_fit; /* notes since the last fit; the table rotates once full, so n alone cannot pace the refit */
-  uint16_t rnti[USSH_SAMPLES];
-  uint8_t slot[USSH_SAMPLES], cce[USSH_SAMPLES], L[USSH_SAMPLES];
-  struct { uint8_t N, a, M[5]; } h[4]; /* fitting hypotheses (union used) */
-} ussh_t;
-typedef ussh_t g_ussh_cell_t[USSH_GEOMS];
-NR_CELL_STATIC(g_ussh_cell_t, g_ussh);
-#define g_ussh NR_CELL_REF(g_ussh)
-NR_CELL_STATIC_INIT(pthread_mutex_t, g_ussh_mu, PTHREAD_MUTEX_INITIALIZER);
-#define g_ussh_mu NR_CELL_REF(g_ussh_mu)
-static const uint32_t kUsshA[3] = {39827, 39829, 39839};
-/* ussh_Y: the USS hash state Y_p,n for an RNTI at a slot, for one multiplier A (TS 38.213 10.1, iterated modulo 65537).
- *   Pure function. Caller: ussh_in().
- */
-static uint32_t ussh_Y(uint16_t rnti, int slot, uint32_t A)
-{
-  uint32_t y = rnti;
-  for (int k = 0; k <= slot; k++) y = (uint32_t)(((uint64_t)A * y) % 65537u);
-  return y;
-}
-/* ussh_in: true when a candidate (cce, L) of an RNTI in slot `slot` lies on the USS hash positions for CORESET size N, multiplier A and M_L = M.
- *   Pure function. Callers: ussh_fit() (fitting) and ussh_allows() (admission).
- */
-static bool ussh_in(uint16_t rnti, int slot, int cce, int L, int N, uint32_t A, int M)
-{
-  const int nl = N / L;
-  if (nl <= 0 || M <= 0) return false;
-  const uint32_t y = ussh_Y(rnti, slot, A);
-  for (int m = 0; m < M; m++)
-    if (L * (int)((y + (uint32_t)((m * N) / (L * M))) % (uint32_t)nl) == cce) return true;
-  return false;
-}
-/* al_idx: maps an aggregation level L (1, 2, 4, 8, 16) to a slot index 0..4 of the USS hash M table.
- *   Pure function. Callers: ussh_fit() and ussh_allows().
- */
-static int al_idx(int L) { return L == 1 ? 0 : L == 2 ? 1 : L == 4 ? 2 : L == 8 ? 3 : 4; }
-/* ussh_fit: fits the USS hash parameters (N_CCE, A, M_L per aggregation level) to the accepted known-RNTI DCIs of one CORESET geometry.
- *   Tries N from ncce_max down to 6 and the three A values, keeps up to 4 hypotheses whose M sums stay <= 12, and logs the first one.
- *   Caller: ussh_note() (when enough new samples have arrived). Must hold g_ussh_mu.
- */
-static void ussh_fit(ussh_t *u, int ncce_max)
-{
-  u->nh = 0;
-  for (int N = ncce_max; N >= 6 && u->nh < 4; N--)
-    for (int a = 0; a < 3 && u->nh < 4; a++) {
-      uint8_t M[5] = {0};
-      bool ok = true;
-      for (int i = 0; i < u->n && ok; i++) {
-        const int ai = al_idx(u->L[i]);
-        int m = M[ai] ? M[ai] : 1;
-        while (m <= 8 && !ussh_in(u->rnti[i], u->slot[i], u->cce[i], u->L[i], N, kUsshA[a], m)) m++;
-        if (m > 8) ok = false;
-        else if (m > M[ai]) {
-          /* a larger M moves earlier samples' positions: re-check all of this AL */
-          M[ai] = (uint8_t)m;
-          for (int j = 0; j < i && ok; j++)
-            if (u->L[j] == u->L[i] && !ussh_in(u->rnti[j], u->slot[j], u->cce[j], u->L[j], N, kUsshA[a], m)) ok = false;
-        }
-      }
-      int cover = 0;
-      for (int k = 0; k < 5; k++) cover += M[k];
-      if (ok && cover > 0 && cover <= 12) {
-        u->h[u->nh].N = (uint8_t)N; u->h[u->nh].a = (uint8_t)a;
-        memcpy(u->h[u->nh].M, M, 5);
-        u->nh++;
-      }
-    }
-  u->fitted_at = u->n;
-  u->notes_since_fit = 0;
-  if (u->nh > 0)
-    LOG_A(PHY, "SENSING: USS_HASH fitted geom=%llu on %d DCIs: %d hypotheses, first N_CCE=%u p%%3=%u M=[%u %u %u %u %u]\n",
-          (unsigned long long)u->geom, u->n, u->nh, u->h[0].N, u->h[0].a, u->h[0].M[0], u->h[0].M[1], u->h[0].M[2],
-          u->h[0].M[3], u->h[0].M[4]);
-}
-/* ussh_note: records one accepted known-RNTI DCI 1_1 (RNTI, slot, CCE, L) for the USS hash fit of its CORESET geometry.
- *   Refits every 16 new samples (8 while no hypothesis exists yet). Caller: run_occasion_one() (accepted known-RNTI DCIs).
- */
-static bool ussh_note_ex(uint64_t geom, uint16_t rnti, int slot, int cce, int L, int ncce_max, bool force)
-{
-  bool kept = true;
-  pthread_mutex_lock(&g_ussh_mu);
-  ussh_t *u = NULL;
-  for (int i = 0; i < USSH_GEOMS && !u; i++)
-    if (g_ussh[i].geom == geom && g_ussh[i].n) u = &g_ussh[i];
-  for (int i = 0; i < USSH_GEOMS && !u; i++)
-    if (!g_ussh[i].n) { u = &g_ussh[i]; u->geom = geom; }
-  if (u) {
-    /* force (SCAN2 only): enter the sample and refit now; a full table overwrites a rotating entry. If the fit then has no
-     * hypothesis left (the UL position does not belong to the DL search space) the sample is taken back and refitted, so a UL
-     * DCI can never switch the DL hash filter off. */
-    NR_CELL_STATIC(int, s_rot);
-#define s_rot NR_CELL_REF(s_rot)
-    const bool full = u->n >= USSH_SAMPLES;
-    const int i = full ? (s_rot++ % USSH_SAMPLES) : u->n;
-    const ussh_t before = *u;
-    if (!full) u->n++;
-    u->notes_since_fit++;
-    u->rnti[i] = rnti; u->slot[i] = (uint8_t)slot; u->cce[i] = (uint8_t)cce; u->L[i] = (uint8_t)L;
-    /* The fit only lower-bounds M_L (the smallest M that places every sample): a full table keeps rotating and refitting, so
-     * audited DCIs at m > 0 (ussh_audit_slot) can still raise M. A frozen M_L = 1 fit pruned 3 of the 4 AL1 positions of
-     * every UE on the sens4 lab cell (2026-10-25, aggregationLevel1 n4 per the gNB RRCSetup used as validation truth). */
-    if (force || (u->n >= 24 && (u->notes_since_fit >= 16 || (u->nh == 0 && u->notes_since_fit >= 8)))) {
-      ussh_fit(u, ncce_max);
-      if (force && u->nh == 0 && before.nh > 0) {
-        *u = before;
-        kept = false;
-      }
-    }
-  }
-#undef s_rot
-  pthread_mutex_unlock(&g_ussh_mu);
-  return kept;
-}
-static void ussh_note(uint64_t geom, uint16_t rnti, int slot, int cce, int L, int ncce_max)
-{
-  (void)ussh_note_ex(geom, rnti, slot, cce, L, ncce_max, false);
-}
-/* ussh_allows: returns whether a known RNTI may sit at (cce, L) in this slot under the fitted USS hash; true when no fit exists yet.
- *   An aggregation level never seen in the fit stays admitted at m = 0. Callers: run_occasion_one() (USS candidate pruning, two sites).
- */
+/* The fit, hash and admission live in nr_pdcch_uss_prune.c (unit-tested); counters: nr_uss_prune_stats(). */
+#define ussh_note(g, r, s, c, l, n) (void)nr_uss_prune_note((g), (r), (s), (c), (l), (n), false)
+#define ussh_note_ex(g, r, s, c, l, n, f) nr_uss_prune_note((g), (r), (s), (c), (l), (n), (f))
+#define ussh_allows(g, r, s, c, l) nr_uss_prune_allows((g), (r), (s), (c), (l))
+#define ussh_audit_slot(a) nr_uss_prune_audit_slot(a)
 /* SCAN2: CORESET geometries where an audited UL task outside the USS hash produced a CRC-valid DCI: the UL gate stays off there. */
 typedef _Atomic uint64_t g_ulssh_bad_cell_t[8];
 NR_CELL_STATIC(g_ulssh_bad_cell_t, g_ulssh_bad);
@@ -3179,31 +3060,6 @@ static void ulssh_mark_bad(uint64_t geom)
     uint64_t z = 0;
     if (atomic_compare_exchange_strong(&g_ulssh_bad[i], &z, geom) || z == geom) return;
   }
-}
-/* ussh_audit_slot: 1 occasion in 16 decodes known RNTIs at every candidate position, ignoring the fitted hash: the evidence that lets
- *   ussh_fit() raise an under-fitted M_L (the fit can only grow M from DCIs it is allowed to decode). Pure function of the slot. */
-static bool ussh_audit_slot(uint32_t abs_slot)
-{
-  return ((((uint32_t)abs_slot * 0x9E3779B1u) >> 20) % 16u) == 3u;
-}
-static bool ussh_allows(uint64_t geom, uint16_t rnti, int slot, int cce, int L)
-{
-  pthread_mutex_lock(&g_ussh_mu);
-  bool allow = true;
-  for (int i = 0; i < USSH_GEOMS; i++) {
-    const ussh_t *u = &g_ussh[i];
-    if (u->geom != geom || !u->n || u->nh == 0) continue;
-    allow = false;
-    for (int h = 0; h < u->nh && !allow; h++) {
-      /* An AL never seen in the fit (M=0) may still be configured: its m=0 position is independent of M_L,
-       * so it stays admitted (one candidate per unseen AL) instead of being excluded forever (T26c). */
-      const int M = u->h[h].M[al_idx(L)];
-      allow = ussh_in(rnti, slot, cce, L, u->h[h].N, kUsshA[u->h[h].a], M > 0 ? M : 1);
-    }
-    break;
-  }
-  pthread_mutex_unlock(&g_ussh_mu);
-  return allow;
 }
 
 /* JOINT_ANON. TS 38.211 7.3.2.3: on a CORESET with
@@ -6572,7 +6428,7 @@ NR_CELL_STATIC(uint16_t, s_pbwp_own_size);
       if (dlc && bootstrap_rnti && cfg->discovered_coreset) {
         int kept = 0;
         for (int c = 0; c < disc_n_cand; ++c)
-          if (ussh_allows(dl_geom, bootstrap_rnti, proc->nr_slot_rx, disc_cand[c].cce, disc_cand[c].L))
+          if (nr_uss_prune_admit(dl_geom, bootstrap_rnti, proc->nr_slot_rx, disc_cand[c].cce, disc_cand[c].L, false))
             disc_cand[kept++] = disc_cand[c];
         disc_n_cand = kept;
       }
@@ -7312,8 +7168,9 @@ constdiag_done:;
         for (int k = 0; k < n_dl_ready
              && nof_tasks < cand_task_cap; ++k) {
           const int ri = (first + k) % n_dl_ready;
-          if (cfg->discovered_coreset && !ussh_audit_slot(abs_slot)
-              && !ussh_allows(dl_geom, dl_ready_rnti[ri], proc->nr_slot_rx, rel15->CCE[c], L))
+          if (cfg->discovered_coreset
+              && !nr_uss_prune_admit(dl_geom, dl_ready_rnti[ri], proc->nr_slot_rx, rel15->CCE[c], L,
+                                     ussh_audit_slot(abs_slot)))
             continue; /* USS hash: not one of this RNTI's search-space positions */
           cand_task[nof_tasks] = base_task;
           cand_task[nof_tasks].dci_length = dl_ready_len[ri];
@@ -10398,6 +10255,12 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
           S2(ulssh_gated), S2(ulssh_audit_tasks), S2(ulssh_viol), S2(tdd_skip_total), S2(tdd_skip_sib1),
           (unsigned long long)__atomic_load_n(&g_scan2.tdd.n_verify, __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_scan2.tdd.n_unskip, __ATOMIC_RELAXED));
 #undef S2
+    nr_uss_prune_stats_t usp;
+    nr_uss_prune_stats(&usp);
+    LOG_A(PHY, "SENSING: USS_PRUNE pruned=%llu audit_tasks=%llu audit_miss=%llu rnti_demotions=%llu rnti_repromotions=%llu geom_resets=%llu fits=%llu\n",
+          (unsigned long long)usp.pruned, (unsigned long long)usp.audit_tasks, (unsigned long long)usp.audit_miss,
+          (unsigned long long)usp.rnti_demotions, (unsigned long long)usp.rnti_repromotions, (unsigned long long)usp.geom_resets,
+          (unsigned long long)usp.fits);
   }
   if (sum_due) {
 #define AL(f_, i_) (unsigned long long)atomic_load_explicit(&g_anonlen.f_[i_], memory_order_relaxed)

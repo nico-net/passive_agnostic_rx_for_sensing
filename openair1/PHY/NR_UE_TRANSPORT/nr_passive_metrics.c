@@ -30,6 +30,7 @@
 #include "nr_csirs_disc.h"
 #include "nr_prach_passive.h"
 #include "nr_sense_api.h"
+#include "nr_pdcch_uss_prune.h"
 __attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
 __attribute__((weak)) void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped);
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
@@ -154,6 +155,17 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->acq_sync_losses = a.sync_losses;
   m->acq_pbch_locks = a.pbch_locks;
   m->acq_sib1_decodes = a.sib1_decodes;
+  {
+    nr_uss_prune_stats_t us;
+    nr_uss_prune_stats(&us);
+    m->uss_pruned = us.pruned;
+    m->uss_audit_tasks = us.audit_tasks;
+    m->uss_audit_miss = us.audit_miss;
+    m->uss_rnti_demotions = us.rnti_demotions;
+    m->uss_rnti_repromotions = us.rnti_repromotions;
+    m->uss_geom_resets = us.geom_resets;
+    m->uss_fits = us.fits;
+  }
   nr_pdcch_blind_monitor_counters(&m->pdcch_occasions, &m->pdcch_candidates, &m->pdcch_accepts, &m->pdcch_accepts_c);
   nr_pdcch_passive_queue_stats_t sq;
   nr_pdcch_passive_queue_get_stats(&sq);
