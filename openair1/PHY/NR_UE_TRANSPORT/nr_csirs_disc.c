@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#include "common/utils/nr_core_pool.h"
 #include "nr_csirs_disc.h"
 #include "nr_csirs_disc_mem.h"
 /* T6b: weak, so fixtures that link this file without the platform library keep an unlimited budget */
@@ -506,6 +507,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
     n_fp=nr_csirs_disc_detect_candidates(ring,&fp_cfg,fps,64);
   }
   const uint64_t detected = now_us(), cpu_detected=cpu_us();
+  (void)nr_pool_site_float_yield(); /* chunk step: a waiting SENSE job (or anything more urgent than DISC) gets the token between the discovery stages */
   if (n_fp < 0) {pthread_mutex_unlock(&pipeline_lock);return;}
   for (int i = 0; i < n_fp; ++i)
     LOG_I(PHY,
@@ -613,12 +615,14 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
     n_win = ops->sweep(ring, hyps, n_hyp, &sweep_cfg, wins);
     gpu = n_win >= 0;
   }
+  (void)nr_pool_site_float_yield();
   if (n_hyp > 0 && n_win < 0)
     n_win = 0;
   if(n_hyp>0 && !gpu && ring->device_valid) {pthread_mutex_unlock(&pipeline_lock);return;}
   if (n_hyp > 0 && !gpu) {
     n_win=0;
     for(int i=0;i<n_hyp;++i) {
+      (void)nr_pool_site_float_yield(); /* chunk step per hypothesis */
       /* Expensive multiport hypotheses first face a bounded CPU screen. The
        * complete geometry/occasion sweep is still mandatory for admission. */
       nr_csirs_disc_hyp_t coarse=hyps[i];
@@ -718,6 +722,7 @@ void nr_csirs_disc_process(nr_csirs_disc_ring_t *ring)
     }
 
     for (int k = 0; k < n_selected; ++k) {
+      (void)nr_pool_site_float_yield(); /* chunk step per refined resource */
       const nr_csirs_disc_win_t *w = &wins[selected[k]];
       const int original_index=w->hyp_index;
       nr_csirs_disc_hyp_t refined = hyps[w->hyp_index];

@@ -295,6 +295,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
       m->sense_cfr_drop += sense.cfr_dropped[source];
       m->sense_cfr_drop_src[source] = sense.cfr_dropped[source];
       m->sense_cfr_exported_src[source] = sense.cfr_pushed_src[source];
+      m->sense_async_queued_src[source] = sense.async_queued[source];
+      m->sense_async_drop_src[source] = sense.async_dropped[source];
       m->sense_prod_us[source]=sense.prod_ns[source]/1000;
       m->sense_pack_us[source]=sense.pack_ns[source]/1000;
       m->sense_prod_count[source]=sense.prod_count[source];

@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include "common/utils/nr_cell.h"
 
-#define NR_BGQ_MAX 8
+#define NR_BGQ_MAX 32
 typedef void (*nr_bgq_fn)(void *arg); /* runs on the worker; owns (frees) arg */
 typedef struct {
   pthread_mutex_t mu;

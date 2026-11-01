@@ -824,12 +824,17 @@ typedef struct {
 } bg_arg_t;
 /* mpci B5: float-lane lease of one background item (DISC class, the cell that started the queue); no-ops when the float lane is not merged */
 static void bg_lease_in(int cell) { nr_pool_site_float_acquire(NR_POOL_DISC, cell, 0); }
+/* the data-aided tap workers lease SENSE: served ahead of discovery / housekeeping, which yield to it at their next chunk step; DL decode and scan keep strict priority */
+static void bg_lease_in_sense(int cell) { nr_pool_site_float_acquire(NR_POOL_SENSE, cell, 0); }
 static void bg_cores(cpu_set_t *cs, char *list, size_t nlist);
 static void bg_lease_out(void) { nr_pool_site_float_release(); }
 static void *bg_main(void *a)
 {
   bg_arg_t *arg = a;
-  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+  /* nice 19 (CFS weight 15 against 1024) for the verifiers and discovery. The data-aided tap workers (daBg*) carry sensing records the receiver exports, at ~2 % of a core: on the
+   * float lane 10-14 they shared cores with csirsDisc / pdcchUssHash leases held 20-230 ms and were descheduled for up to 0.5 s [MEASURED DGX 2026-11-01 async4: qwait p99 262-524 ms
+   * at nice 19, 85 us CPU per job]. nice 5 (weight 335) still yields to everything on the RT/pool cores (the lane has none of them) and gets its share of a contended lane core. */
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), strncmp(arg->name, "daBg", 4) ? 19 : 5);
   pthread_setname_np(pthread_self(), arg->name);
   if (arg->aff) {
     cpu_set_t cs;
@@ -885,6 +890,14 @@ static bgp_t *bgp_find(nr_bgq_t *q)
   pthread_mutex_unlock(&g_bgp_mu);
   return r;
 }
+int nr_bgq_lane_cores(void)
+{
+  cpu_set_t cs;
+  char list[128];
+  bg_cores(&cs, list, sizeof(list));
+  const int n = CPU_COUNT(&cs);
+  return n > 0 ? n : 1; /* an empty mask = unpinned lane: one worker's worth */
+}
 int nr_bgq_prepare(nr_bgq_t *q, unsigned cap, const char *name, int cell)
 {
   if (bgp_find(q))
@@ -899,7 +912,7 @@ int nr_bgq_prepare(nr_bgq_t *q, unsigned cap, const char *name, int cell)
   }
   nr_bgq_init(q, cap);
   q->cell = cell;
-  q->lease_in = bg_lease_in;
+  q->lease_in = strncmp(name, "daBg", 4) ? bg_lease_in : bg_lease_in_sense;
   q->lease_out = bg_lease_out;
   arg->q = q;
   arg->aff = 1;
@@ -929,7 +942,7 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
     char list0[128];
     bg_cores(&cs0, list0, sizeof(list0));
     pthread_detach(nr_cell_parked_thread(&bp->p));
-    LOG_A(PHY, "SENSING: background worker %s started: queue %u, cores %s, SCHED_OTHER nice 19\n", name, q->cap, list0);
+    LOG_A(PHY, "SENSING: background worker %s started: queue %u, cores %s, SCHED_OTHER nice %d\n", name, q->cap, list0, strncmp(name, "daBg", 4) ? 19 : 5);
     return 0;
   }
   nr_bgq_init(q, cap);
@@ -938,7 +951,7 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
     return -1;
   arg->q = q;
   q->cell = nr_cell_idx();
-  q->lease_in = bg_lease_in;
+  q->lease_in = strncmp(name, "daBg", 4) ? bg_lease_in : bg_lease_in_sense;
   q->lease_out = bg_lease_out;
   snprintf(arg->name, sizeof(arg->name), "%s", name);
   cpu_set_t cs;
@@ -961,7 +974,7 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
     free(arg);
     LOG_E(PHY, "SENSING: background worker %s: step=pthread_create errno=%d (%s)\n", name, rc, strerror(rc));
   }
-  LOG_A(PHY, "SENSING: background worker %s %s: queue %u, cores %s, SCHED_OTHER nice 19\n", name, rc ? "FAILED" : "started", q->cap, list);
+  LOG_A(PHY, "SENSING: background worker %s %s: queue %u, cores %s, SCHED_OTHER nice %d\n", name, rc ? "FAILED" : "started", q->cap, list, strncmp(name, "daBg", 4) ? 19 : 5);
   return rc ? -1 : 0;
 }
 

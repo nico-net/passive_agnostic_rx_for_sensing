@@ -62,7 +62,10 @@ typedef struct {
   uint64_t prod_ns[NR_SENSE_SRC_COUNT], pack_ns[NR_SENSE_SRC_COUNT];
   uint64_t rec_ns, write_ns, prod_count[NR_SENSE_SRC_COUNT], pack_count[NR_SENSE_SRC_COUNT];
   uint64_t rec_count, write_count;
+  uint64_t async_queued[NR_SENSE_SRC_COUNT], async_dropped[NR_SENSE_SRC_COUNT]; /* producer work handed to its background worker / shed because the worker was saturated (never run on the decode thread) */
 } nr_sense_stats_t;
+/* A producer that moves its work off the decode-critical thread reports each hand-off: queued = 1 taken by the worker, 0 = dropped (counted per source, no lock, any thread of the cell). */
+void nr_sense_async_note(nr_sense_src_t src, int queued);
 void nr_sense_stats(nr_sense_stats_t *out);
 /* The session is per cell: every call below acts on the session of the calling thread's cell (nr_cell_idx()). */
 void nr_sense_cell_file(int cell, const char *def, char *out, size_t n);

@@ -5,7 +5,7 @@
  * MODEL. The pool owns N cores. A thread leases ONE token (nr_pool_acquire), pins itself to that core while it holds it and, on release,
  * returns to the home mask (the float lane, never a pool core: no wake-up on a core somebody else now owns). At most N threads hold a
  * lease, so no two pool threads time-share a core. Consumers keep their stacks and thread-local state: the pool decides who runs, never
- * moves a job. Waiters are granted in strict priority (SCAN, DECODE, RETRY, DISC, HOUSE); inside a priority the waiting cell with the lowest
+ * moves a job. Waiters are granted in strict priority (SCAN, DECODE, RETRY, SENSE, DISC, HOUSE); inside a priority the waiting cell with the lowest
  * decayed token-time usage U_c first (half-life NR_POOL_USAGE_HALFLIFE_NS in nr_core_pool.c, equal weights, ties by round-robin across cells),
  * inside a cell oldest deadline first. Work conserving: an idle cell's share goes to the others at once. No preemption (no RT class). Guarantees:
  *  (a) EXCLUSIVITY. nr_pool_enforce() removes the pool cores from the mask of every task that is not a registered pool member (at start-up,
@@ -45,7 +45,11 @@ extern "C" {
 /* NR_POOL_CHAN (mpci CHANPOOL): the channelizer's CPU workers. Its index is the last one (stats arrays) but its URGENCY is the highest of the pool:
  * an IQ overrun of the wideband ring breaks every cell, a late decode one grant. It is bounded (see the CHAN block below), never promoted by age and
  * charges no cell (it works for all of them; its demand is taken off the pool size the per-cell fair share is computed on). */
-enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE, NR_POOL_CHAN, NR_POOL_NPRIO };
+/* NR_POOL_SENSE: the sensing exporters that run off the decode path (the data-aided PDSCH tap workers daBg*): short jobs (~0.1 ms) that carry records the receiver exports.
+ * Urgency rank: after SCAN, DECODE, RETRY and before DISC and HOUSE (urgency()), so a waiting SENSE job makes a running discovery / housekeeping lease yield at its next
+ * chunk step (nr_pool_yield). It counts as a low class in the caps (a token always stays for scan and decode, exactly as for RETRY / DISC / HOUSE), is promoted by age
+ * (nr_pool_cfg_default: 20 ms, at any pool size: it is a bounded, tiny demand) and is shared between cells like the other classes. Its index is before CHAN's. */
+enum { NR_POOL_SCAN = 0, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE, NR_POOL_SENSE, NR_POOL_CHAN, NR_POOL_NPRIO };
 /* OR into prio for first-pass UL decodes (own cap: all decode + low <= N-1; DL is counted separately and yields its last core to a waiting UL, see (b)). */
 #define NR_POOL_F_UL 0x100
 #define NR_POOL_MAX_TOKENS 32
