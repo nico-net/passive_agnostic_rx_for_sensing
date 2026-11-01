@@ -67,6 +67,7 @@ typedef struct {
 
 typedef struct {
   uint64_t leases[NR_POOL_NPRIO], waited[NR_POOL_NPRIO], promoted[NR_POOL_NPRIO], yields, nested, gpu_gives, enforced;
+  uint64_t gpu_resume_max_ns, gpu_resume_hist[NR_POOL_WAIT_BINS]; /* token re-acquire wait after a GPU-wait give (gpu_gives = the count) */
   uint64_t wait_max_ns[NR_POOL_NPRIO], hold_ns[NR_POOL_NPRIO];
   uint64_t wait_hist[NR_POOL_NPRIO][NR_POOL_WAIT_BINS];
   uint64_t busy_ns; /* sum of lease hold time over all tokens */
@@ -136,6 +137,14 @@ int nr_pool_site_filter_core(int core); /* threadCreate hook: an explicit pool c
  * lock another token holder blocks on and has no deadline abandonment (a re-acquire may take longer than the poll sleep). */
 void nr_pool_site_gpu_wait(void);
 void nr_pool_gpu_wait(nr_pool_t *);
+/* GPUQ: a first-pass DECODE lease (DL or UL) needs no give scope: its GPU wait gives the token away at the first poll sleep past the relax
+ * threshold when a waiter could use it, and keeps it away (token-less polls) until nr_pool_site_gpu_wait_end() at the exit of the poll loop, which
+ * re-acquires the same class/cell/deadline with RESUME priority (ahead of fresh waiters of its cell and class; the class caps and the scan
+ * reserve still apply, so the re-acquire is blocking only while the caps hold). Idempotent; no-op when nothing was given. */
+bool nr_pool_site_gpu_give(void); /* give the token now (same rule as the poll hook); true when it is given (now or before) and gpu_wait_end re-acquires it */
+bool nr_pool_gpu_give(nr_pool_t *);
+void nr_pool_site_gpu_wait_end(void);
+void nr_pool_gpu_wait_end(nr_pool_t *);
 void nr_pool_site_gpu_give_begin(void);
 void nr_pool_site_gpu_give_end(void);
 /* Park: release the caller's lease (if it holds one) across a wait for another pool user, remembering class/cell/deadline; unpark re-acquires

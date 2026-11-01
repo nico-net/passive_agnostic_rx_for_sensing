@@ -28,6 +28,7 @@
 #include <cuda_runtime.h>
 #include <nvtx3/nvToolsExt.h> /* header-only; a no-op unless a tool (nsys -t nvtx) is attached */
 #include "nr_gpu_green.h"
+#include "PHY/TOOLS/nr_gpu_poll.h"
 #include "nr_pdsch_gpu_prio.cuh"
 #include "PHY/TOOLS/nr_gpu_budget_cuda.h"
 #include "nr_pusch_gpu_fep.h" /* nr_pusch_gpu_fep_item_t: the layout of ulfep::Item (the PUSCH pass feeds k_ul_fep_p) */
@@ -1130,7 +1131,18 @@ static void pred_update(int ul, uint64_t key, uint32_t obs_ns)
   const uint32_t o = p.load(std::memory_order_relaxed);
   p.store(o ? (uint32_t)(((uint64_t)o * 7 + obs_ns) / 8) : obs_ns, std::memory_order_relaxed);
 }
+/* GPUQ: passes in flight at a launch (this one included), clipped to 1..4: how many same-window grants a batched launch could have merged (batch_size histogram) */
+static std::atomic<int> g_infl{0};
+static std::atomic<uint64_t> g_infl_hist[4];
+static void wait_done_inner(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns);
 static void wait_done(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns)
+{
+  const int n = g_infl.fetch_add(1) + 1;
+  ++g_infl_hist[std::min(std::max(n, 1), 4) - 1];
+  wait_done_inner(I, ul, key, t_launch_ns);
+  g_infl.fetch_sub(1);
+}
+static void wait_done_inner(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns)
 {
   cudaError_t e = cudaEventQuery(I.done);
   const int sp = g_spin_us.load();
@@ -1147,13 +1159,26 @@ static void wait_done(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns)
       /* sleep once to sp us before the predicted end, spin to 100 us after it (an unseen class: spin up to 500 us), then block on the event for outliers */
       const uint64_t now = nr_gpu_pass_now_ns();
       const uint64_t tgt = pred ? t_launch_ns + pred - (uint64_t)sp * 1000ull : 0, end = t_launch_ns + (pred ? (uint64_t)pred + 100000ull : 500000ull);
+      /* GPUQ: the thread waits for the GPU without a pool token (a first-pass DECODE lease gives it to a waiting grant for the predicted sleep, the unseen-class spin
+       * and the blocking fallback; nr_gpu_poll_end re-acquires it with resume priority before the tail spin). It was the only completion wait of the pass that never
+       * reached the give hook (CORE_POOL gpu_gives=0 on air): it does not use nr_gpu_poll_relax. */
       if (tgt > now + 20000) {
+        nr_gpu_poll_give();
         const struct timespec d = {(time_t)((tgt - now) / 1000000000ull), (long)((tgt - now) % 1000000000ull)};
         nanosleep(&d, nullptr);
+        nr_gpu_poll_end();
+      } else if (!pred) {
+        uint64_t pt = 0;
+        while ((e = cudaEventQuery(I.done)) == cudaErrorNotReady && nr_gpu_pass_now_ns() < end) nr_gpu_poll_relax(&pt);
+        nr_gpu_poll_end();
       }
       while ((e = cudaEventQuery(I.done)) == cudaErrorNotReady && nr_gpu_pass_now_ns() < end) {}
     }
-    if (e == cudaErrorNotReady) e = cudaEventSynchronize(I.done);
+    if (e == cudaErrorNotReady) {
+      nr_gpu_poll_give();
+      e = cudaEventSynchronize(I.done);
+      nr_gpu_poll_end();
+    }
   }
   if (e != cudaSuccess) g_dead = 1;
 }
@@ -1739,6 +1764,10 @@ extern "C" void nr_gpu_pass_stats(char *buf, int n)
            (unsigned long)o[5], (unsigned long)o[11], (unsigned long)o[6], (unsigned long)o[7], (unsigned long)o[9], (unsigned long)o[13], (unsigned long)o[12], (unsigned long)o[8],
            tot ? 1 << p50 : 0, (unsigned long)g_used_mb.load(), (unsigned long)stamp_q(0, 0, 50), (unsigned long)stamp_q(0, 0, 99), (unsigned long)stamp_q(0, 1, 50),
            (unsigned long)stamp_q(0, 1, 99), (unsigned long)stamp_q(0, 2, 50), (unsigned long)stamp_q(0, 2, 99), (unsigned long)o[15], (unsigned long)g_ovf_takes.load(), (unsigned long)g_ovf_waits.load(), (unsigned long)g_gate_skips.load(), (unsigned long)stamp_q(0, 3, 50), (unsigned long)stamp_q(0, 3, 99), (unsigned long)stamp_q(0, 4, 50), (unsigned long)stamp_q(0, 4, 99));
+  { /* GPUQ: passes in flight at launch */
+    const size_t l = strlen(buf);
+    snprintf(buf + l, n > (int)l ? n - l : 0, " inflight[1=%lu 2=%lu 3=%lu 4+=%lu]", (unsigned long)g_infl_hist[0].load(), (unsigned long)g_infl_hist[1].load(), (unsigned long)g_infl_hist[2].load(), (unsigned long)g_infl_hist[3].load());
+  }
   if (g_cfg.split) { /* v2 Task 3: mb = instance buffers + split graphs (cudaMemGetInfo deltas) */
     const size_t l = strlen(buf);
     snprintf(buf + l, n > (int)l ? n - l : 0, " GPUGRAPH split C=%lu D=%lu L=%lu execs=%lu mb=%lu (inst %lu graphs %lu, estimate) warm_ms=%lu capped=%lu unseen[C,D,L]=%lu,%lu,%lu",

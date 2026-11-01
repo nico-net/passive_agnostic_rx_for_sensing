@@ -9,14 +9,19 @@
  * with t0 = 0 before the loop. */
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include "nr_stage_split.h" /* ISAC_E2E_TRACE stage split: callers of the poll loops add their wait time */
 #include <time.h>
 
 /* core pool: a decode thread that has waited this long on the GPU gives its token away for the sleep when somebody waits (weak: absent in unit tests) */
 #ifdef __cplusplus
 extern "C" void nr_pool_site_gpu_wait(void) __attribute__((weak));
+extern "C" void nr_pool_site_gpu_wait_end(void) __attribute__((weak));
+extern "C" bool nr_pool_site_gpu_give(void) __attribute__((weak));
 #else
 extern void nr_pool_site_gpu_wait(void) __attribute__((weak));
+extern void nr_pool_site_gpu_wait_end(void) __attribute__((weak));
+extern bool nr_pool_site_gpu_give(void) __attribute__((weak));
 #endif
 
 static inline void nr_gpu_poll_relax_us(uint64_t *t0, int us)
@@ -41,3 +46,12 @@ static inline void nr_gpu_poll_relax_us(uint64_t *t0, int us)
 }
 
 static inline void nr_gpu_poll_relax(uint64_t *t0) { nr_gpu_poll_relax_us(t0, 200); }
+
+/* GPUQ: call once when the poll loop ends (success, error or abandon). A first-pass DECODE lease that gave its token away during the wait
+ * (nr_gpu_poll_relax -> nr_pool_site_gpu_wait) gets it back here with resume priority; no-op when nothing was given. */
+static inline bool nr_gpu_poll_give(void) { return nr_pool_site_gpu_give ? nr_pool_site_gpu_give() : false; }
+static inline void nr_gpu_poll_end(void)
+{
+  if (nr_pool_site_gpu_wait_end)
+    nr_pool_site_gpu_wait_end();
+}

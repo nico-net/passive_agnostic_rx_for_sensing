@@ -165,6 +165,7 @@ static void pass_slot_wait(cudaEvent_t ev) /* host: the slot's previous pass has
 {
   uint64_t pt = 0;
   while (cudaEventQuery(ev) == cudaErrorNotReady) nr_gpu_poll_relax(&pt);
+  nr_gpu_poll_end();
 }
 static std::mutex g_exact_staged_lock;
 /* Q4: DISCRETE staging of the standalone chest / delay entries. Their kernels read caller (host) memory in place on DIRECT; on DISCRETE each exact context owns
@@ -235,6 +236,7 @@ static int ctx_wait(int c, std::chrono::steady_clock::time_point t0, int sb)
   for (;;) {
     const cudaError_t q = cudaStreamQuery(g_ctx_stream[c]);
     if (q != cudaErrorNotReady) nr_ss_add(sb, ss0);
+    if (q != cudaErrorNotReady) nr_gpu_poll_end(); /* GPUQ: re-acquire the pool token a long wait gave away */
     if (q == cudaSuccess) return 0;
     if (q != cudaErrorNotReady) return (int)q;
     nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
@@ -1157,15 +1159,17 @@ extern "C" int nr_pdsch_gpu_exact_fep2(const int16_t *const *rxdata, uint32_t ri
   for (;;) {
     const cudaError_t q = cudaStreamQuery(g_stream);
     if (q == cudaSuccess) break;
-    if (q != cudaErrorNotReady) CK(q);
+    if (q != cudaErrorNotReady) { nr_gpu_poll_end(); CK(q); }
     nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
     if (std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() > g_exact_deadline_us) {
+      nr_gpu_poll_end();
       g_exact_pending = true;
       ++g_exact_late;
       nr_ss_add(NRSS_FEP, ss_w);
       return -1;
     }
   }
+  nr_gpu_poll_end();
   nr_ss_add(NRSS_FEP, ss_w);
   nr_stage::note(NR_GPU_STG_FEP, up_bytes, 1, (uint64_t)nant * (hi - lo + 1) * N * sizeof(short2), 1);
   for (int a = 0; a < nant; a++)

@@ -875,6 +875,7 @@ extern "C" int nr_pdsch_gpu_ldpc_run(nr_gpu_ldpc_job_t *jobs, int n)
   if (e == cudaSuccess)
     while ((e = cudaStreamQuery(x.s)) == cudaErrorNotReady)
       nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
+  nr_gpu_poll_end();
   nr_ss_add(NRSS_LDPC, ss0);
   if (e != cudaSuccess) {
     fprintf(stderr, "nr_pdsch_gpu_ldpc_run: %s\n", cudaGetErrorString(e));

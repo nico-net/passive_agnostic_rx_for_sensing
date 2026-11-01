@@ -2491,6 +2491,7 @@ extern "C" int nr_pdsch_gpu_demod_evm_wait(nr_gpu_demod_job_t *j)
   const uint64_t ss0 = nr_ss_now();
   while ((e = cudaStreamQuery(x.s2)) == cudaErrorNotReady)
     nr_gpu_poll_relax(&pt); /* P99: ISAC_GPU_POLL_SLEEP_US */
+  nr_gpu_poll_end();
   nr_ss_add(NRSS_DEMOD, ss0);
   if (e != cudaSuccess)
     return -1;
@@ -2597,6 +2598,7 @@ extern "C" int nr_pdsch_gpu_demod_run(nr_gpu_demod_job_t *j)
     } else
       break;
   }
+  nr_gpu_poll_end();
   nr_ss_add(NRSS_DEMOD, ss0);
   if (e != cudaSuccess) {
     fprintf(stderr, "nr_pdsch_gpu_demod_run: %s\n", cudaGetErrorString(e));

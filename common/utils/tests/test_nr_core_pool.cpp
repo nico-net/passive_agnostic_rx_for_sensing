@@ -727,10 +727,13 @@ TEST(CorePool, GpuWaitGivesOnlyInsideAGiveScopeToAGrantableWaiter)
   nr_pool_site_gpu_give_begin(); // nested
   nr_pool_site_gpu_give_end();
   nr_pool_gpu_wait(p); // a SCAN waiter exists: give
+  EXPECT_FALSE(nr_pool_holds(p)); // GPUQ: the token stays away until gpu_wait_end
+  nr_pool_gpu_wait_end(p);
   nr_pool_stats(p, &s);
   EXPECT_EQ(s.gpu_gives, 1u);
   EXPECT_EQ(w_got.load(), 1);
   EXPECT_TRUE(nr_pool_holds(p));
+  EXPECT_GE(s.gpu_resume_hist[0] + s.gpu_resume_hist[1] + s.gpu_resume_hist[2] + s.gpu_resume_hist[3] + s.gpu_resume_hist[4] + s.gpu_resume_hist[5] + s.gpu_resume_hist[6] + s.gpu_resume_hist[7] + s.gpu_resume_hist[8] + s.gpu_resume_hist[9] + s.gpu_resume_hist[10] + s.gpu_resume_hist[11] + s.gpu_resume_hist[12] + s.gpu_resume_hist[13] + s.gpu_resume_hist[14] + s.gpu_resume_hist[15] + s.gpu_resume_hist[16] + s.gpu_resume_hist[17] + s.gpu_resume_hist[18] + s.gpu_resume_hist[19] + s.gpu_resume_hist[20] + s.gpu_resume_hist[21] + s.gpu_resume_hist[22] + s.gpu_resume_hist[23], 1u);
   nr_pool_site_gpu_give_end();
   nr_pool_gpu_wait(p); // scope closed again: sleeps only
   nr_pool_stats(p, &s);
@@ -1352,5 +1355,37 @@ TEST(CorePoolSense, StatsLineHasTheClass)
   char buf[2048];
   ASSERT_GT(nr_pool_stats_line(p, buf, sizeof(buf)), 0);
   EXPECT_NE(std::string(buf).find(" sense[n=1 "), std::string::npos) << buf;
+  nr_pool_destroy(p);
+}
+
+// GPUQ: a first-pass DECODE lease needs no give scope; the token is away for the whole GPU wait (token-less polls), and the re-acquire has
+// RESUME priority over a fresh waiter of its own cell and class, whatever the deadlines.
+TEST(CorePool, DecodeGpuWaitGivesWithoutScopeAndResumesAheadOfFreshWaiters)
+{
+  nr_pool_t *p = mk(3); // DL decode cap N-1 = 2 for one cell
+  std::atomic<int> got_b{0}, hold_b{1}, hold_f1{1}, order{0}, f2_pos{0}, r_pos{0};
+  nr_pool_acquire(p, NR_POOL_DECODE, 0, 100); // the GPU waiter's lease
+  std::thread b([&] { nr_pool_acquire(p, NR_POOL_DECODE, 0, 50); got_b = 1; while (hold_b) usleep(100); nr_pool_release(p); });
+  wait_until([&] { return got_b.load() == 1; });
+  std::thread f1([&] { nr_pool_acquire(p, NR_POOL_DECODE, 0, 5); while (hold_f1) usleep(100); nr_pool_release(p); });
+  wait_waiting(p, 1);
+  std::thread f2([&] { nr_pool_acquire(p, NR_POOL_DECODE, 0, 10); f2_pos = ++order; nr_pool_release(p); }); // older deadline than the resumer, but fresh
+  wait_waiting(p, 2);
+  EXPECT_TRUE(nr_pool_gpu_give(p)); // no give scope; F1 gets the freed token
+  EXPECT_FALSE(nr_pool_holds(p));
+  std::thread rel([&] { wait_waiting(p, 2); hold_f1 = 0; }); // F2 and the resumer queued: now F1 lets go
+  nr_pool_gpu_wait_end(p);
+  r_pos = ++order;
+  nr_pool_release(p);
+  rel.join();
+  f2.join();
+  EXPECT_EQ(r_pos.load(), 1) << "the resumer must be granted before the fresh waiter with the older deadline";
+  EXPECT_EQ(f2_pos.load(), 2);
+  nr_pool_stats_t s;
+  nr_pool_stats(p, &s);
+  EXPECT_EQ(s.gpu_gives, 1u);
+  hold_b = 0;
+  b.join();
+  f1.join();
   nr_pool_destroy(p);
 }
