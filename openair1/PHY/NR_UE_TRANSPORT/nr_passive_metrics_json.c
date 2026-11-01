@@ -74,16 +74,18 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
   if (cb0_json(m, cb0, sizeof(cb0)) < 0)
     return -1;
   static const char *const source[] = {"ssb","csirs","pdsch_dmrs","pdsch_data","pusch_dmrs","pusch_data","prach","srs"};
-  char sense_cost[4096];
+  char sense_cost[6144];
   size_t cost_len=0;
   for (int s=0;s<NR_SENSE_SRC_COUNT;s++) {
     int z=snprintf(sense_cost+cost_len,sizeof(sense_cost)-cost_len,
       ",\"sense_prod_us_%s\":%" PRIu64 ",\"sense_pack_us_%s\":%" PRIu64
       ",\"sense_prod_count_%s\":%" PRIu64 ",\"sense_pack_count_%s\":%" PRIu64
-      ",\"sense_cfr_exported_%s\":%" PRIu64 ",\"sense_cfr_drop_%s\":%" PRIu64,
+      ",\"sense_cfr_exported_%s\":%" PRIu64 ",\"sense_cfr_drop_%s\":%" PRIu64
+      ",\"sense_async_queued_%s\":%" PRIu64 ",\"sense_async_drop_%s\":%" PRIu64,
       source[s],m->sense_prod_us[s],source[s],m->sense_pack_us[s],
       source[s],m->sense_prod_count[s],source[s],m->sense_pack_count[s],
-      source[s],m->sense_cfr_exported_src[s],source[s],m->sense_cfr_drop_src[s]);
+      source[s],m->sense_cfr_exported_src[s],source[s],m->sense_cfr_drop_src[s],
+      source[s],m->sense_async_queued_src[s],source[s],m->sense_async_drop_src[s]);
     if (z<0 || (size_t)z>=sizeof(sense_cost)-cost_len) return -1;
     cost_len+=(size_t)z;
   }
