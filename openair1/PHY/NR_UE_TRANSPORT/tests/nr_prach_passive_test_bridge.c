@@ -394,6 +394,12 @@ int test_prach_real_iq(const test_prach_real_cfg_t *cfg, test_prach_real_out_t *
     const bool inject = last && cfg->preamble >= 0;
     for (int a = 0; a < RIQ_NRX && ok; ++a) ok = riq_load_frame(cfg->capture_dir, a, cfg->t0 + (long)f * 2 * RIQ_FRAME, rx[a]);
     if (!ok) break;
+    if (cfg->input_scale > 0 && cfg->input_scale != 1.0)
+      for (int a = 0; a < RIQ_NRX; ++a)
+        for (long n = 0; n < RIQ_FRAME; ++n) {
+          rx[a][n].r = (int16_t)lround(rx[a][n].r * cfg->input_scale);
+          rx[a][n].i = (int16_t)lround(rx[a][n].i * cfg->input_scale);
+        }
     if (inject) {
       /* the occasion window of the PRODUCTION geometry is only used to MEASURE the noise power; the preamble position is spec-derived */
       const int nta = set_default_nta_offset(FR1, fp->samples_per_subframe);

@@ -191,7 +191,7 @@ NR_CELL_STATIC_INIT(_Atomic int, prach_floor_last, -1) /* 25th-percentile floor 
 #define prach_floor_last NR_CELL_REF(prach_floor_last)
 NR_CELL_STATIC(_Atomic uint64_t, prach_peak_zero)
 #define prach_peak_zero NR_CELL_REF(prach_peak_zero)
-NR_CELL_STATIC(_Atomic uint64_t, prach_peak_sum)
+NR_CELL_STATIC(_Atomic int64_t, prach_peak_sum)
 #define prach_peak_sum NR_CELL_REF(prach_peak_sum)
 NR_CELL_STATIC(_Atomic uint64_t, prach_seeded)
 #define prach_seeded NR_CELL_REF(prach_seeded)
@@ -257,7 +257,7 @@ void nr_prach_passive_diag_peaks(nr_prach_passive_peaks_t *p)
   p->peak_last = atomic_load_explicit(&prach_peak_last, memory_order_relaxed);
   p->peak_min = atomic_load_explicit(&prach_peak_min, memory_order_relaxed);
   p->peak_max = atomic_load_explicit(&prach_peak_max, memory_order_relaxed);
-  p->peak_mean = n ? (int)(atomic_load_explicit(&prach_peak_sum, memory_order_relaxed) / n) : 0;
+  p->peak_mean = n ? (int)(atomic_load_explicit(&prach_peak_sum, memory_order_relaxed) / (int64_t)n) : 0;
   p->floor_last = atomic_load_explicit(&prach_floor_last, memory_order_relaxed);
   p->peak_zero = atomic_load_explicit(&prach_peak_zero, memory_order_relaxed);
   p->seeded = atomic_load_explicit(&prach_seeded, memory_order_relaxed);
@@ -282,7 +282,7 @@ static int floor_compare(const void *a, const void *b)
   return (x > y) - (x < y);
 }
 
-static bool floor_detect(int fdm, int gain_db, int energy)
+static bool floor_detect_ex(int fdm, int gain_db, int energy, bool raw_zero)
 {
   if (fdm < 0 || fdm >= 8) return false;
   prach_floor_t *f = &floors[fdm];
@@ -290,8 +290,8 @@ static bool floor_detect(int fdm, int gain_db, int energy)
   f->gain_db = gain_db;
   bool detected = false;
   atomic_store_explicit(&prach_peak_last, energy, memory_order_relaxed);
-  atomic_fetch_add_explicit(&prach_peak_sum, (uint64_t)(energy > 0 ? energy : 0), memory_order_relaxed);
-  if (energy <= 0) atomic_fetch_add_explicit(&prach_peak_zero, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&prach_peak_sum, (int64_t)energy, memory_order_relaxed);
+  if (raw_zero) atomic_fetch_add_explicit(&prach_peak_zero, 1, memory_order_relaxed);
   if (energy > atomic_load_explicit(&prach_peak_max, memory_order_relaxed)) atomic_store_explicit(&prach_peak_max, energy, memory_order_relaxed);
   if (energy < atomic_load_explicit(&prach_peak_min, memory_order_relaxed)) atomic_store_explicit(&prach_peak_min, energy, memory_order_relaxed);
   if (f->count >= PRACH_FLOOR_SEED) {
@@ -310,6 +310,8 @@ static bool floor_detect(int fdm, int gain_db, int energy)
   if (f->count < PRACH_FLOOR_HISTORY) f->count++;
   return detected;
 }
+
+static bool floor_detect(int fdm, int gain_db, int energy) { return floor_detect_ex(fdm, gain_db, energy, energy <= 0); }
 
 /* The gNB scheduler owns this helper in normal PHY_NR builds. The passive UE
  * links only the receive half of nr_prach.c, so provide its identical table. */
@@ -572,6 +574,7 @@ static int u32_compare(const void *a, const void *b)
 
 /* Single-preamble test on a retained occasion. Returns 1 found, 0 absent, -1 not supported (restricted set). Unrestricted sets only: same preamble -> (root offset,
  * cyclic shift) map and window as rx_nr_prach. */
+static int lift_freq_bins(int n_rx, int n_occ, int n_zc);
 static int lookback_detect(const prach_job_t *rj, int fdm, int td, int rapid, int *energy, int *delay_samples)
 {
   if (rj->restricted_set != 0 || fdm >= rj->n_fdm || td >= rj->occasion.num_occasions) return -1;
@@ -603,6 +606,7 @@ static int lookback_detect(const prach_job_t *rj, int fdm, int td, int rapid, in
   item.pdu.num_ra = fdm;
   item.pdu.num_cs = NCS;
   nr_prach_rx_copied(&item, time_rx, (NR_DL_FRAME_PARMS *)&rj->fp, rj->nta, rj->sample_base);
+  const int lift = lift_freq_bins(rj->n_rx, rj->occasion.num_occasions, N_ZC);
 
   const int dft_sz = N_ZC == 839 ? 1024 : 256, log2_sz = N_ZC == 839 ? 10 : 8;
   c16_t *Xu = prach_xu[root_off];
@@ -634,7 +638,7 @@ static int lookback_detect(const prach_job_t *rj, int fdm, int td, int rapid, in
   mean /= n_trim;
   if (mean <= 0 || peak == 0) return 0;
   if (peak < mean * log(NCS2 / PRACH_LB_PFA)) return 0;
-  *energy = dB_fixed_times10((peak >> log2_sz) / rj->n_rx);
+  *energy = dB_fixed_times10((peak >> log2_sz) / rj->n_rx) - (int)lround(60.206 * lift);
   int d = best;
   const int mu = rj->fp.numerology_index;
   if (rj->sequence_length == 0) {
@@ -728,6 +732,36 @@ static void lookback_scan(void)
   }
 }
 
+/* The correlator is fixed point (int16 DFT bins, energy = (sum |ifft|^2 >> 10) / n_rx as an integer): an input 12 dB under the capture's UL noise floor (rms
+ * ~21 LSB) collapses the energy to 0..1 everywhere, no preamble can be seen and the floor never moves. The occasion's frequency-domain bins are therefore lifted by a
+ * power-of-two so their rms is >= 16 LSB (never lowered, never past int16 headroom), and the reported energy is referred back to the input scale (minus 6.02 dB per bit),
+ * so floors and margins stay comparable between occasions. */
+#define PRACH_MIN_RMS 16
+static int lift_freq_bins(int n_rx, int n_occ, int n_zc)
+{
+  double pw = 0;
+  int maxabs = 0;
+  for (int a = 0; a < n_rx; ++a)
+    for (int o = 0; o < n_occ; ++o)
+      for (int k = 0; k < n_zc; ++k) {
+        const c16_t v = prach_freq[a][o][k];
+        pw += (double)v.r * v.r + (double)v.i * v.i;
+        const int m = abs(v.r) > abs(v.i) ? abs(v.r) : abs(v.i);
+        if (m > maxabs) maxabs = m;
+      }
+  const double rms = sqrt(pw / (2.0 * n_rx * n_occ * n_zc));
+  int s = 0;
+  while (s < 10 && rms * (1 << s) < PRACH_MIN_RMS && (maxabs << (s + 1)) < 16384) ++s;
+  if (s == 0) return 0;
+  for (int a = 0; a < n_rx; ++a)
+    for (int o = 0; o < n_occ; ++o)
+      for (int k = 0; k < n_zc; ++k) {
+        prach_freq[a][o][k].r = (int16_t)(prach_freq[a][o][k].r * (1 << s));
+        prach_freq[a][o][k].i = (int16_t)(prach_freq[a][o][k].i * (1 << s));
+      }
+  return s;
+}
+
 static void process_job(const prach_job_t *job)
 {
 #ifdef NR_PASSIVE_PRACH_TEST
@@ -779,6 +813,7 @@ static void process_job(const prach_job_t *job)
     item.pdu.num_ra = fdm;
     item.pdu.num_cs = get_NCS(fd->prach_zero_corr_conf, job->format_raw, job->restricted_set);
     nr_prach_rx_copied(&item, time_rx, (NR_DL_FRAME_PARMS *)&job->fp, job->nta, job->sample_base);
+    const int lift = lift_freq_bins(job->n_rx, job->occasion.num_occasions, job->sequence_length == 0 ? 839 : 139);
 #ifdef NR_PASSIVE_PRACH_TEST
     atomic_fetch_add(&test_ru_calls, 1);
 #endif
@@ -787,7 +822,8 @@ static void process_job(const prach_job_t *job)
 #ifdef NR_PASSIVE_PRACH_TEST
       atomic_fetch_add(&test_correlator_calls, 1);
 #endif
-      if (!floor_detect(fdm, job->gain_db, res.max_preamble_energy)) continue;
+      const int energy = res.max_preamble_energy - (int)lround(60.206 * lift); /* input-referred, dB/10 */
+      if (!floor_detect_ex(fdm, job->gain_db, energy, res.max_preamble_energy <= 0)) continue;
       prach_detection_t *d = &pending[pending_head++ % PRACH_PENDING];
       if (d->valid) emit_detection(d, job->abs_slot);
       *d = (prach_detection_t){
@@ -801,7 +837,7 @@ static void process_job(const prach_job_t *job)
           .ra_slot = ra_slot(job->start_slot, job->fp.numerology_index, job->occasion.format),
           .slots_per_frame = job->fp.slots_per_frame, .fdm = fdm,
           .symbol = job->occasion.start_symbol + td * job->occasion.duration,
-          .preamble = res.max_preamble, .energy = res.max_preamble_energy,
+          .preamble = res.max_preamble, .energy = energy,
           .delay_samples = (int)lround((double)res.max_preamble_delay * job->fp.samples_per_subframe
                                        / (1920.0 * (1 << job->fp.numerology_index))),
           .pci = job->fp.Nid_cell};

@@ -47,6 +47,7 @@ typedef struct {
   double cfo_hz;            /* residual carrier offset of the received preamble (the capture is not CFO-corrected, see rx_cfo_applied_hz) */
   double rx_fo_hz;          /* carrier offset the receiver estimated and removes (ue->freq_offset with cont_fo_comp); 0: none */
   int rar_on, rar_rapid, rar_ta, rar_tc; /* a RAR (TS 38.321 RA-RNTI of the injected occasion) naming rar_rapid is decoded after the occasion */
+  double input_scale;       /* >0: the captured samples are scaled by this before anything else (a replay/gain chain that delivers a weaker input); 0: as captured */
   int fdm_index;            /* which of the msg1-FDM occasions carries it */
 } test_prach_real_cfg_t;
 typedef struct {
