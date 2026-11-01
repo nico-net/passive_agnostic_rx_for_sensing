@@ -3506,6 +3506,16 @@ if(ENABLE_TESTS)
   add_dependencies(test_nr_ssb_rate_match_prod dfts) # the decoder's FEP loads libdfts at run time
   add_dependencies(tests test_nr_ssb_rate_match_prod)
   add_test(NAME test_nr_ssb_rate_match_prod COMMAND ./test_nr_ssb_rate_match_prod)
+  # Async vs inline data-aided export, bit for bit (Nl = 1..4), and the shed-never-inline contract. The test defines its own nr_isac_* CFR sink ahead of the library's.
+  add_executable(test_nr_pdsch_data_aided_async ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_data_aided_async_check.c)
+  target_link_libraries(test_nr_pdsch_data_aided_async PRIVATE
+    -Wl,--allow-multiple-definition
+    -Wl,--start-group PHY_NR_UE PHY_NR_PASSIVE_UL PHY_NR_COMMON PHY_COMMON nr_phy_common nr_common nr_pdcch_blind_monitor NR_UE_ISAC nr_sense_api
+    SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB shlib_loader UTIL ds -Wl,--end-group
+    ${T_LIB} m pthread dl asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  add_dependencies(test_nr_pdsch_data_aided_async dfts)
+  add_dependencies(tests test_nr_pdsch_data_aided_async)
+  add_test(NAME test_nr_pdsch_data_aided_async COMMAND ./test_nr_pdsch_data_aided_async)
   # CSI-RS rate-matching RB extent (TS 38.211 7.4.1.5.3), production nr_dlsch_csi_rb_mask()/nr_dlsch_csi_unav_res().
   add_executable(test_nr_csi_rb_extent ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csi_rb_extent_check.c)
   target_link_libraries(test_nr_csi_rb_extent PRIVATE

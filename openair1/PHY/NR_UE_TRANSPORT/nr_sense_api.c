@@ -484,6 +484,12 @@ int nr_sense_push_rs_binary(nr_sense_src_t src, const nr_sense_rs_meta_t *meta, 
   record_count++; stats.rec_pushed++; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return 1;
 }
+void nr_sense_async_note(nr_sense_src_t src, int queued)
+{
+  if ((unsigned)src >= NR_SENSE_SRC_COUNT) return;
+  __atomic_fetch_add(queued ? &stats.async_queued[src] : &stats.async_dropped[src], 1, __ATOMIC_RELAXED);
+}
+
 void nr_sense_stats(nr_sense_stats_t *out)
 {
   if (!out) return;
