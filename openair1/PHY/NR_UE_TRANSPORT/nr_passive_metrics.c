@@ -35,6 +35,7 @@ __attribute__((weak)) void nr_prach_passive_metrics(uint64_t *us, uint64_t *drop
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
 __attribute__((weak)) void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *m);
 __attribute__((weak)) void nr_srs_passive_metrics(uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *);
+__attribute__((weak)) void nr_srs_passive_periodic_metrics(nr_ptrack_counters_t *, uint64_t *);
 __attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
 __attribute__((weak)) uint32_t nr_cfg_epoch_current(void);
 __attribute__((weak)) uint32_t nr_cfg_epoch_identity_gen(void);
@@ -146,6 +147,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
   if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped,
       &m->srs_pregate_skip,&m->srs_backoff_skip,&m->srs_budget_skip,&m->srs_idle_resets);
+  if(nr_srs_passive_periodic_metrics) nr_srs_passive_periodic_metrics(&m->periodic[NR_PTRACK_SRS],&m->srs_audits);
   m->pci = nr_cell_idx() == 0 ? atomic_load_explicit(&nr_passive_metrics_pci, memory_order_relaxed)
                                : atomic_load_explicit(&nr_passive_metrics_pci_slot_cells[nr_cell_idx()], memory_order_relaxed);
   const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();

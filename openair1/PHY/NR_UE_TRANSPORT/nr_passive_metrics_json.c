@@ -186,7 +186,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
     snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,
              m->csirs_disc_readmit_skipped);
   /* tail keys: own bounded buffer, appended after every pre-existing key */
-  char tail[768];
+  char tail[2048];
   int t = snprintf(tail, sizeof(tail), ",\"t_real_ns\":%" PRIu64 ",\"proc_utime_us\":%" PRIu64 ",\"proc_stime_us\":%" PRIu64
                    ",\"proc_maxrss_kb\":%" PRIu64 ",\"proc_minflt\":%" PRIu64 ",\"proc_majflt\":%" PRIu64,
                    m->t_real_ns, m->proc_utime_us, m->proc_stime_us, m->proc_maxrss_kb, m->proc_minflt, m->proc_majflt);
@@ -202,6 +202,16 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
   if (m->has_retry_yield && t > 0 && (size_t)t < sizeof(tail))
     t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"retry_yield_chains\":%" PRIu64 ",\"retry_yield_yields\":%" PRIu64 ",\"retry_yield_gated\":%" PRIu64,
                   m->retry_yield_chains, m->retry_yield_yields, m->retry_yield_gated);
+  {
+    static const char *const ptype[NR_PTRACK_TYPES] = {"srs", "csirs", "pucch", "cg"};
+    for (int i = 0; i < NR_PTRACK_TYPES && t > 0 && (size_t)t < sizeof(tail); i++)
+      t += snprintf(tail + t, sizeof(tail) - (size_t)t,
+                    ",\"periodic_%s_predicted\":%" PRIu64 ",\"periodic_%s_hit\":%" PRIu64 ",\"periodic_%s_miss\":%" PRIu64
+                    ",\"periodic_%s_demoted\":%" PRIu64 ",\"periodic_%s_confirmed\":%" PRIu64 ",\"periodic_%s_audit_hit\":%" PRIu64,
+                    ptype[i], m->periodic[i].predicted, ptype[i], m->periodic[i].hit, ptype[i], m->periodic[i].miss,
+                    ptype[i], m->periodic[i].demoted, ptype[i], m->periodic[i].confirmed, ptype[i], m->periodic[i].audit_hit);
+    if (t > 0 && (size_t)t < sizeof(tail)) t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"srs_audits\":%" PRIu64, m->srs_audits);
+  }
   if (t < 0 || (size_t)t >= sizeof(tail)) return -1;
   const int z = snprintf(buf + w, n - (size_t)w, "%s%s}", discovery, tail);
   return (z < 0 || (size_t)z >= n - (size_t)w) ? -1 : w + z;

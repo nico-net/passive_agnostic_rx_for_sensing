@@ -218,6 +218,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pss_decim.c
 openair1/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_attribution.c
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_blind.c
+openair1/PHY/NR_UE_TRANSPORT/nr_periodic_track.c
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_estimate.c
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_export.c
 openair1/PHY/NR_UE_TRANSPORT/nr_ssb_rate_match.c

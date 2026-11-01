@@ -161,6 +161,17 @@ TEST(PassiveMetrics,SrsCountersPresent) {
   EXPECT_NE(std::string(buf).find("\"srs_backoff_skip\":0"),std::string::npos);
   EXPECT_NE(std::string(buf).find("\"srs_budget_skip\":0"),std::string::npos);
 }
+TEST(PassiveMetrics,PeriodicCountersPerType) {
+  nr_passive_metrics_t m={};char buf[16384];
+  m.periodic[NR_PTRACK_SRS]={5,3,2,1,1,4};m.srs_audits=9;
+  ASSERT_GT(nr_passive_metrics_to_json(&m,buf,sizeof(buf)),0);
+  std::string j(buf);
+  for(const char *t:{"srs","csirs","pucch","cg"}) for(const char *k:{"predicted","hit","miss","demoted"})
+    EXPECT_NE(j.find(std::string("\"periodic_")+t+"_"+k+"\":"),std::string::npos) << t << k;
+  EXPECT_NE(j.find("\"periodic_srs_predicted\":5,\"periodic_srs_hit\":3,\"periodic_srs_miss\":2,\"periodic_srs_demoted\":1"),std::string::npos);
+  EXPECT_NE(j.find("\"srs_audits\":9"),std::string::npos);
+  EXPECT_EQ(j.back(),'}');
+}
 
 TEST(PassiveMetrics, PdschStageHistogramsAndReasons) {
   nr_passive_metrics_t m = {};

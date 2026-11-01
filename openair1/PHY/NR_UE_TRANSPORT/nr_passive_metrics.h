@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "nr_sense_api.h"
+#include "nr_periodic_track.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -60,6 +61,9 @@ typedef struct {
   uint64_t pusch_try, pusch_crc_ok;
   uint64_t srs_us, srs_jobs_dropped;
   uint64_t srs_pregate_skip, srs_backoff_skip, srs_budget_skip, srs_idle_resets;
+  /* periodic-resource prediction per resource type (SRS filled by the passive SRS searcher; the other types stay 0 until their detectors feed nr_periodic_track) */
+  nr_ptrack_counters_t periodic[NR_PTRACK_TYPES];
+  uint64_t srs_audits; /* blind SRS audit scans run while resources were tracked */
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
   /* per source: CFR frames exported / dropped on a full ring (the all-source totals are sense_cfr_drop and the sum of the exported); sense_unexported_*:
    * CRC-passing transport blocks (pdschq_crc_ok / pusch_crc_ok) minus CFR frames exported by the data-aided source (saturating) -- decoded but not exported */
