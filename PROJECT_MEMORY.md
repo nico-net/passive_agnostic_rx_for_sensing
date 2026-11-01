@@ -5575,7 +5575,7 @@ Evidence: every claim carries a §0.1 label. Where the session record does not n
 | Branch | Worktree | Content | State |
 |---|---|---|---|
 | `mpci-int-1031` | `wt/rr-int-1031` | §37 + `fix1031/gpuperf` + `fix1101/phasef` | local; nothing pushed, nothing merged to mpci-main or adaptive-rx-UL-DL |
-| `int1101/mlcfr` | | `int1101` + `fix1031/mlcfr` (windowed LS multi-layer data-aided CFR) | local |
+| `int1101/mlcfr` | | `mpci-int-1031` (incl. gpuperf + phasef) + `fix1031/mlcfr` (windowed LS multi-layer data-aided CFR) | local |
 | `cand1101` | | `int1101/mlcfr` + `pred1101/{prestage,harq,hash,periodic}` + `fix1101/recq` | local |
 | `cand1101c` | | `cand1101` + `fix1101/senseasync` (final `0e25b3f0ec`: NR_POOL_SENSE class) + `fix1101/srsq` (final `1c98569931`) + `fix1101/prach` (final `8d1faa4282`) | local |
 | `candgpuA` | `wt/rr-candgpuA` | `cand1101c` + `fix1101/gpuq` part A (`17de760ea7`) | local; tag `freeze-20261102` = OTA build for 2026-11-02 09:00 |
