@@ -817,6 +817,7 @@ static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
   /* passive RX, metrics only: DMRS SNR from mean smoothed |H|^2 and the nvar residual (nr_ulsch_dmrs_snr_db), before any
    * averaging; does not feed the equaliser or any decode decision. */
   float dmrs_snr_db = NAN;
+  float dmrs_noise_var = NAN;
   if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && dmrs_symb_idx > 0) {
     const int nsc = rel15_ul_ref->rb_size * NR_NB_SC_PER_RB;
     const int nsp = rel15_ul_ref->param_v4.numSpatialStreamIndices;
@@ -831,7 +832,10 @@ static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
           cnt += nsc;
         }
     }
-    if (cnt > 0) dmrs_snr_db = nr_ulsch_dmrs_snr_db(acc / cnt, (double)nvar);
+    if (cnt > 0) {
+      dmrs_snr_db = nr_ulsch_dmrs_snr_db(acc / cnt, (double)nvar);
+      dmrs_noise_var = nr_ulsch_dmrs_noise_var((double)nvar);
+    }
   }
 
   // averaging time domain channel estimates
@@ -1213,6 +1217,7 @@ static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
     pv->ulsch_power_tot = 0;
     pv->ulsch_noise_power_tot = 0;
     pv->ul_dmrs_snr_db = dmrs_snr_db;
+    pv->ul_dmrs_noise_var = dmrs_noise_var;
     for (int aarx = 0; aarx < num_sp_streams; aarx++) {
       pv->ulsch_power[aarx] = joint_pv->ulsch_power[aarx];
       pv->ulsch_noise_power[aarx] = joint_pv->ulsch_noise_power[aarx];

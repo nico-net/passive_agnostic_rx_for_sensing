@@ -86,7 +86,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t ul_slot_idx,
                                      uint32_t nof_ant,
                                      int slot,
-                                     int ta_applied_samples)
+                                     int ta_applied_samples,
+                                     float dmrs_snr_db)
 {
   if (!nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA)) {
     return;
@@ -282,7 +283,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .dl_center_hz    = fp->ul_CarrierFreq,
                                .pci             = fp->Nid_cell,
                                .slots_per_frame = fp->slots_per_frame};
-  const nr_sense_rs_meta_t rs_meta = {.rnti=g->rnti,
+  nr_sense_rs_meta_t rs_meta = {.rnti=g->rnti,
     .start_rb=g->bwp_start+g->start_rb, .nb_rb=g->num_rb,
     .ports=__builtin_popcount((unsigned)g->dmrs_ports), .port_mask=(int)g->dmrs_ports,
     .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
@@ -291,6 +292,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
     .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid};
   /* measured from H itself (second difference over adjacent REs), not a placeholder */
   const float noise_var = nr_sense_h_noise_var(h_buf, k_buf, l_buf, nof_re, cap, nant);
+  nr_sense_meta_set_snr(&rs_meta, dmrs_snr_db);
   nr_isac_submit_cfr_multi_meta(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier, h_buf, nant, cap,
                                 k_buf, l_buf, nof_re, noise_var, &rs_meta);
   atomic_fetch_add_explicit(&g_da_ok, 1, memory_order_relaxed);

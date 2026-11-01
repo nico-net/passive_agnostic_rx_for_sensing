@@ -902,10 +902,10 @@ int main(void)
     uint8_t tb[8] = {0};
     const uint64_t before = nr_isac_pdsch_data_aided_g_refused();
     // The transmitter's own bit counts, not the decoder's G: this guard is checked on its own.
-    nr_isac_pdsch_data_aided_submit(ue, &proc, &da.cw, &da.cfg, &da.fa, 0x1234, tb, 7, rxdataF, 1.0, 2 * da.n_tx);
+    nr_isac_pdsch_data_aided_submit(ue, &proc, &da.cw, &da.cfg, &da.fa, 0x1234, tb, 7, rxdataF, 1.0, 2 * da.n_tx, NAN);
     CHECK(nr_isac_pdsch_data_aided_g_refused() == before + 1, "C1: tap accepted decode G %u over an observed SSB",
           2 * da.n_tx);
-    nr_isac_pdsch_data_aided_submit(ue, &proc, &db.cw, &db.cfg, &db.fa, 0x1234, tb, 7, rxdataF, 1.0, 2 * db.n_tx);
+    nr_isac_pdsch_data_aided_submit(ue, &proc, &db.cw, &db.cfg, &db.fa, 0x1234, tb, 7, rxdataF, 1.0, 2 * db.n_tx, NAN);
     CHECK(nr_isac_pdsch_data_aided_g_refused() == before + 1, "C1: tap refused decode G %u with no hole", 2 * db.n_tx);
     free(rxdataF);
     free(ue);

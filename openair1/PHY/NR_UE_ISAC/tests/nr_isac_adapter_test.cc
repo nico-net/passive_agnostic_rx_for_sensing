@@ -15,6 +15,7 @@
 extern "C" {
 #include "nr_isac.h"
 #include "nr_sense_api.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr_cell.h"
@@ -379,6 +380,34 @@ TEST_F(Adapter, SessionsArePerCellWithOwnFiles) {
   EXPECT_NE(read(dir+"/records").find("\"type\":\"session\""),std::string::npos);
   EXPECT_NE(read(dir+"/records.cell1").find("\"type\":\"session\""),std::string::npos);
   EXPECT_FALSE(nr_isac_source_configured(NR_ISAC_SRC_SSB)) << "the primary's stop drops the configuration";
+#else
+  EXPECT_FALSE(nr_isac_enabled());
+#endif
+}
+
+/* Production export path (adapter -> records sink): the measured quality reaches the schema-2 rs line. */
+TEST_F(Adapter, RsRecordCarriesSnrAndNoiseVar) {
+  init(cfg(1,"pusch_dmrs,pdsch_dmrs"));
+  float iq[4*16*2]; uint32_t k[12], l[12];
+  for(int i=0;i<128;i++) iq[i]=i+0.25f;
+  for(int i=0;i<12;i++) { k[i]=100+i; l[i]=2; }
+  nr_isac_carrier_t carrier{106,30000,3500000000,42,20};
+  nr_sense_rs_meta_t meta{}; meta.rnti=0x4aE8; meta.start_rb=8; meta.nb_rb=1; meta.ports=1; meta.ssb_index=-1; meta.k_ssb=-1;
+  meta.ta_est_samples=-1; meta.transform_precoding=0; meta.dmrs_type=1; meta.dmrs_add_pos=-1; meta.dmrs_n_scid=0;
+  nr_sense_meta_set_snr(&meta,7.75f);
+  nr_isac_submit_cfr_multi_meta(1234,0,NR_ISAC_SRC_PUSCH_DMRS,&carrier,iq,4,16,k,l,12,0.625f,&meta);
+  nr_sense_meta_set_snr(&meta,-30.0f);   /* floored estimate: no snr, but the real noise variance stays */
+  nr_isac_submit_cfr_multi_meta(1235,0,NR_ISAC_SRC_PDSCH_DMRS,&carrier,iq,4,16,k,l,12,3.5f,&meta);
+  nr_isac_stop();
+#ifdef SENSE_ADAPTER_ON
+  const auto r=read(records);
+  const auto a=r.find("\"source\":\"pusch_dmrs\""), b=r.find("\"source\":\"pdsch_dmrs\"");
+  ASSERT_NE(a,std::string::npos); ASSERT_NE(b,std::string::npos);
+  const auto la=r.substr(a,r.find('\n',a)-a), lb=r.substr(b,r.find('\n',b)-b);
+  EXPECT_NE(la.find("\"noise_var\":0.625,"),std::string::npos) << la;
+  EXPECT_NE(la.find("\"snr_db\":7.75,"),std::string::npos) << la;
+  EXPECT_NE(lb.find("\"noise_var\":3.5,"),std::string::npos) << lb;
+  EXPECT_NE(lb.find("\"snr_db\":null"),std::string::npos) << lb;
 #else
   EXPECT_FALSE(nr_isac_enabled());
 #endif

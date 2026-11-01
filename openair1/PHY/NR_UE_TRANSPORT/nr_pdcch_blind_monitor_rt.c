@@ -10134,15 +10134,17 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
                                        .dl_center_hz    = fp->dl_CarrierFreq,
                                        .pci             = fp->Nid_cell,
                                        .slots_per_frame = fp->slots_per_frame};
-          const nr_sense_rs_meta_t rs_meta = {.rnti=out.rnti,
+          /* quality from the two numbers this block already holds: antenna-0 mean |H|^2 over the estimator's noise variance (the gate's own ratio), no extra pass */
+          const nr_sense_rs_meta_t rs_meta = nr_sense_meta_with_snr((nr_sense_rs_meta_t){.rnti=out.rnti,
             .start_rb=dlsch_pdu.BWPStart+freq_alloc.first_rb, .nb_rb=freq_alloc.num_rbs,
             .ports=__builtin_popcount((unsigned)out.dmrs_ports), .port_mask=(int)out.dmrs_ports, .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
-            .transform_precoding=-1, .dmrs_type=out.dmrs_config_type ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_pdu.nscid};
+            .transform_precoding=-1, .dmrs_type=out.dmrs_config_type ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_pdu.nscid},
+            nvar > 0 && h_pow_sum > 0.0 ? (float)(10.0 * log10(h_pow_sum / nof_re / (double)nvar)) : NAN);
           /* exported slot index: the producer's un-wrapped clock (hyper-frame extended), the one SSB/CSI-RS/pdsch_data/UL rows use; the
            * frame-derived abs_slot above stays the internal key (rings, hashes) */
           const uint32_t export_slot = (uint32_t)nr_sense_abs_slot_align(source_absolute_slot, proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame);
           nr_isac_submit_cfr_multi_meta(export_slot, 0.0f, dmrs_source, &carrier, isac_h, nof_ant,
-                                        273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar, &rs_meta);
+                                        273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, nvar > 0 ? (float)nvar : NAN, &rs_meta);
           NR_BLIND_CTR_INC(g_cfr_submits);
         }
 
@@ -10334,7 +10336,8 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
                   const uint64_t btim_t_sub = btim_on ? btim_now() : 0;
                   nr_isac_pdsch_data_aided_submit(ue, &proc_pd, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, dec.tb,
                                                   blind_harq_tag(abs_slot, out.rnti, out.harq_pid), rxdataF_pdsch,
-                                                  (double)dec.nvar, dec.G);
+                                                  (double)dec.nvar, dec.G,
+                                                  dec.dmrs_snr.comb_db > -90.f ? dec.dmrs_snr.comb_db : NAN);
                   btim_add(BTIM_SUBMIT, btim_t_sub);
                   NR_BLIND_CTR_INC(g_data_submits);
                 }

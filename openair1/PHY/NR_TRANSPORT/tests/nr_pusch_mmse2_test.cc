@@ -158,4 +158,7 @@ TEST(UlDmrsSnr, KnownNoise) {
   EXPECT_TRUE(std::isnan(nr_ulsch_dmrs_snr_db(1e6, 0)));
   EXPECT_TRUE(std::isnan(nr_ulsch_dmrs_snr_db(0, 5)));
   EXPECT_NEAR(-30.0f, nr_ulsch_dmrs_snr_db(1.0, 1e4), 1e-3); /* signal below the noise floor clamps, never NaN/inf */
+  /* the exported noise variance is the SNR's own sigma^2: resid2/(1-g); none -> NAN */
+  EXPECT_NEAR(10000.0f, nr_ulsch_dmrs_noise_var(8750), 1e-2);
+  EXPECT_TRUE(std::isnan(nr_ulsch_dmrs_noise_var(0)));
 }

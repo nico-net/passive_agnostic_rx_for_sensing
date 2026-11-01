@@ -2462,6 +2462,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     pvp->ulsch_power_tot = 0; /* n0_subband_power is only written by the gNB measurement code, never in passive mode: the old path also ends with noise power 0, so snr_db comes from the DM-RS */
     pvp->ulsch_noise_power_tot = 0;
     pvp->ul_dmrs_snr_db = IS_PASSIVE_RX_MODE(get_softmodem_params()) ? uout.dmrs_snr_db : NAN;
+    pvp->ul_dmrs_noise_var = IS_PASSIVE_RX_MODE(get_softmodem_params()) && isfinite(uout.dmrs_snr_db) ? nr_ulsch_dmrs_noise_var((double)uout.nvar) : NAN;
     pvp->log2_maxh = uout.log2_maxh;
     *unavp = 0;
     if (uout.est)
@@ -2661,7 +2662,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
          * the producer-timeline value FOR THIS SLOT. Exact while the lag stays under one wrap
          * (~10 slots in practice against a 20480-slot wrap). */
         const uint32_t ul_slot_idx = passive_ul_slow_time_idx(fp, frame, slot, abs_slot);
-        const nr_sense_rs_meta_t rs_meta = {
+        nr_sense_rs_meta_t rs_meta = {
           .rnti=g->rnti, .start_rb=g->bwp_start+g->start_rb, .nb_rb=g->num_rb,
           .ports=__builtin_popcount(g->dmrs_ports), .port_mask=g->dmrs_ports,
           .ssb_index=-1, .k_ssb=-1,
@@ -2669,9 +2670,11 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           .ta_est_samples=-1, .ta_applied_samples=out->ta_applied_samples, .ta_applied_valid=true,
           .transform_precoding=g->transform_precoding,
           .dmrs_type=g->dmrs_config_type+1, .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid};
+        /* the receiver's own DM-RS quality for this grant (already computed by the estimator; the same value UL_PUSCH_CRC prints) */
+        nr_sense_meta_set_snr(&rs_meta, pvp->ul_dmrs_snr_db);
         nr_isac_submit_cfr_multi_meta(ul_slot_idx, 0.0f,
                                       NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
-                                      ul_k, ul_l, nof_re, 1.0f, &rs_meta);
+                                      ul_k, ul_l, nof_re, pvp->ul_dmrs_noise_var, &rs_meta);
         /* Attribution uses a measured arrival estimate: actual FFT advance minus
          * final residual delay. It is not S34's applied-window metadata or UE TA. */
         if (nr_srs_passive_enabled())
@@ -3057,7 +3060,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b,
                                     NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,
                                     passive_ul_slow_time_idx(fp, frame, slot, abs_slot),
-                                    (uint32_t)nant, slot, out->ta_applied_samples);
+                                    (uint32_t)nant, slot, out->ta_applied_samples, pvp->ul_dmrs_snr_db);
   }
   return true;
 }
