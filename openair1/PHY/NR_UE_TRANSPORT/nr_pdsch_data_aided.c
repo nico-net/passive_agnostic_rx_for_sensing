@@ -623,7 +623,7 @@ NR_CELL_STATIC(nr_bgq_t, g_da_q)
 
 void nr_isac_pdsch_data_aided_async_prepare(int cell)
 {
-  if (!nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+  if (!nr_isac_source_configured(NR_ISAC_SRC_PDSCH_DATA)) /* configured, not enabled: the cell's session is not open before the RX fence */
     return;
   (void)nr_bgq_prepare(&g_da_q_cells[cell], DA_POOL, "daBg", cell);
 }
@@ -639,7 +639,7 @@ static void da_warm(void *arg)
 void nr_isac_pdsch_data_aided_async_init(const PHY_VARS_NR_UE *ue)
 {
   da_pool_t *P = &g_da;
-  if (atomic_load(&P->ready) || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+  if (atomic_load(&P->ready) || !nr_isac_source_configured(NR_ISAC_SRC_PDSCH_DATA)) /* configured, not enabled: no session is open before the RX fence */
     return;
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   P->stride = (uint32_t)fp->samples_per_slot_wCP;

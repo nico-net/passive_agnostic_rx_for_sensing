@@ -94,7 +94,12 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n)
 }
 
 /* strong definitions: the test executable links with --allow-multiple-definition and this object first */
+static int cap_session_open; /* the receiver calls prepare/init BEFORE the cell's session opens: enabled is false then, configured is true */
 int nr_isac_source_enabled(int source)
+{
+  return cap_session_open && source == NR_ISAC_SRC_PDSCH_DATA;
+}
+int nr_isac_source_configured(int source)
 {
   return source == NR_ISAC_SRC_PDSCH_DATA;
 }
@@ -274,8 +279,15 @@ int main(void)
   PHY_VARS_NR_UE *ue = calloc(1, sizeof(*ue));
   make_fp2(&ue->frame_parms);
   ue->nrLDPC_coding_interface.nrLDPC_coding_encoder = fake_encoder;
+  /* receiver start-up order (nr_pdsch_passive_queue.c): cell_prealloc -> _async_prepare, queue start -> _async_init, all before the session is open */
   nr_isac_pdsch_data_aided_async_prepare(0);
   nr_isac_pdsch_data_aided_async_init(ue);
+  cap_session_open = 1;
+  {
+    uint64_t q, d, n, sv;
+    nr_isac_pdsch_data_aided_async_counts(&q, &d, &n, &sv);
+    CHECK(d == 0, "pool not ready after the receiver's init sequence");
+  }
   c16_t(*rx)[14 * FFT] = aligned_alloc(64, sizeof(c16_t) * NANT * 14 * FFT);
   c16_t(*rx2)[14 * FFT] = aligned_alloc(64, sizeof(c16_t) * NANT * 14 * FFT);
   for (int nl = 1; nl <= 4; nl++) {
@@ -319,6 +331,11 @@ int main(void)
     usleep(500000);
     CHECK(cap_on_main_thread == 0, "the tap ran on the caller thread under saturation");
     printf("burst of 64 x Nl4 QAM256 90 PRB: %d queued, %d shed, 0 inline\n", queued, shed);
+  }
+  {
+    uint64_t q, d, n, sv;
+    nr_isac_pdsch_data_aided_async_counts(&q, &d, &n, &sv);
+    CHECK(q > 0 && n > 0, "queued %lu done %lu after the real init sequence", (unsigned long)q, (unsigned long)n);
   }
   if (failures) {
     fprintf(stderr, "%d failure(s)\n", failures);
