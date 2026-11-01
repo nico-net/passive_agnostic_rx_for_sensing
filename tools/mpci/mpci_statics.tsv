@@ -2131,9 +2131,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	329	nr_isac_pdsch_data_aided_
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	330	nr_isac_pdsch_data_aided_submit::sym_ypow	tls	double[NR_SYMBOLS_PER_SLOT]	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	447	nr_isac_pdsch_data_aided_submit::warned	tls	bool	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	476	nr_isac_pdsch_data_aided_submit::warned_ls	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	631	g_da	file_static	da_pool_t [converted]	PER_CELL	A5	cand1101 per-cell (NR_CELL_STATIC)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	637	da_wname	file_static	const char *const[DA_NW_MAX]	CONST	A5	auto
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	637	g_da_qs	file_static	da_qs_t [converted]	PER_CELL	A5	per-cell daBg queues (NR_CELL_STATIC)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	633	g_da	file_static	da_pool_t [converted]	PER_CELL	A5	cand1101 per-cell (NR_CELL_STATIC)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	639	da_wname	file_static	const char *const[DA_NW_MAX]	CONST	A5	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	639	g_da_qs	file_static	da_qs_t [converted]	PER_CELL	A5	per-cell daBg queues (NR_CELL_STATIC)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c	169	g_npool	file_static	int [converted]	PER_CELL	A5	converted (mpci audit): NR_CELL_STATIC, indexed by the calling thread's cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c	169	g_pmu	file_static	pthread_mutex_t	PROCESS	A5	mpci audit: locks of the DM-RS identity pool / vote tables (guard per-cell objects)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c	169	g_pool	file_static	g_pool_arr_t [converted]	PER_CELL	A5	converted (mpci audit): NR_CELL_STATIC, indexed by the calling thread's cell
