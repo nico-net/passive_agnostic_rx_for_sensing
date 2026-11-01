@@ -36,6 +36,14 @@ static const nr_snr_gate_mcs_t nr_snr_gate_tlow[] = {
     {2, 30}, {2, 40}, {2, 50}, {2, 64}, {2, 78}, {2, 99}, {2, 120}, {2, 157}, {2, 193}, {2, 251}, {2, 308}, {2, 379}, {2, 449}, {2, 526}, {2, 602},
     {4, 340}, {4, 378}, {4, 434}, {4, 490}, {4, 553}, {4, 616}, {6, 438}, {6, 466}, {6, 517}, {6, 567}, {6, 616}, {6, 666}, {6, 719}, {6, 772}};
 
+/* target code rate x 1024 of an MCS (0 = reserved / out of range index: a retransmission-only MCS carries no rate) */
+static inline double nr_snr_gate_r1024(int mcs, int tbl)
+{
+  const nr_snr_gate_mcs_t *t = tbl == 1 ? nr_snr_gate_t256 : tbl == 2 ? nr_snr_gate_tlow : nr_snr_gate_t64;
+  const int n = tbl == 1 ? (int)(sizeof nr_snr_gate_t256 / sizeof *t) : tbl == 2 ? (int)(sizeof nr_snr_gate_tlow / sizeof *t) : (int)(sizeof nr_snr_gate_t64 / sizeof *t);
+  return (mcs < 0 || mcs >= n) ? 0.0 : (double)t[mcs].r1024;
+}
+
 /* NAN for a reserved / out-of-range MCS (retransmission-only indices): such a grant is never gated */
 static inline double nr_required_snr_db(int mcs, int tbl)
 {

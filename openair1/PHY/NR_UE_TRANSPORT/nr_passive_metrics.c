@@ -243,6 +243,16 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   nr_pusch_passive_queue_get_stats(&uq);
   m->puschq_drop_epoch = uq.dropped_epoch;
   nr_pdsch_passive_ldpc_counters(&m->ldpc_ok, &m->ldpc_seg_fail, &m->ldpc_tb_fail, &m->ldpc_zero_tb);
+  {
+    nr_pdsch_passive_harq_stats_t hq;
+    nr_pdsch_passive_harq_stats(&hq);
+    m->hq_retx_combined = hq.retx_combined;
+    m->hq_retx_crc_ok = hq.retx_crc_ok;
+    m->hq_retx_no_history = hq.retx_no_history;
+    m->hq_retx_no_history_ok = hq.retx_no_history_ok;
+    m->hq_retx_refused = hq.retx_refused;
+    m->hq_evicted = hq.evicted_ndi + hq.evicted_lru + hq.evicted_age;
+  }
   { /* libldpc_cuda.so is dlopen'd RTLD_GLOBAL when --loader.ldpc.shlibversion _cuda is used; absent = zeros */
     typedef void (*cuda_ctr_t)(uint64_t *, uint64_t *, uint64_t *, uint64_t *);
     static cuda_ctr_t fn;

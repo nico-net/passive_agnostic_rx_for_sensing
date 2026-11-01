@@ -37,6 +37,52 @@ static inline int nr_hq_retx_rule(bool soft_valid, uint8_t e_ndi, uint32_t e_tbs
     return -1;
   return (rv != 0 || rv0_admitted) ? 1 : 0;
 }
+/* ---- retransmission anticipation (pred1101/harq) ------------------------------------------------------------------------------------------------------------------
+ * Eviction by age. The soft sum of a failed TB lives for the HARQ round-trip of the cell: the DL k1 of at most 15 slots, the gNB's scheduling of the retransmission and the
+ * HARQ-RTT/retransmission timers all fit in 150 ms of air time (numerology-independent: the window is converted with the frame's slot count). An older sum is a TB the gNB gave up
+ * on (or whose retransmission we missed): it is dropped instead of being combined into a different TB that reuses the pid with an unseen NDI toggle. */
+#define NR_HQ_WINDOW_MS 150
+static inline int64_t nr_hq_window_slots(int slots_per_frame)
+{
+  return (int64_t)NR_HQ_WINDOW_MS * (slots_per_frame > 0 ? slots_per_frame : 20) / 10;
+}
+static inline bool nr_hq_expired(bool soft_valid, int64_t soft_slot, int64_t now_slot, int64_t window_slots)
+{
+  return soft_valid && now_slot >= 0 && soft_slot >= 0 && now_slot - soft_slot > window_slots;
+}
+
+/* the NDI toggled on a process that still holds an undecoded sum: that TB is over (TS 38.321 5.3.2.2) and its sum is dropped when this grant restarts the process */
+static inline bool nr_hq_ndi_evicts(bool soft_valid, uint8_t e_ndi, uint8_t ndi)
+{
+  return soft_valid && e_ndi != ndi;
+}
+
+/* Is a retransmission self-decodable, i.e. does its own E bits carry every systematic column? TS 38.212 5.4.2.1: the circular buffer of N = 66Z (BG1) / 50Z (BG2) bits is read from
+ * k0(rv) = 0, 17Z, 33Z, 56Z (BG1) / 0, 13Z, 25Z, 43Z (BG2) for E bits and wraps; the first 2Z systematic columns are punctured, the systematic part is kb columns (22 / 10 at most).
+ * So a transmission holds all the information bits iff k0 + E >= N + kb Z (wrapped past the end over the columns 2..kb-1 again). E per code block follows from the code rate:
+ * E = kb Z / R (CRC and filler overhead ignored: the real rate is below the table's, E larger). The DCI is read before the TBS is known, so kb is not: k0 + kb Z (1/R - 1) grows with kb,
+ * hence the SMALLEST kb of the graph (TS 38.212 5.2.2: BG1 10 for B <= 640, BG2 6 for B <= 192) is the conservative one -- a true answer holds for any TBS. LBRM only shrinks N, which moves
+ * the wrap earlier, so the full N is conservative too. bg 0 = the base graph is not known either (TS 38.214 5.1.3.2: BG2 for R <= 0.25, BG1 above 0.67, either between): both must pass.
+ * rv 0 is always self-decodable (its first columns are the systematic ones). A rate outside (0, 1) is no code rate: false. */
+static inline bool nr_hq_alone_decodable(int bg, int rv, double r1024)
+{
+  if (rv == 0)
+    return true;
+  if (rv < 0 || rv > 3 || !(r1024 > 0.0) || r1024 >= 1024.0)
+    return false;
+  if (bg == 0) {
+    if (r1024 <= 256.0)
+      bg = 2;
+    else if (r1024 > 0.67 * 1024.0)
+      bg = 1;
+    else
+      return nr_hq_alone_decodable(1, rv, r1024) && nr_hq_alone_decodable(2, rv, r1024);
+  }
+  static const int k0z1[4] = {0, 17, 33, 56}, k0z2[4] = {0, 13, 25, 43};
+  const int kb = bg == 1 ? 10 : 6, nz = bg == 1 ? 66 : 50, k0 = bg == 1 ? k0z1[rv] : k0z2[rv];
+  const double ez = kb * 1024.0 / r1024;
+  return k0 + ez >= nz + kb;
+}
 /* worker side: take the entry lock, waiting up to `spins` naps; false = still held by a consumer (the sum stays; harmless, the TB is decoded) */
 static inline bool nr_hq_lock_wait(void *busy_p, void (*nap)(void), int spins)
 {

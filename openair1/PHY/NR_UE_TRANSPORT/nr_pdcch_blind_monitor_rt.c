@@ -15,6 +15,8 @@
 #include "nr_passive_cfg_epoch.h"
 #include "nr_pdcch_cell_len_hint.h"
 #include "nr_pdcch_cell_len_state.h"
+#include "nr_hq_retry.h"
+#include "nr_snr_gate.h"
 #include "nr_passive_reconf_rules.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
@@ -9259,7 +9261,13 @@ NR_CELL_STATIC(s_scr_logged_cell_t, s_scr_logged);
       /* A solved RNTI's retransmission (rv != 0 under its representative) is decoded when the HARQ store holds the failed earlier transmission of
        * its TB (same pid and NDI): it combines into that soft sum. Alone it is mostly parity; a TB already decoded needs nothing. */
       const int hq_state = rep >= 0 && out.rv != 0 ? nr_pdsch_passive_harqc_state(out.rnti, out.harq_pid, out.ndi) : 0;
-      if (!defer || !want_decode || (rep >= 0 && out.rv != 0 && hq_state != 2) || decodes_this_occasion >= cfg->pdsch_max_per_slot) {
+      /* No stored sum (first transmission missed, evicted, expired): the retransmission is decoded alone when its own bits carry the information (nr_hq_alone_decodable on the
+       * MCS code rate: rv 3 and low-rate rv 2/1 wrap past the circular buffer's end over the systematic columns); a failure then stores its sum for the next one. */
+      const bool hq_alone = hq_state == 0 && rep >= 0 && out.rv != 0
+                            && nr_hq_alone_decodable(0, out.rv, nr_snr_gate_r1024((int)out.mcs, (int)grant_mcs_table));
+      if (rep >= 0 && out.rv != 0 && hq_state == 0 && !hq_alone && defer && want_decode && decodes_this_occasion < cfg->pdsch_max_per_slot)
+        nr_pdsch_passive_harq_note_refused();
+      if (!defer || !want_decode || (rep >= 0 && out.rv != 0 && hq_state != 2 && !hq_alone) || decodes_this_occasion >= cfg->pdsch_max_per_slot) {
         nr_pdsch_solver_note_skip(out.rnti, !defer || !want_decode                        ? NR_PDSCH_SOLVER_WHY_GATE
                                             : decodes_this_occasion >= cfg->pdsch_max_per_slot ? NR_PDSCH_SOLVER_WHY_GATE_CAP
                                             : hq_state == 1                                    ? NR_PDSCH_SOLVER_WHY_GATE_RVOK

@@ -564,6 +564,49 @@ TEST_F(Cb0, EveryRvDecodesAloneAndCombined)
   }
 }
 
+/* pred1101/harq: nr_hq_alone_decodable (the monitor's gate for a retransmission without a stored sum) against the real chain. SOUND: whenever it says a
+ * retransmission carries the information in its own bits, that retransmission -- encoded by the OAI transmitter, clean LLRs -- decodes ALONE through the receiver's decoder, for
+ * every rv, a spread of code rates / Qm / Nl / sizes (C = 1 and C > 1, BG1 and BG2), LBRM off and binding. NOT VACUOUS: a mid-rate rv 1 / rv 2 is refused (the existing test
+ * shows they do not decode alone), a low-rate one is accepted. */
+TEST_F(Cb0, AloneDecodablePredicateIsSoundAgainstTheDecoder)
+{
+  struct Shape { uint8_t Qm, Nl; uint16_t R; uint16_t nrb; } shapes[] = {
+      {2, 1, 1200, 24}, {2, 2, 1570, 16}, {2, 1, 1200, 217}, {2, 1, 3080, 48}, {4, 2, 3400, 48}, {4, 1, 4340, 106}, {4, 2, 6160, 48},
+      {6, 2, 4380, 100}, {6, 2, 5550, 217}, {6, 1, 6660, 60}, {8, 2, 6825, 100}, {2, 1, 300, 12},
+  };
+  int accepted = 0, refused = 0;
+  for (const auto &sh : shapes)
+    for (int lb = 0; lb < 2; lb++)
+      for (uint8_t rv = 0; rv < 4; rv++) {
+        const uint32_t A = cb0_fx_tbs(sh.Qm, sh.R, sh.nrb, 12, 12, sh.Nl), G = cb0_fx_G(sh.nrb, 12, 12, 1, sh.Qm, sh.Nl);
+        uint32_t lbrm = 0;
+        if (lb) {
+          Fx probe(A, sh.R, sh.Qm, sh.Nl, 0, G);
+          lbrm = probe.fx.C * (probe.fx.BG == 1 ? 66u : 50u) * probe.fx.Z * 3 / 4;
+        }
+        const bool pred = nr_hq_alone_decodable(0, rv, sh.R / 10.0);
+        Fx f(A, sh.R, sh.Qm, sh.Nl, rv, G, lbrm, 31 + rv);
+        if (!pred) {
+          refused += rv != 0;
+          continue;
+        }
+        accepted += rv != 0;
+        int match = 0;
+        const nr_td_cb0_item_t it = f.item();
+        EXPECT_EQ(cb0_fx_rx_decode_bits(&it, f.fx.payload, &match), 1) << "Qm " << (int)sh.Qm << " nl " << (int)sh.Nl << " R " << sh.R << " nrb " << sh.nrb << " rv " << (int)rv << " lbrm " << lbrm
+                                                                         << " BG " << (int)f.fx.BG << " C " << f.fx.C;
+        EXPECT_EQ(match, 1);
+      }
+  EXPECT_GT(accepted, 8);
+  EXPECT_GT(refused, 8);
+  EXPECT_TRUE(nr_hq_alone_decodable(0, 3, 120.0));   // MCS 0 rv 3
+  EXPECT_FALSE(nr_hq_alone_decodable(0, 2, 553.0));  // 16QAM R 0.54 rv 2: parity only
+  EXPECT_FALSE(nr_hq_alone_decodable(0, 1, 553.0));
+  EXPECT_FALSE(nr_hq_alone_decodable(0, 3, 948.0));  // R 0.93: even the wrap holds fewer bits than the systematic columns
+  EXPECT_FALSE(nr_hq_alone_decodable(0, 3, 0.0));    // reserved MCS: no rate
+  EXPECT_TRUE(nr_hq_alone_decodable(0, 0, 948.0));   // rv 0 is the systematic start
+}
+
 /* CRC-BUGS 2026-10-19, bug 2 (reproducer): a failed first transmission is stored for (rnti, pid); a same-NDI grant with ANOTHER TBS (here a clean, self-decodable
  * MCS-0-like rv 3) used to be decoded INTO that buffer with the stored TBS -- it cannot pass. nr_hq_retx_rule says -1 for it: decoded alone it passes. */
 TEST_F(Cb0, SameNdiGrantWithAnotherTbsIsDecodedAlone)

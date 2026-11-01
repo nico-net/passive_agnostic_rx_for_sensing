@@ -775,6 +775,20 @@ NR_CELL_STATIC(_Atomic uint64_t, g_hqb_evict);
 #define g_hqb_evict NR_CELL_REF(g_hqb_evict)
 NR_CELL_STATIC(_Atomic uint64_t, g_hqb_nospace);
 #define g_hqb_nospace NR_CELL_REF(g_hqb_nospace) /* device HARQ blocks (GPU pass): sums dropped to make room, grants decoded without keeping theirs */
+/* HARQ retransmission anticipation (pred1101/harq): outcomes of the soft store. nohist = a retransmission (rv != 0) with no usable stored sum, decoded alone (a stored sum of another TBS counts too);
+ * evict_*: a live (undecoded) sum dropped -- ndi: the NDI toggled (the gNB moved on), lru: the entry was taken for another (rnti, pid), age: older than the HARQ window (nr_hq_retry.h). */
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_nohist);
+#define g_hq_nohist NR_CELL_REF(g_hq_nohist)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_nohist_ok);
+#define g_hq_nohist_ok NR_CELL_REF(g_hq_nohist_ok)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_nohist_refused);
+#define g_hq_nohist_refused NR_CELL_REF(g_hq_nohist_refused)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_evict_ndi);
+#define g_hq_evict_ndi NR_CELL_REF(g_hq_evict_ndi)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_evict_lru);
+#define g_hq_evict_lru NR_CELL_REF(g_hq_evict_lru)
+NR_CELL_STATIC(_Atomic uint64_t, g_hq_evict_age);
+#define g_hq_evict_age NR_CELL_REF(g_hq_evict_age)
 /* g_harqc's own lock (harqc_entry_t/g_harqc are declared further down, next to their only other
  * users) and the reserved-MCS retransmission record (gap-harq lane) that shares it -- both declared
  * this early, alongside the harqc counters above, for the SAME reason: nr_pdsch_passive_ldpc_stats_
@@ -1318,6 +1332,21 @@ void nr_pdsch_passive_ldpc_counters(uint64_t *ok, uint64_t *seg_fail, uint64_t *
   *tb_fail = atomic_load(&g_ldpc_tb_fail);
   *zero_tb = atomic_load(&g_ldpc_zero_tb);
 }
+void nr_pdsch_passive_harq_stats(nr_pdsch_passive_harq_stats_t *o)
+{
+  o->retx_combined = atomic_load(&g_hq_retx_try);
+  o->retx_crc_ok = atomic_load(&g_hq_retx_ok);
+  o->retx_no_history = atomic_load(&g_hq_nohist);
+  o->retx_no_history_ok = atomic_load(&g_hq_nohist_ok);
+  o->retx_refused = atomic_load(&g_hq_nohist_refused);
+  o->evicted_ndi = atomic_load(&g_hq_evict_ndi);
+  o->evicted_lru = atomic_load(&g_hq_evict_lru);
+  o->evicted_age = atomic_load(&g_hq_evict_age);
+}
+void nr_pdsch_passive_harq_note_refused(void)
+{
+  atomic_fetch_add(&g_hq_nohist_refused, 1);
+}
 NR_CELL_STATIC(_Atomic uint64_t, g_fep_hit);
 #define g_fep_hit NR_CELL_REF(g_fep_hit)
 NR_CELL_STATIC(_Atomic uint64_t, g_fep_miss);
@@ -1522,10 +1551,12 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     init_tx_hits   = g_dl_harq_init.hits;
     init_tx_evicts = g_dl_harq_init.evicts;
     pthread_mutex_unlock(&g_harqc_lock);
-    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | init_tx hit=%lu evict=%lu | dev_blocks evict=%lu nospace=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu | llr_norm shift0..4 [%lu %lu %lu %lu %lu]\n",
+    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | retx_no_history=%lu/%lu refused=%lu evicted ndi=%lu lru=%lu age=%lu | init_tx hit=%lu evict=%lu | dev_blocks evict=%lu nospace=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu | llr_norm shift0..4 [%lu %lu %lu %lu %lu]\n",
           (unsigned long)atomic_load(&g_hq_first), (unsigned long)atomic_load(&g_hq_retx_ok),
           (unsigned long)atomic_load(&g_hq_retx_try), (unsigned long)atomic_load(&g_hq_tbs_override),
           (unsigned long)atomic_load(&g_hq_busy_skip),
+          (unsigned long)atomic_load(&g_hq_nohist_ok), (unsigned long)atomic_load(&g_hq_nohist), (unsigned long)atomic_load(&g_hq_nohist_refused),
+          (unsigned long)atomic_load(&g_hq_evict_ndi), (unsigned long)atomic_load(&g_hq_evict_lru), (unsigned long)atomic_load(&g_hq_evict_age),
           (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts, (unsigned long)atomic_load(&g_hqb_evict), (unsigned long)atomic_load(&g_hqb_nospace),
           (unsigned long)atomic_load(&g_rv_census[0][0]), (unsigned long)atomic_load(&g_rv_census[0][1]),
           (unsigned long)atomic_load(&g_rv_census[0][2]), (unsigned long)atomic_load(&g_rv_census[0][3]),
@@ -1689,6 +1720,7 @@ typedef struct {
   uint16_t rnti;
   uint8_t pid, ndi;
   int64_t first_slot; /* absolute slot of the first transmission of the stored TB (a rescue retires only that TB) */
+  int64_t soft_slot;  /* absolute slot of the last transmission added to the sum (the age of the sum: nr_hq_expired) */
   uint32_t tbs;
   uint64_t last;
   int16_t *d;
@@ -1945,11 +1977,26 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
   return true;
 }
 static __thread bool t_hq_clear = true;
+static __thread bool t_hq_nohist = false; /* this grant is a retransmission decoded without a usable stored sum (counted by harq_retx_decide, credited at its CRC) */
 static __thread uint32_t t_hq_A = 0;
 
-static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid)
+/* now_slot < 0: no age sweep. The sweep drops the undecoded sums older than the HARQ window (idle entries only: a busy one is in a decode and refreshes itself); it runs
+ * under the store lock, which is also what claims an entry (busy), so an idle entry cannot be claimed while it is swept. It bounds the device blocks a sum that will never be
+ * retransmitted (the gNB gave up, or its RNTI left) holds. */
+static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid, int64_t now_slot, int slots_per_frame)
 {
   pthread_mutex_lock(&g_harqc_lock);
+  if (now_slot >= 0) {
+    const int64_t win = nr_hq_window_slots(slots_per_frame);
+    for (int i = 0; i < NR_HARQC_N; i++) {
+      harqc_entry_t *x = &g_harqc[i];
+      if (x->used && !atomic_load(&x->busy) && nr_hq_expired(x->soft_valid, x->soft_slot, now_slot, win)) {
+        x->soft_valid = false;
+        hqb_release(x);
+        atomic_fetch_add(&g_hq_evict_age, 1);
+      }
+    }
+  }
   harqc_entry_t *hit = NULL, *lru = NULL;
   for (int i = 0; i < NR_HARQC_N; i++) {
     harqc_entry_t *e = &g_harqc[i];
@@ -1964,6 +2011,8 @@ static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid)
     return NULL;
   }
   if (!hit) {
+    if (e->used && e->soft_valid)
+      atomic_fetch_add(&g_hq_evict_lru, 1); /* a live sum of another (rnti, pid) is taken over */
     hqb_release(e);
     e->used = true; e->rnti = rnti; e->pid = pid; e->soft_valid = false; e->tbs = 0; e->on_gpu = false;
   }
@@ -2243,6 +2292,12 @@ static int harq_retx_decide(const harqc_entry_t *e, const fapi_nr_dl_cw_info_t *
   const int d = nr_hq_retx_rule(e->soft_valid, e->ndi, e->tbs, ndi, cw->rv, cw->TBS, rv0_admitted);
   if (d < 0)
     atomic_fetch_add(&g_hq_tbs_override, 1); /* HARQC "tbs_from_first": now the count of same-NDI grants with another TBS, decoded alone */
+  if (d == 0 && nr_hq_ndi_evicts(e->soft_valid, e->ndi, ndi))
+    atomic_fetch_add(&g_hq_evict_ndi, 1); /* the NDI toggled: the stored TB is over, this grant restarts the process */
+  if (cw->rv != 0 && d <= 0) { /* no usable history: the retransmission is decoded alone (self-decodable ones reach here; the monitor refuses the others) */
+    atomic_fetch_add(&g_hq_nohist, 1);
+    t_hq_nohist = true;
+  }
   return d;
 }
 #undef s_rv0_retx_seen
@@ -2260,7 +2315,7 @@ int nr_pdsch_passive_harqc_test(int op, uint16_t rnti, uint8_t pid, uint8_t ndi,
     pthread_mutex_unlock(&g_harqc_lock);
     return n;
   }
-  harqc_entry_t *e = harqc_acquire(rnti, pid);
+  harqc_entry_t *e = harqc_acquire(rnti, pid, -1, 0);
   if (e == NULL)
     return -2;
   int r = 0;
@@ -2268,7 +2323,7 @@ int nr_pdsch_passive_harqc_test(int op, uint16_t rnti, uint8_t pid, uint8_t ndi,
     e->soft_valid = true;
     e->ndi = ndi;
     e->tbs = tbs;
-    e->first_slot = 1000;
+    e->first_slot = e->soft_slot = 1000;
   } else {
     fapi_nr_dl_cw_info_t cw;
     memset(&cw, 0, sizeof(cw));
@@ -2297,7 +2352,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   if (!t_hq.armed || t_probe_first_seg || t_quiet)
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
   t_hq.armed = 0; /* first call per TB only */
-  harqc_entry_t *e = harqc_acquire(t_hq.rnti, t_hq.pid);
+  harqc_entry_t *e = harqc_acquire(t_hq.rnti, t_hq.pid, t_hq.slot, ue->frame_parms.slots_per_frame);
   if (e == NULL) {
     atomic_fetch_add(&g_hq_busy_skip, 1);
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
@@ -2341,6 +2396,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
     atomic_fetch_add(&g_hq_first, 1);
   }
   e->ndi = t_hq.ndi;
+  e->soft_slot = t_hq.slot;
   if (!retx) e->first_slot = t_hq.slot;
   e->tbs = A;
   e->soft_valid = !ok; /* keep the soft bits only while the TB is still undecoded */
@@ -2680,6 +2736,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   out->cpe_deg = out->cpe_frac = out->evsd_pct = -1.f;
   t_gw_used = t_gw_ready = false;
   t_last_hq_retx = false;
+  t_hq_nohist = false;
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
   t_last_sk = -1;
   t_last_llr_have = t_last_data_bits = 0;
@@ -3214,7 +3271,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     /* DL HARQ soft combining in the pass: the same decision as passive_ldpc_decode (harq_retx_decide) on the same store; a probe is HARQ-neutral. The soft bits live in device blocks of the entry
      * (hqb_ensure); a stored sum that is still on the host (an earlier CPU decode) is uploaded first. Anything that cannot be arranged decodes without combining (counted) and leaves no stale sum. */
     if (gp_hq_arms() && !t_probe_first_seg && probe_last_sym < 0) {
-      gp_he = harqc_acquire(grant->rnti, grant->harq_pid);
+      gp_he = harqc_acquire(grant->rnti, grant->harq_pid, grant->source_absolute_slot, fp->slots_per_frame);
       if (gp_he == NULL) {
         atomic_fetch_add(&g_hq_busy_skip, 1); /* as the CPU path: decoded without combining */
       } else {
@@ -3298,6 +3355,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
           }
           t_last_hq_retx = gp_hq_retx;
           gp_he->ndi = grant->ndi;
+          gp_he->soft_slot = grant->source_absolute_slot;
           if (!gp_hq_retx) gp_he->first_slot = grant->source_absolute_slot;
           gp_he->tbs = gp_hq_retx ? gp_hq_A : cw->TBS;
           gp_he->soft_valid = !t_gpp->r.tb_ok; /* the soft bits are kept only while the TB is undecoded */
@@ -4458,6 +4516,8 @@ gpu_llr_ready:;
       atomic_fetch_add(&g_llr_tb[k], 1);
     }
     if (ldpc_ok) {
+      if (t_hq_nohist && !t_probe_first_seg && !t_quiet)
+        atomic_fetch_add(&g_hq_nohist_ok, 1);
       if (!t_probe_first_seg && !t_quiet && grant->dci11 && rnti_sweepable(grant->rnti, grant->rnti_class))
         mcs_table_evidence_feed(grant->mcs, grant->mcs_table);
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_OK;
@@ -4490,6 +4550,7 @@ gpu_llr_ready:;
   out->cb_tried = t_cb_tried;
   out->cb_total = t_cb_total;
   out->cb_map = t_cb_map;
+  out->hq_mode = t_last_hq_retx ? 1 : t_hq_nohist ? 2 : 0;
   /* GrantWork admissibility (fix round 1, I2): what the job's full decode did that CB0 from shared work does not. */
   if (t_gw != NULL && !t_quiet && !t_gw_capture) {
     uint32_t f = 0;

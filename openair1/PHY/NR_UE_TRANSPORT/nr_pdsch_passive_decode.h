@@ -181,6 +181,7 @@ typedef struct {
   float                snrx_db[4];   ///< XDIAG: decision-directed SNR per layer of the real equaliser output the LLRs are cut from (GPU demod, armed), -99 = n/a (EVMGRANT snrx=)
   float                cpe_deg, cpe_frac, evsd_pct; ///< PHASE-TRACK: mean |CPE| the tracker applied per (data symbol, layer) in degrees (0 included), fraction of (symbol, layer) pairs rotated, std (percentage points) of the per-symbol EVM across the data symbols; -1 = n/a (EVMGRANT cpe= cpes= evsd=)
   float                sdisp_p10_db, sdisp_std_db; ///< XDIAG: p10 and std (dB) of the per-group (48 packed REs) decision-directed SNR of layer 0 on that output, -99 = n/a (EVMGRANT sdisp=)
+  uint8_t              hq_mode;      ///< DL HARQ store: 0 first transmission / no store, 1 a retransmission combined into the stored sum, 2 a retransmission decoded alone (no usable history) (EVMGRANT hq=)
   uint64_t             cb_map;       ///< per-code-block CRC result, bit r = block r passed (blocks >= 64 not shown; an untried block reads 0) (EVMGRANT cbmap=)
 } nr_pdsch_passive_decode_result_t;
 
@@ -296,6 +297,15 @@ void nr_pdsch_passive_crc_note(uint16_t rnti, bool dedicated, bool crc_ok);
 uint32_t nr_pdsch_passive_rnti_ded_fails(uint16_t rnti);
 /** nr_scr_link_healthy() over the DL outcomes noted above. */
 bool nr_pdsch_passive_link_healthy(uint16_t rnti);
+/** Outcomes of the DL HARQ soft store of the calling thread's cell (the HARQC line, ISAC_METRICS hq_*): retx_combined = retransmissions combined into a stored sum, retx_crc_ok of those that passed CRC;
+ *  retx_no_history = retransmissions decoded alone (no stored sum of their TB), retx_no_history_ok of those that passed; retx_refused = no-history retransmissions the monitor did not decode (not self-decodable);
+ *  evicted_* = live sums dropped (NDI toggle / entry taken over / older than the HARQ window). */
+typedef struct {
+  uint64_t retx_combined, retx_crc_ok, retx_no_history, retx_no_history_ok, retx_refused, evicted_ndi, evicted_lru, evicted_age;
+} nr_pdsch_passive_harq_stats_t;
+void nr_pdsch_passive_harq_stats(nr_pdsch_passive_harq_stats_t *o);
+/** A solved RNTI's retransmission with no stored sum was not decoded because its code rate is too high for its own bits to hold the information (nr_hq_alone_decodable). */
+void nr_pdsch_passive_harq_note_refused(void);
 /** DL HARQ store state of (rnti, pid) for a grant with NDI `ndi` (a peek, no lock taken on the entry): 2 = a failed transmission of this TB is
  *  held (a retransmission combines into it), 1 = this TB was decoded, 0 = nothing known (no entry, evicted, another NDI). Thread's cell. */
 int nr_pdsch_passive_harqc_state(uint16_t rnti, uint8_t pid, uint8_t ndi);

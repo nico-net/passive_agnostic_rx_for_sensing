@@ -52,6 +52,8 @@ typedef struct {
   double td_cb0_us_per_item;
   uint64_t pdcch_inline_drop_epoch, puschq_drop_epoch;
   uint64_t ldpc_ok, ldpc_seg_fail, ldpc_tb_fail, ldpc_zero_tb;
+  /* DL HARQ soft store (retransmission anticipation): combined / CRC ok, no-history retransmissions decoded alone / CRC ok / refused, live sums evicted (NDI toggle, entry reuse, age) */
+  uint64_t hq_retx_combined, hq_retx_crc_ok, hq_retx_no_history, hq_retx_no_history_ok, hq_retx_refused, hq_evicted;
   /* CUDA LDPC pool (K34): launch/CUDA errors, TBs sent to the CPU decoder, poisoned slots; 0 when libldpc_cuda is not loaded */
   uint64_t ldpc_cuda_errors, ldpc_cuda_fallbacks, ldpc_cuda_poisoned;
   uint64_t ldpc_cuda_breaker_trips;   /* monotonic: times the CUDA breaker opened */

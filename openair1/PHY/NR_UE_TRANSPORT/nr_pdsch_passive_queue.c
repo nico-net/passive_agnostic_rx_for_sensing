@@ -1932,7 +1932,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       LOG_A(PHY, "SENSING: EVMGRANT rnti=0x%04x %d.%d crc=%d mcs=%u tbl=%u Qm=%u Nl=%u rb=%u+%u nsym=%u evm=%.1f snr=%.1f "
                  "br_snr=%.1f,%.1f,%.1f,%.1f nbrx=%u tok=%u snr_cpe=%.1f probe=%d kappa=%.2f alpha=%.2f,%.2f,%.2f,%.2f "
-                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d itc=%d its=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d gp=%u,%u,%u,%u,%u,%u,%u cb_ok=%u cb_tried=%u cb_total=%u%s%s%s psinr=%s snrx=%s sdisp=%.1f,%.1f cbmap=%llx S=%u dmrsm=0x%x cpe=%.2f cpes=%.2f evsd=%.2f irc=%.1f,%u\n",
+                 "nvar_db=%.1f,%.1f,%.1f,%.1f rho=%.2f comb=%d ports=0x%x cdm=%u ndmrs=%u eq=%d occ=%d it=%d itc=%d its=%d dec_us=%.0f rv=%u ndi=%u pid=%u tbs=%u snr_l=%.1f,%.1f,%.1f,%.1f l2=%d zabs=%.0f dmrs_snr=%.1f,%.1f,%.1f,%.1f,%.1f dmrs_pw=%.1f dmrs_ref=%.1f dsp=%u skip=%d gp=%u,%u,%u,%u,%u,%u,%u cb_ok=%u cb_tried=%u cb_total=%u%s%s%s psinr=%s snrx=%s sdisp=%.1f,%.1f cbmap=%llx S=%u dmrsm=0x%x cpe=%.2f cpes=%.2f evsd=%.2f irc=%.1f,%u hq=%u\n",
             job.rnti, job.frame_rx, job.nr_slot_rx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, job.grant.mcs, job.grant.mcs_table,
             dec.cw.qamModOrder, dec.cw.Nl, job.freq_alloc.first_rb, job.freq_alloc.num_rbs, dec.evm_nsym, dec.evm_pct,
             dec.evm_pct > 0.f ? -20.0 * log10(dec.evm_pct / 100.0) : 99.0, dec.br_snr_db[0], dec.br_snr_db[1], dec.br_snr_db[2],
@@ -1946,7 +1946,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             dec.dmrs_snr.ref_db, (unsigned)dec.dmrs_path, (int)dec.skip, nr_gp_tt[0], nr_gp_tt[1], nr_gp_tt[2], nr_gp_tt[3], nr_gp_tt[4], nr_gp_tt[5], nr_gp_tt[6],
             (unsigned)dec.cb_ok, (unsigned)dec.cb_tried, (unsigned)dec.cb_total, gq, e2e, stg, xd_psinr, xd_snrx, dec.sdisp_p10_db, dec.sdisp_std_db,
             (unsigned long long)dec.cb_map, (unsigned)job.dlsch_pdu.start_symbol, (unsigned)job.dlsch_pdu.dlDmrsSymbPos,
-            dec.cpe_deg, dec.cpe_frac, dec.evsd_pct, dec.irc_gain_db, (unsigned)dec.irc_groups);
+            dec.cpe_deg, dec.cpe_frac, dec.evsd_pct, dec.irc_gain_db, (unsigned)dec.irc_groups, (unsigned)dec.hq_mode);
       memset(nr_gp_tt, 0, sizeof(nr_gp_tt));
       if (!dec.skip && job.grant.scr_dedicated && job.grant.rnti_class == 0 && dec.dmrs_snr.comb_db > -90.f) /* IDQUAL: probes and full decodes alike */
         nr_dmrs_scan_note_decode(job.rnti, job.dlsch_pdu.dlDmrsScramblingId, dec.dmrs_snr.comb_db);
