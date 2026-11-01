@@ -99,6 +99,7 @@ nr_pool_cfg_t nr_pool_cfg_default(void)
   nr_pool_cfg_t c = {0};
   /* SCAN and DECODE are never promoted by age (the caps protect them); RETRY 4 ms (a late rescue is worth little after that), DISC 20 ms, HOUSE 100 ms */
   c.age_ns[NR_POOL_RETRY] = 4000000ull;
+  c.age_ns[NR_POOL_SENSE] = 20000000ull; /* never starved more than ~20 ms; a 0.1 ms job, so promotion into the reserve is affordable at any N */
   c.age_ns[NR_POOL_DISC] = 20000000ull;
   c.age_ns[NR_POOL_HOUSE] = 100000000ull;
   c.pin = true;
@@ -123,8 +124,12 @@ int nr_pool_chan_reserved_n(int n, int demand)
 static void dispatch(nr_pool_t *p, uint64_t now);
 static int chan_res(const nr_pool_t *p) { return nr_pool_chan_reserved_n(p->n, p->chan_demand); }
 /* Urgency rank (smaller = more urgent): CHAN first, then the classes in index order. */
-static const int g_order[NR_POOL_NPRIO] = {NR_POOL_CHAN, NR_POOL_SCAN, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_DISC, NR_POOL_HOUSE};
-static int urgency(int prio) { return prio == NR_POOL_CHAN ? -1 : prio; }
+static const int g_order[NR_POOL_NPRIO] = {NR_POOL_CHAN, NR_POOL_SCAN, NR_POOL_DECODE, NR_POOL_RETRY, NR_POOL_SENSE, NR_POOL_DISC, NR_POOL_HOUSE};
+static int urgency(int prio)
+{
+  static const int rank[NR_POOL_NPRIO] = {[NR_POOL_CHAN] = -1, [NR_POOL_SCAN] = 0, [NR_POOL_DECODE] = 1, [NR_POOL_RETRY] = 2, [NR_POOL_SENSE] = 3, [NR_POOL_DISC] = 4, [NR_POOL_HOUSE] = 5};
+  return rank[prio];
+}
 static bool per_cell(int prio) { return prio != NR_POOL_CHAN; }
 void nr_pool_set_chan_demand(nr_pool_t *p, int tokens)
 {
@@ -328,7 +333,7 @@ static bool class_ok(const nr_pool_t *p, int prio, bool promoted, bool ul, int c
   if (p->nfree - idle <= 0) return false;
   if (promoted) return true;
   const int n = p->n - res;
-  const int busy = p->n - p->nfree - p->cnt[NR_POOL_CHAN], low = p->cnt[NR_POOL_RETRY] + p->cnt[NR_POOL_DISC] + p->cnt[NR_POOL_HOUSE];
+  const int busy = p->n - p->nfree - p->cnt[NR_POOL_CHAN], low = p->cnt[NR_POOL_RETRY] + p->cnt[NR_POOL_SENSE] + p->cnt[NR_POOL_DISC] + p->cnt[NR_POOL_HOUSE];
   const int lim1 = n > 1 ? n - 1 : 1, lim2 = n > 2 ? n - 2 : 1;
   bool ulw = false; /* a UL decode is queued: DL gives up its last core (cap N-2) so the freed token goes to UL */
   if (prio == NR_POOL_DECODE && !ul)
@@ -453,8 +458,8 @@ static void grant(nr_pool_t *p, waiter_t *w, int tok, uint64_t now, bool promote
   if (wait > 50000000ull) { /* a lease wait this long: show who held the tokens (rate-limited) */
     static _Atomic int n_wait;
     if (atomic_fetch_add(&n_wait, 1) < 40)
-      fprintf(stderr, "SENSING: CORE_POOL long wait class=%d%s waited_ms=%lu free=%d held scan=%d decode=%d(dl %d) retry=%d disc=%d house=%d\n", w->prio,
-              w->ul ? "(ul)" : "", (unsigned long)(wait / 1000000ull), p->nfree, p->cnt[0], p->cnt[1], p->cnt_dl, p->cnt[2], p->cnt[3], p->cnt[4]);
+      fprintf(stderr, "SENSING: CORE_POOL long wait class=%d%s waited_ms=%lu free=%d held scan=%d decode=%d(dl %d) retry=%d disc=%d house=%d sense=%d\n", w->prio,
+              w->ul ? "(ul)" : "", (unsigned long)(wait / 1000000ull), p->nfree, p->cnt[NR_POOL_SCAN], p->cnt[NR_POOL_DECODE], p->cnt_dl, p->cnt[NR_POOL_RETRY], p->cnt[NR_POOL_DISC], p->cnt[NR_POOL_HOUSE], p->cnt[NR_POOL_SENSE]);
   }
   uint64_t us = wait / 1000;
   int b = 0;
@@ -596,8 +601,8 @@ void nr_pool_release(nr_pool_t *p)
       const double d = demand_decay(now > p->dem_t[rcell] ? now - p->dem_t[rcell] : 0, NR_POOL_DEMAND_HALFLIFE_NS);
       const double h = (double)(now - tl.t_grant);
       if (!p->dem_t0[rcell]) p->dem_t0[rcell] = tl.t_grant ? tl.t_grant : now;
-      p->dem_ess[rcell] = p->dem_ess[rcell] * d + (prio == NR_POOL_DISC || prio == NR_POOL_HOUSE ? 0.0 : h);
-      p->dem_shed[rcell] = p->dem_shed[rcell] * d + (prio == NR_POOL_DISC || prio == NR_POOL_HOUSE ? h : 0.0);
+      p->dem_ess[rcell] = p->dem_ess[rcell] * d + (prio == NR_POOL_DISC || prio == NR_POOL_HOUSE || prio == NR_POOL_SENSE ? 0.0 : h);
+      p->dem_shed[rcell] = p->dem_shed[rcell] * d + (prio == NR_POOL_DISC || prio == NR_POOL_HOUSE || prio == NR_POOL_SENSE ? h : 0.0);
       if (now > p->dem_t[rcell]) p->dem_t[rcell] = now;
     }
   }
@@ -648,7 +653,7 @@ static uint64_t hist_q_us(const uint64_t *h, double q)
   return 1ull << (NR_POOL_WAIT_BINS - 1);
 }
 
-static const char *const k_cls_nm[NR_POOL_NPRIO] = {"scan", "decode", "retry", "disc", "house", "chan"};
+static const char *const k_cls_nm[NR_POOL_NPRIO] = {"scan", "decode", "retry", "disc", "house", "sense", "chan"};
 
 /* the process-wide part: header + one block per class */
 static int pool_line_proc(const nr_pool_stats_t *sp, const nr_pool_t *p, char *buf, int len)
@@ -657,7 +662,7 @@ static int pool_line_proc(const nr_pool_stats_t *sp, const nr_pool_t *p, char *b
   int o = snprintf(buf, (size_t)len, "SENSING: CORE_POOL n=%d yields=%lu gpu_gives=%lu nested=%lu enforced=%lu", p ? p->n : 0, (unsigned long)s.yields,
                 (unsigned long)s.gpu_gives, (unsigned long)s.nested, (unsigned long)s.enforced);
   for (int i = 0; i < NR_POOL_NPRIO && o < len; i++) {
-    if (i == NR_POOL_CHAN && !s.leases[i]) continue; /* no channelizer: the line is the pre-CHAN one */
+    if ((i == NR_POOL_CHAN || i == NR_POOL_SENSE) && !s.leases[i]) continue; /* no channelizer / no sensing exporter: the line is the pre-CHAN / pre-SENSE one */
     o += snprintf(buf + o, (size_t)(len - o), " %s[n=%lu waited=%lu promo=%lu wait_us p50<=%lu p99<=%lu max=%lu]", k_cls_nm[i],
                   (unsigned long)s.leases[i], (unsigned long)s.waited[i], (unsigned long)s.promoted[i],
                   (unsigned long)hist_q_us(s.wait_hist[i], 0.5), (unsigned long)hist_q_us(s.wait_hist[i], 0.99),
@@ -919,7 +924,7 @@ bool nr_pool_site_float_merged(void)
 int nr_pool_site_float_acquire(int prio, int cell, uint64_t enq_ns)
 {
   if (!nr_pool_site_float_merged()) return -1;
-  if (prio != NR_POOL_DISC && prio != NR_POOL_HOUSE) prio = NR_POOL_HOUSE; /* floats are never above DISC */
+  if (prio != NR_POOL_SENSE && prio != NR_POOL_DISC && prio != NR_POOL_HOUSE) prio = NR_POOL_HOUSE; /* floats are never above SENSE */
   return nr_pool_acquire(g_site, prio, cell, enq_ns);
 }
 void nr_pool_site_float_release(void) { nr_pool_site_release(); }
