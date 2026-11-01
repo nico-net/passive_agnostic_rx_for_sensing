@@ -28,6 +28,9 @@ typedef struct nr_sense_rs_meta_s {
   bool stamp_valid;
   int ta_est_samples, transform_precoding, dmrs_type, dmrs_add_pos, dmrs_n_scid;
   int ta_applied_samples, port_mask;
+  /* Multi-layer PDSCH data-aided CFR (one frame per layer): layer_idx1 = 1-based layer of this frame, n_layers = rank of the grant.
+   * 0 = not a per-layer frame; the JSON keys are then absent (records of single-layer sources are unchanged). */
+  int layer_idx1, n_layers;
   bool ta_applied_valid;
   int prach_preamble;
   float prach_energy, prach_delay;

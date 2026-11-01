@@ -46,6 +46,7 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "nr_pdsch_mimo_ls.h"
 #include "nr_sense_api.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "executables/nr-uesoftmodem.h"
@@ -59,6 +60,32 @@ static void *da_tls_buf(void **p, size_t n)
 {
   if (!*p) *p = aligned_alloc(64, (n + 63) / 64 * 64);
   return *p;
+}
+
+/* Submit the rows [off, off+cnt) of the estimate: one frame at Nl = 1 (exactly the original call), one frame per layer at Nl > 1.
+ * Layer l's plane block starts nant*stride complex entries after layer l-1's; its frame carries the single DM-RS port the layer
+ * is transmitted on (the l-th lowest set bit of dmrs_ports, TS 38.212 7.3.1.1/7.3.1.2 order) plus layer/n_layers. */
+static void da_emit(uint32_t slot_idx, float frac, const nr_isac_carrier_t *carrier, const nr_sense_rs_meta_t *rs_meta, uint16_t dmrs_ports,
+                    uint32_t nl, const float *h, uint32_t nant, uint32_t stride, const uint32_t *k, const uint32_t *l, uint32_t off,
+                    uint32_t cnt, float nvar)
+{
+  if (nl <= 1) {
+    nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, &h[2 * (size_t)off], nant, stride, &k[off], &l[off],
+                                  cnt, nvar, rs_meta);
+    return;
+  }
+  uint32_t ports = dmrs_ports;
+  const bool port_known = (uint32_t)__builtin_popcount(ports) == nl;
+  for (uint32_t lay = 0; lay < nl; lay++) {
+    nr_sense_rs_meta_t m = *rs_meta;
+    m.ports = 1;
+    m.port_mask = port_known ? (int)(ports & -ports) : -1;
+    if (port_known) ports &= ports - 1;
+    m.layer_idx1 = (int)lay + 1;
+    m.n_layers = (int)nl;
+    nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, &h[2 * ((size_t)lay * nant * stride + off)], nant,
+                                  stride, &k[off], &l[off], cnt, nvar, &m);
+  }
 }
 
 uint64_t nr_isac_pdsch_data_aided_g_refused(void)
@@ -100,33 +127,22 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   if (!nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
     return;
 
-  /* SINGLE LAYER ONLY -- and this is a correctness guard, not a scope preference.
-   *
-   * The extraction below computes Ĥ[k] = Y[k]/X[k] as a SCALAR division per (RE, rx antenna). That
-   * is only valid when one modulation symbol is transmitted per RE. At Nl > 1 the receive sample is
-   * a superposition, y_a[k] = sum_l h_{a,l}[k] * x_l[k], so dividing by any single layer's x_l
-   * leaves the other layers' contributions in the "channel estimate" -- it does not merely add
-   * noise, it produces a CFR that is not a channel at all, and a plausible-looking but wrong range
-   * profile. Recovering the per-layer h_{a,l} needs a LEAST-SQUARES SOLVE over a window of REs
-   * (4 rx antennas give 4 equations per RE against Nl*nb_ant unknowns, so W >= Nl REs must be
-   * pooled assuming H is flat across them) -- deliberately NOT attempted here.
-   *
-   * The passive DECODE path now supports Nl > 1 (nr_pdsch_passive_decode.c), so a rank-4 grant will
-   * decode and its CRC pass rate is measurable; it just cannot contribute a CFR row until that
-   * solve exists. Contributing nothing is always preferable to corrupting the range profile -- the
-   * same rule the DM-RS-symbol RE-enumeration bug below is written under. */
-  if (cw->Nl != 1) {
+  /* MULTI-LAYER (Nl = 2..4): Ĥ[k] = Y[k]/X[k] is a SCALAR division and is only valid when one modulation symbol is transmitted
+   * per RE. At Nl > 1 the receive sample is a superposition, y_a[k] = sum_l h_{a,l}[k] * x_l[k]; dividing by one layer's x_l
+   * leaves the other layers in the "channel estimate" -- a CFR that is not a channel at all. The per-layer h_{a,l} is recovered by
+   * a windowed least-squares solve over W adjacent data REs of one symbol (nr_pdsch_mimo_ls.h), one CFR frame per layer. Nl = 1
+   * keeps the scalar path below, unchanged. Nl > 4 (two codewords) is not reconstructed: contributing nothing is always preferable
+   * to corrupting the range profile. */
+  if (cw->Nl < 1 || cw->Nl > NR_MIMO_LS_MAX_NL) {
     static __thread bool warned_ml = false;
     if (!warned_ml) {
       warned_ml = true;
-      LOG_W(NR_PHY,
-            "SENSING: data-aided CFR skipped -- grant has Nl=%u layers and Ĥ=Y/X is only valid at "
-            "Nl=1 (needs a windowed least-squares MIMO solve). The TB still decodes; only the CFR "
-            "submission is suppressed.\n",
-            cw->Nl);
+      LOG_W(NR_PHY, "SENSING: data-aided CFR skipped -- grant has Nl=%u layers (only 1..%d are reconstructed)\n", cw->Nl,
+            NR_MIMO_LS_MAX_NL);
     }
     return;
   }
+  const uint32_t nl = cw->Nl;
   nr_sense_prod_scope_t prod __attribute__((cleanup(nr_sense_prod_scope_stop))) =
       {NR_SENSE_SRC_PDSCH_DATA,nr_sense_now_ns()};
 
@@ -141,9 +157,9 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // --- Segment into code blocks (must run again here to fill actual per-segment bytes: the decode
   // path only sized C/K/Z/F, passing NULL/NULL for input/output). ---
   static __thread uint8_t (*seg_storage)[8448];
-  if (!da_tls_buf((void **)&seg_storage, sizeof(*seg_storage) * MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER)) return;
-  static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
-  for (int r = 0; r < MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER; r++)
+  if (!da_tls_buf((void **)&seg_storage, sizeof(*seg_storage) * MAX_NUM_NR_DLSCH_SEGMENTS)) return;
+  static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS];
+  for (int r = 0; r < MAX_NUM_NR_DLSCH_SEGMENTS; r++)
     c_segs[r] = seg_storage[r];
 
   nrLDPC_TB_encoding_parameters_t TB_parameters = {0};
@@ -155,7 +171,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   TB_parameters.A = A;
   TB_parameters.Kb = nr_segmentation((unsigned char *)tb_bytes, c_segs, B, &TB_parameters.C, &TB_parameters.K,
                                      &TB_parameters.Z, &TB_parameters.F, TB_parameters.BG);
-  if (TB_parameters.C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER) {
+  if (TB_parameters.C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER * nl) {
     LOG_W(NR_PHY, "SENSING: data-aided tap skipped -- too many segments C=%u\n", TB_parameters.C);
     return;
   }
@@ -177,12 +193,12 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // sub-slot bookkeeping arrays below shifted the layout and produced an immediate GP fault inside
   // nr_modulation's `out128[i] = ...` store. Pin it explicitly so the layout can never break it again.
   static __thread uint8_t *coded_bits;
-  const size_t coded_sz = (273 * 12 * 14 * 8 + 63) / 64 * 64 + 64;
+  const size_t coded_sz = (273 * 12 * 14 * 8 * NR_MIMO_LS_MAX_NL + 63) / 64 * 64 + 64; // G = REs * Qm * Nl
   if (!da_tls_buf((void **)&coded_bits, coded_sz)) return;
   memset(coded_bits, 0, coded_sz);
   TB_parameters.output = coded_bits;
 
-  static __thread nrLDPC_segment_encoding_parameters_t segments[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
+  static __thread nrLDPC_segment_encoding_parameters_t segments[MAX_NUM_NR_DLSCH_SEGMENTS];
   memset(segments, 0, sizeof(segments));
   TB_parameters.segments = segments;
   for (uint32_t r = 0; r < TB_parameters.C; r++) {
@@ -210,12 +226,13 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   }
 
   // --- Scramble (same Gold-sequence XOR the gNB TX side uses) + modulate. ---
-  static __thread uint32_t scrambled[(273 * 12 * 14 * 8 + 31) / 32 + 1] __attribute__((aligned(32)));
+  static __thread uint32_t *scrambled; // heap, 64-byte aligned: G reaches REs * Qm * Nl
+  if (!da_tls_buf((void **)&scrambled, sizeof(uint32_t) * ((273 * 12 * 14 * 8 * NR_MIMO_LS_MAX_NL + 31) / 32 + 1))) return;
   nr_codeword_scrambling(coded_bits, TB_parameters.G, 0 /* codeword index */, dlsch_config->dlDataScramblingId,
                         rnti, scrambled);
 
   static __thread c16_t *mod_syms;
-  if (!da_tls_buf((void **)&mod_syms, sizeof(c16_t) * 273 * 12 * 14)) return;
+  if (!da_tls_buf((void **)&mod_syms, sizeof(c16_t) * 273 * 12 * 14 * NR_MIMO_LS_MAX_NL)) return;
   nr_modulation(scrambled, TB_parameters.G, cw->qamModOrder, (int16_t *)mod_syms);
 
   // --- RE mapping: sweep the allocation symbol by symbol, increasing frequency within each, taking
@@ -253,6 +270,17 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   }
   static __thread uint32_t isac_k[273 * 12 * 14];
   static __thread uint32_t isac_l[273 * 12 * 14];
+  /* Nl > 1 scratch (heap, lazily): the gathered Y planes the LS solve reads and the per-window output coordinates. At Nl > 1 the
+   * output has one row per window of >= 2*Nl >= 4 REs, so isac_max_re / 4 rows per plane hold every window, and Nl*nant such planes
+   * fit the isac_h allocation made for the Nl = 1 layout. */
+  const uint32_t win_cap = isac_max_re / 4;
+  static __thread c16_t *ygath;
+  static __thread uint32_t *win_k;
+  if (nl > 1) {
+    if (!da_tls_buf((void **)&ygath, sizeof(c16_t) * NR_MIMO_LS_MAX_ANT * isac_max_re) ||
+        !da_tls_buf((void **)&win_k, sizeof(uint32_t) * 2 * win_cap + sizeof(uint16_t) * win_cap))
+      return;
+  }
   // Per-contributing-symbol slice bookkeeping, for sub-slot sampling: REs are emitted symbol by
   // symbol below, so each symbol owns a contiguous [start, start+count) span of the arrays.
   static __thread uint32_t sym_id[NR_SYMBOLS_PER_SLOT];
@@ -318,6 +346,21 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                 j % NR_NB_SC_PER_RB);
         re = (int)((fp->first_carrier_offset + k_abs) % fp->ofdm_symbol_size);
       }
+      if (nl > 1) {
+        /* RE ordinal nof_re carries layer symbols mod_syms[nof_re*nl .. +nl) (TS 38.211 7.3.1.3: x_l(i) = d(nl*i + l)); no |X| guard:
+         * the LS window judges the conditioning of the whole X. */
+        mod_idx += nl;
+        for (uint32_t a = 0; a < isac_nof_ant; a++) {
+          const c16_t y = rxdataF[a][l * fp->ofdm_symbol_size + re];
+          ygath[(size_t)a * isac_max_re + nof_re] = y;
+          if (a == 0)
+            ypow += (double)y.r * y.r + (double)y.i * y.i;
+        }
+        isac_k[nof_re] = k_abs;
+        isac_l[nof_re] = (uint32_t)l;
+        nof_re++;
+        continue;
+      }
       const c16_t x = mod_syms[mod_idx++];
       const float xr = (float)x.r, xi = (float)x.i;
       const float xmag2 = xr * xr + xi * xi;
@@ -359,7 +402,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // trusted. One-shot LOG_W, not an assert: this runs on the RT path and contributing nothing is
   // always preferable to killing the receiver.
   const uint32_t expected_syms = TB_parameters.G / (cw->qamModOrder * cw->Nl);
-  if (mod_idx != expected_syms) {
+  if (mod_idx != expected_syms * nl) { // mod_idx counts modulation symbols: nl per RE
     static __thread bool warned = false;
     if (!warned) {
       warned = true;
@@ -367,10 +410,47 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
             "SENSING: data-aided RE enumeration consumed %u modulation symbols but rate matching produced %u "
             "(nb_rb=%u nb_symb=%u dmrs_mask=0x%x cdm_groups=%u type=%u) -- the reconstructed X is MISALIGNED and "
             "every submitted CFR from this grant shape is invalid\n",
-            mod_idx, expected_syms, freq_alloc->num_rbs, dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos,
+            mod_idx / nl, expected_syms, freq_alloc->num_rbs, dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos,
             dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType);
     }
     return; // contribute nothing rather than corrupt the range profile
+  }
+
+  /* Estimate/export arrays the sub-slot tail below slices. Nl = 1: the Y/X rows just built. Nl > 1: one row per LS window
+   * (planes [layer][antenna] of win_cap rows). sym_raw keeps the RE count per symbol for the SNR / coverage gates, which judge
+   * the data actually pooled, whatever the number of rows it became. */
+  const float    *e_h = isac_h;
+  const uint32_t *e_k = isac_k, *e_l = isac_l;
+  uint32_t        e_stride = isac_max_re, e_nre = nof_re;
+  uint32_t        sym_raw[NR_SYMBOLS_PER_SLOT];
+  for (uint32_t i = 0; i < nof_sym; i++)
+    sym_raw[i] = sym_count[i];
+  if (nl > 1) {
+    uint32_t *win_l = win_k + win_cap;
+    uint16_t *win_raw = (uint16_t *)(win_l + win_cap);
+    nr_pdsch_mimo_ls_info_t li;
+    const int nw = nr_pdsch_mimo_ls_cfr((int)nof_re, (int)nl, (int)isac_nof_ant, (const int16_t *)mod_syms, isac_k, isac_l,
+                                        (const int16_t *)ygath, isac_max_re, (int)win_cap, win_cap, isac_h, win_k, win_l, win_raw, &li);
+    if (nw <= 0) {
+      static __thread bool warned_ls = false;
+      if (!warned_ls) {
+        warned_ls = true;
+        LOG_W(NR_PHY, "SENSING: data-aided multi-layer CFR: no estimable LS window (Nl=%u, %u data REs)\n", nl, nof_re);
+      }
+      return;
+    }
+    e_h = isac_h;
+    e_k = win_k;
+    e_l = win_l;
+    e_stride = win_cap;
+    e_nre = (uint32_t)nw;
+    uint32_t w = 0;
+    for (uint32_t i = 0; i < nof_sym; i++) {
+      sym_start[i] = w;
+      while (w < e_nre && win_l[w] == sym_id[i])
+        w++;
+      sym_count[i] = w - sym_start[i];
+    }
   }
 
   nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
@@ -412,8 +492,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   const uint32_t sub_target = nr_isac_subslot_config(&sub_min_re, &sub_min_snr_db);
 
   if (sub_target == 0 || nof_sym <= 1) {
-    nr_isac_submit_cfr_multi_meta(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
-                                  isac_k, isac_l, nof_re, (float)nvar, &rs_meta);
+    da_emit(slot_idx, 0.0f, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l, 0, e_nre,
+            (float)nvar);
     return;
   }
 
@@ -422,16 +502,17 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   uint32_t emitted = 0;
   for (uint32_t i = 0; i < nof_sym; i++) {
     const uint32_t nsym = i - g_first + 1;
-    uint32_t g_re = 0;
+    uint32_t g_re = 0, g_out = 0; // g_re: data REs pooled (gates); g_out: rows to submit
     double   g_yp = 0.0;
     for (uint32_t t = g_first; t <= i; t++) {
-      g_re += sym_count[t];
+      g_re += sym_raw[t];
+      g_out += sym_count[t];
       g_yp += sym_ypow[t];
     }
     // Estimated coherent SNR of this group, in dB.
     const double per_re = (g_re > 0) ? ((g_yp / (double)g_re) - nv) / nv : -1.0;
     const double snr_db = (per_re > 0.0) ? 10.0 * log10(per_re * (double)g_re) : -99.0;
-    const bool   gates_ok = (g_re >= sub_min_re) && (snr_db >= (double)sub_min_snr_db);
+    const bool   gates_ok = (g_re >= sub_min_re) && (snr_db >= (double)sub_min_snr_db) && g_out > 0;
     const bool   is_last  = (i + 1 == nof_sym);
 
     if ((nsym >= sub_target && gates_ok) || (is_last && gates_ok)) {
@@ -440,24 +521,23 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
       // Slice, not copy: ant_stride_re stays the FULL buffer stride so antenna a's slice starts at
       // the same symbol offset within its own plane.
-      nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                                    isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
-                                    g_re, (float)nvar, &rs_meta);
+      da_emit(slot_idx, frac, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l,
+              sym_start[g_first], g_out, (float)nvar);
       emitted++;
       g_first = i + 1;
     } else if (is_last) {
       // Tail that never passed the gates: merge it BACKWARDS by re-emitting from g_first to the end
       // as one row if nothing has been emitted yet, otherwise fold it into the whole-slot fallback.
       if (emitted == 0) {
-        nr_isac_submit_cfr_multi_meta(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
-                                      isac_k, isac_l, nof_re, (float)nvar, &rs_meta);
+        da_emit(slot_idx, 0.0f, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l, 0, e_nre,
+                (float)nvar);
         emitted++;
       } else {
         const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
         const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
-        nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                                      isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
-                                      g_re, (float)nvar, &rs_meta);
+        if (g_out > 0)
+          da_emit(slot_idx, frac, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l,
+                  sym_start[g_first], g_out, (float)nvar);
       }
     }
   }

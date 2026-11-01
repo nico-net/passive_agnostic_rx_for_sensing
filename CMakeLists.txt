@@ -1033,6 +1033,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_early_start.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_mimo_ls.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pucch_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/csi_rx.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c
@@ -2826,6 +2827,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_dmrs_nid_solve PRIVATE UTIL GTest::gtest m)
   add_dependencies(tests test_nr_dmrs_nid_solve)
   add_test(NAME test_nr_dmrs_nid_solve COMMAND ./test_nr_dmrs_nid_solve)
+
+  add_executable(test_nr_pdsch_mimo_ls ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_mimo_ls_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_mimo_ls.c)
+  target_include_directories(test_nr_pdsch_mimo_ls PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_mimo_ls PRIVATE GTest::gtest GTest::gtest_main m)
+  add_dependencies(tests test_nr_pdsch_mimo_ls)
+  add_test(NAME test_nr_pdsch_mimo_ls COMMAND ./test_nr_pdsch_mimo_ls)
 
   add_executable(test_nr_scrambling_id_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_scrambling_id_sweep_test.cc
                                              ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c)

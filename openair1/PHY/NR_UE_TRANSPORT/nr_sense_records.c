@@ -107,6 +107,7 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   integer(&j,"dmrs_type",m->dmrs_type);
   integer(&j,"dmrs_add_pos",m->dmrs_add_pos);
   integer(&j,"dmrs_n_scid",m->dmrs_n_scid);
+  if (m->layer_idx1 > 0) { integer(&j,"layer",m->layer_idx1 - 1); integer(&j,"n_layers",m->n_layers); }
   quoted(&j,"ul_timing_ref",ul?"dl_frame":NULL);
   integer(&j,"preamble",src==NR_SENSE_SRC_PRACH?m->prach_preamble:-1);
   real(&j,"energy",src==NR_SENSE_SRC_PRACH?m->prach_energy:NAN);

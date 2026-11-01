@@ -2107,22 +2107,25 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c	2993	nr_pdsch_config_sweep_
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c	3414	g_sweep	file_static	nr_pdsch_config_sweep_state_t	PROCESS	A5	mpci audit: legacy single-instance test API (nr_pdsch_config_sweep_*_global), not used by the receive pipeline
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c	3415	g_sweep_on	file_static	bool	PROCESS	A5	mpci audit: legacy single-instance test API (nr_pdsch_config_sweep_*_global), not used by the receive pipeline
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	33	nr_isac_abs_slot_override	tls	uint64_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	54	g_data_aided_g_refused	file_static	_Atomic uint64_t	PROCESS	A5	aggregate counter of refused data-aided submissions (atomic telemetry)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	119	nr_isac_pdsch_data_aided_submit::warned_ml	tls	bool	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	145	nr_isac_pdsch_data_aided_submit::c_segs	tls	uint8_t *[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	179	nr_isac_pdsch_data_aided_submit::coded_bits	tls	uint8_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	185	nr_isac_pdsch_data_aided_submit::segments	tls	nrLDPC_segment_encoding_parameters_t[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	213	nr_isac_pdsch_data_aided_submit::scrambled	tls	uint32_t[(273 * 12 * 14 * 8 + 31) / 32 + 1]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	217	nr_isac_pdsch_data_aided_submit::mod_syms	tls	c16_t *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	242	nr_isac_pdsch_data_aided_submit::isac_h	tls	float *	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	243	nr_isac_pdsch_data_aided_submit::isac_h_nant	tls	uint32_t	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	254	nr_isac_pdsch_data_aided_submit::isac_k	tls	uint32_t[273 * 12 * 14]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	255	nr_isac_pdsch_data_aided_submit::isac_l	tls	uint32_t[273 * 12 * 14]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	258	nr_isac_pdsch_data_aided_submit::sym_id	tls	uint32_t[NR_SYMBOLS_PER_SLOT]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	259	nr_isac_pdsch_data_aided_submit::sym_start	tls	uint32_t[NR_SYMBOLS_PER_SLOT]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	260	nr_isac_pdsch_data_aided_submit::sym_count	tls	uint32_t[NR_SYMBOLS_PER_SLOT]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	261	nr_isac_pdsch_data_aided_submit::sym_ypow	tls	double[NR_SYMBOLS_PER_SLOT]	TLS	A5	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	363	nr_isac_pdsch_data_aided_submit::warned	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	55	g_data_aided_g_refused	file_static	_Atomic uint64_t	PROCESS	A5	aggregate counter of refused data-aided submissions (atomic telemetry)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	137	nr_isac_pdsch_data_aided_submit::warned_ml	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	161	nr_isac_pdsch_data_aided_submit::c_segs	tls	uint8_t *[MAX_NUM_NR_DLSCH_SEGMENTS]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	195	nr_isac_pdsch_data_aided_submit::coded_bits	tls	uint8_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	201	nr_isac_pdsch_data_aided_submit::segments	tls	nrLDPC_segment_encoding_parameters_t[MAX_NUM_NR_DLSCH_SEGMENTS]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	229	nr_isac_pdsch_data_aided_submit::scrambled	tls	uint32_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	234	nr_isac_pdsch_data_aided_submit::mod_syms	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	259	nr_isac_pdsch_data_aided_submit::isac_h	tls	float *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	260	nr_isac_pdsch_data_aided_submit::isac_h_nant	tls	uint32_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	271	nr_isac_pdsch_data_aided_submit::isac_k	tls	uint32_t[273 * 12 * 14]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	272	nr_isac_pdsch_data_aided_submit::isac_l	tls	uint32_t[273 * 12 * 14]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	277	nr_isac_pdsch_data_aided_submit::ygath	tls	c16_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	278	nr_isac_pdsch_data_aided_submit::win_k	tls	uint32_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	286	nr_isac_pdsch_data_aided_submit::sym_id	tls	uint32_t[NR_SYMBOLS_PER_SLOT]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	287	nr_isac_pdsch_data_aided_submit::sym_start	tls	uint32_t[NR_SYMBOLS_PER_SLOT]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	288	nr_isac_pdsch_data_aided_submit::sym_count	tls	uint32_t[NR_SYMBOLS_PER_SLOT]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	289	nr_isac_pdsch_data_aided_submit::sym_ypow	tls	double[NR_SYMBOLS_PER_SLOT]	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	406	nr_isac_pdsch_data_aided_submit::warned	tls	bool	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	435	nr_isac_pdsch_data_aided_submit::warned_ls	tls	bool	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c	169	g_npool	file_static	int [converted]	PER_CELL	A5	converted (mpci audit): NR_CELL_STATIC, indexed by the calling thread's cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c	169	g_pmu	file_static	pthread_mutex_t	PROCESS	A5	mpci audit: locks of the DM-RS identity pool / vote tables (guard per-cell objects)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_dmrs_scan.c	169	g_pool	file_static	g_pool_arr_t [converted]	PER_CELL	A5	converted (mpci audit): NR_CELL_STATIC, indexed by the calling thread's cell
@@ -3231,9 +3234,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	zmq_context	file_static	void * [c
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	97	zmq_pub	file_static	void * [converted]	PER_CELL	CELLFEAT	per-cell sense-API export session: rings, files, writer thread, counters (CELLFEAT); producers and the writer are bound to the cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	293	nr_sense_open::warned_no_zmq	func_static	bool	PROCESS	CELLFEAT	log once per process (build without ZMQ)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	71	nr_sense_rs_to_json::names	func_static	const char *[]	CONST	CELLFEAT	constant name table (a pointer array declared without const on the pointers)
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	155	rx_st	file_static	rx_state_t [converted]	PER_CELL	CELLFEAT	per-cell receiver state for the sense records: slot ring (sample counter, applied CFO, window-shift totals) written by the cell's receive thread, read by any thread of that cell
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	213	receiver_array	file_static	const char *	PROCESS	CELLFEAT	session identity (rx_id / rx_array) from the [sensing] section: the same strings for every cell, set by each cell at its start
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	213	receiver_id	file_static	const char *	PROCESS	CELLFEAT	session identity (rx_id / rx_array) from the [sensing] section: the same strings for every cell, set by each cell at its start
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	156	rx_st	file_static	rx_state_t [converted]	PER_CELL	CELLFEAT	per-cell receiver state for the sense records: slot ring (sample counter, applied CFO, window-shift totals) written by the cell's receive thread, read by any thread of that cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	214	receiver_array	file_static	const char *	PROCESS	CELLFEAT	session identity (rx_id / rx_array) from the [sensing] section: the same strings for every cell, set by each cell at its start
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c	214	receiver_id	file_static	const char *	PROCESS	CELLFEAT	session identity (rx_id / rx_array) from the [sensing] section: the same strings for every cell, set by each cell at its start
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_blind.c	289	nr_srs_observe::periods	func_static	const unsigned[]	CONST	AUDIT	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_blind.c	296	legal_period::periods	func_static	const unsigned[]	CONST	AUDIT	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	49	srs_lock	file_static	pthread_mutex_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
