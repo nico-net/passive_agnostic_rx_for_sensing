@@ -461,3 +461,31 @@ TEST_F(PassivePrach, RealIqLookbackAbsentPreambleStaysAbsent)
   EXPECT_EQ(found, 0);
   EXPECT_EQ(tried, 12) << "every RAR must have been tested on its retained occasion";
 }
+
+/* A receiver chain that delivers the UL window 12-20 dB weaker than the raw capture (the replay does: snapshot power 17.5 dB vs 29.5 dB in the capture) must still
+ * correlate: the fixed-point energy used to collapse to 0 for every occasion (peak == floor == 0, nothing ever detected). */
+TEST_F(PassivePrach, RealIqWeakInputStillCorrelates)
+{
+  if (!have_capture()) GTEST_SKIP() << "capture not on this host";
+  for (double scale : {0.25, 0.1}) {
+    test_prach_real_out_t idle{};
+    auto c = pci415(-1, 0, 0);
+    c.n_noise = 40;
+    c.input_scale = scale;
+    ASSERT_TRUE(test_prach_real_iq(&c, &idle));
+    EXPECT_EQ(idle.peak_zero, 0ul) << "scale " << scale;
+    EXPECT_GT(idle.peak_max, idle.peak_min) << "scale " << scale;
+    EXPECT_EQ(idle.records, 0);
+    test_prach_reset();
+    for (int v : {0, 17, 63}) {
+      test_prach_real_out_t o{};
+      auto d = pci415(v, 300, -10.0);
+      d.input_scale = scale;
+      ASSERT_TRUE(test_prach_real_iq(&d, &o));
+      EXPECT_EQ(o.records, 1) << "scale " << scale << " preamble " << v;
+      EXPECT_EQ(field(o.record, "\"preamble\":"), v) << "scale " << scale;
+      EXPECT_GE(o.peak_last - o.floor_last, 80) << "input-referred energy keeps the margin comparable";
+      test_prach_reset();
+    }
+  }
+}

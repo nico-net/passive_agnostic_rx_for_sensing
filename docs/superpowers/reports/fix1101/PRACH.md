@@ -66,3 +66,9 @@ correlator only tests the 64 preambles of (root, NCS, restricted set). 50 occasi
   (nice 19 shared host): before 4.42 ms/occasion (98304-pt DFT x4 = 4.4 ms, correlator 0.09 ms), after 5.15 ms (de-rotation +0.65 ms). I did not find a safe
   further cut (cost now 5.15 ms incl. de-rotation; the retain copy ~1.5 MB per occasion is inside the 5.15): a decimating front end (boxcar/FIR) folds other UEs' PUSCH into the band; a pruned DFT is not cheaper. Cost does grow by 15 %; the price of correct
   RAPID/TA. Not changed: queue depth, priority. Remaining lever (not done): run the DFT only for occasions after a cheap gate, or 2 of 4 antennas (-3 dB).
+
+## Addendum (replay cand1101c): zero peaks = fixed-point underflow
+Replay snapshot power was 17.5 dB (prach_snap_db 171-182) vs 29.5 dB in the raw capture (21 LSB rms). The correlator energy is the integer (sum|ifft|^2 >> 10)/n_rx; at that
+input level it is 0 for every bin, so peak == floor == 0 and nothing can ever be detected. Fix: lift the occasion's frequency bins by a power of two to rms >= 16 (never
+lowered, int16 headroom kept) and refer the energy back to the input scale (-6.02 dB per bit); lookback does the same. Test RealIqWeakInputStillCorrelates (capture scaled
+by 0.25 and 0.1): fails without the lift (41/41 occasions peak 0), passes with it. Also fixed earlier: root index truncated to uint8 (449de0bc61).
