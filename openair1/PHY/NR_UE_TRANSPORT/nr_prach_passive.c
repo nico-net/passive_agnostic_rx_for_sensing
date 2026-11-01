@@ -142,6 +142,10 @@ NR_CELL_STATIC(_Atomic uint64_t, prach_us)
 #define prach_us NR_CELL_REF(prach_us)
 NR_CELL_STATIC(_Atomic uint64_t, prach_occasions)
 #define prach_occasions NR_CELL_REF(prach_occasions)
+NR_CELL_STATIC(_Atomic uint64_t, prach_detections) /* occasions whose best preamble beat the floor margin */
+#define prach_detections NR_CELL_REF(prach_detections)
+NR_CELL_STATIC(_Atomic int, prach_margin_max) /* best (energy - 25th-percentile floor), dB/10, over all seeded occasions; INT_MIN until seeded */
+#define prach_margin_max NR_CELL_REF(prach_margin_max)
 NR_CELL_STATIC(_Atomic uint64_t, prach_drops)
 #define prach_drops NR_CELL_REF(prach_drops)
 NR_CELL_STATIC(_Atomic uint64_t, prach_skipped)
@@ -182,6 +186,14 @@ void nr_prach_passive_gain_changed(int gain_db)
   atomic_store_explicit(&observed_gain_db, gain_db, memory_order_release);
 }
 
+/* Why no PRACH record: occasions correlated, detections, and the best margin over the floor (dB/10; a Msg1 needs >= 80). margin_max is 0 until a floor is seeded. */
+void nr_prach_passive_diag(uint64_t *occasions, uint64_t *detections, int *margin_max)
+{
+  *occasions = atomic_load_explicit(&prach_occasions, memory_order_relaxed);
+  *detections = atomic_load_explicit(&prach_detections, memory_order_relaxed);
+  *margin_max = atomic_load_explicit(&prach_margin_max, memory_order_relaxed);
+}
+
 void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped)
 {
   const uint64_t count = atomic_load_explicit(&prach_occasions, memory_order_relaxed);
@@ -207,7 +219,11 @@ static bool floor_detect(int fdm, int gain_db, int energy)
     int sorted[PRACH_FLOOR_HISTORY];
     memcpy(sorted, f->energy, f->count * sizeof(int));
     qsort(sorted, f->count, sizeof(int), floor_compare);
-    detected = energy >= sorted[(f->count - 1) / 4] + 80; /* floor margin, dB/10 */
+    const int margin = energy - sorted[(f->count - 1) / 4];
+    detected = margin >= 80; /* floor margin, dB/10 */
+    int best = atomic_load_explicit(&prach_margin_max, memory_order_relaxed);
+    if (best == 0 || margin > best) atomic_store_explicit(&prach_margin_max, margin ? margin : 1, memory_order_relaxed);
+    if (detected) atomic_fetch_add_explicit(&prach_detections, 1, memory_order_relaxed);
   }
   f->energy[f->next++ % PRACH_FLOOR_HISTORY] = energy;
   if (f->count < PRACH_FLOOR_HISTORY) f->count++;
@@ -740,6 +756,8 @@ void nr_prach_passive_test_reset(void)
   atomic_store(&test_start_calls, 0);
   atomic_store(&prach_drops, 0);
   atomic_store(&prach_skipped, 0);
+  atomic_store(&prach_detections, 0);
+  atomic_store(&prach_margin_max, 0);
   nr_prach_passive_start();
 }
 void nr_prach_passive_test_prior(int index, bool valid, bool ignore)

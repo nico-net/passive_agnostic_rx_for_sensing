@@ -73,12 +73,20 @@ void nr_srs_idle_result(nr_srs_idle_t *idle,bool candidate)
     idle->interval=idle->interval ? (idle->interval<64 ? idle->interval*2 : 64) : 2;
   }
 }
+/* Which eligible slots a backed-off scan visits. A fixed stride (every interval-th eligible slot) is phase-locked to the SRS
+ * periodicity (periods are 5*2^k slots, strides 2^k eligible slots) and would look at the same offset forever; a hash of the
+ * eligible-slot counter visits every residue class with probability 1/interval. */
+static bool backoff_visits(uint64_t n,unsigned interval)
+{
+  n+=0x9e3779b97f4a7c15ull;n=(n^(n>>30))*0xbf58476d1ce4e5b9ull;n=(n^(n>>27))*0x94d049bb133111ebull;n^=n>>31;
+  return n%interval==0;
+}
 bool nr_srs_idle_scan(nr_srs_idle_t *idle,uint64_t slot,bool evidence)
 {
   (void)slot;
   idle->eligible++;
   if(evidence) nr_srs_idle_result(idle,true);
-  if(idle->interval>1 && idle->eligible%idle->interval) {idle->backoff_skip++;return false;}
+  if(idle->interval>1 && !backoff_visits(idle->eligible,idle->interval)) {idle->backoff_skip++;return false;}
   idle->scans++;return true;
 }
 static void cpu_expire(nr_srs_idle_t *idle,uint64_t now)

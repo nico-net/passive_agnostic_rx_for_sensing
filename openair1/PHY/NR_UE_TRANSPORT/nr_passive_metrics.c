@@ -31,6 +31,7 @@
 #include "nr_prach_passive.h"
 #include "nr_sense_api.h"
 __attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
+__attribute__((weak)) void nr_prach_passive_diag(uint64_t *, uint64_t *, int *);
 __attribute__((weak)) void nr_prach_passive_metrics(uint64_t *us, uint64_t *drops, uint64_t *skipped);
 __attribute__((weak)) void nr_csirs_blind_rt_metrics(nr_passive_metrics_t *m);
 __attribute__((weak)) void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *m);
@@ -289,6 +290,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   }
   if (nr_prach_passive_metrics)
     nr_prach_passive_metrics(&m->prach_us, &m->prach_drops, &m->prach_skipped);
+  if (nr_prach_passive_diag)
+    nr_prach_passive_diag(&m->prach_occasions, &m->prach_detections, &m->prach_margin_max);
   if (nr_csirs_blind_rt_metrics) nr_csirs_blind_rt_metrics(m);
   if (nr_csirs_disc_get_metrics) {
     nr_csirs_disc_metrics_t d;

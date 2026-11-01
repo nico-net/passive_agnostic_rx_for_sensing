@@ -56,7 +56,7 @@ typedef struct {
   _Atomic uint64_t dropped, elapsed_us;
   _Atomic uint64_t pregate_skip, backoff_skip, budget_skip, idle_resets;
   _Atomic uint64_t per_predicted, per_hit, per_miss, per_demoted, per_confirmed, per_audit_hit, per_audits;
-  uint64_t audit_tick, audits;
+  uint64_t audit_tick, audits, scan_rot;
   nr_srs_idle_t idle;
   bool stop;
   unsigned head, tail, count;
@@ -144,21 +144,31 @@ static void process_srs(srs_job_t *job)
   }
   nr_srs_candidate_t seen[NR_SRS_MAX_CANDIDATES];int nseen=0;
   nr_srs_candidate_t due[NR_SRS_MAX_TRACKS];
+  bool scanned=true;
   bool tracking=nr_srs_has_confirmed(sr.search,job->meta.abs_slot);
   int ndue=tracking?nr_srs_confirmed_due(sr.search,job->meta.abs_slot,due):0;
   /* Confirmed periodic resources are tested directly on their predicted occasions; the blind search then only
    * runs as a sparse audit (to find resources that are not tracked yet and to catch pattern changes). */
   bool blind=!tracking;
-  if(tracking) {
+  if(!tracking) {
+    /* Backed-off idle scan: decide before the first FFT. The 24 symbol FFTs of a scan used to be paid on every
+     * UL slot and only then discarded by the backoff, which alone exceeded the CPU budget and filled the queue. */
+    scanned=nr_srs_idle_scan(&sr.idle,job->meta.abs_slot,false);
+    if(!scanned) {srs_budget_checkpoint(&cpu_begin);return;}
+    sr.scan_rot++;
+  } else {
     blind=(++sr.audit_tick%SRS_AUDIT_EVERY)==0;
-    if(blind) sr.audits++;
+    if(blind) {sr.audits++;sr.scan_rot++;}
     if(!ndue && !blind) {srs_budget_checkpoint(&cpu_begin);return;}
   }
   static const int offsets[]={0,-100,100,-200,200,-300,300,-400,400};
   nr_srs_candidate_t candidates[NR_SRS_MAX_CANDIDATES];
   bool predicted[NR_SRS_MAX_CANDIDATES]={false};
-  bool budget_exhausted=false, scanned=true, did_gate=false, any_comb=false;
+  bool budget_exhausted=false, did_gate=false, any_comb=false;
   for(unsigned d=0;d<sizeof(offsets)/sizeof(*offsets);d++) {
+    /* An undirected scan examines one receive-window offset (rotating, so all nine are covered over consecutive scans)
+     * instead of re-transforming the slot nine times; predicted occasions keep the full sweep until found. */
+    if(!ndue && d!=sr.scan_rot%(sizeof(offsets)/sizeof(*offsets))) continue;
     if(!srs_budget_checkpoint(&cpu_begin)) {budget_exhausted=true;break;}
     memset(sr.freq,0,sr.grid.n_ant*stride*sizeof(c16_t));
     for(int a=0;a<sr.grid.n_ant;a++) for(int l=0;l<6;l++) {
@@ -180,11 +190,7 @@ static void process_srs(srs_job_t *job)
     if(blind) {
       bool comb=nr_srs_pregate(&sr.grid,(int16_t *)sr.freq,stride,job->mask);
       did_gate=true;
-      if(!tracking) {
-        if(d==0) scanned=nr_srs_idle_scan(&sr.idle,job->meta.abs_slot,comb);
-        else if(comb) nr_srs_idle_result(&sr.idle,true);
-        if(!scanned) break;
-      }
+      if(!tracking && comb) nr_srs_idle_result(&sr.idle,true);
       if(comb) {
         any_comb=true;
         nr_srs_candidate_t found[NR_SRS_MAX_CANDIDATES];
@@ -246,6 +252,16 @@ static void process_srs(srs_job_t *job)
       if(nseen<NR_SRS_MAX_CANDIDATES) seen[nseen++]=*c;
     }
     if(budget_exhausted || nseen==NR_SRS_MAX_CANDIDATES) break;
+    if(nseen) { /* found: later offsets would only repeat the same candidates */
+      int pending=0;
+      for(int j=0;j<ndue;j++) {
+        bool got=false;
+        for(int k=0;k<nseen;k++) if(seen[k].start_rb==due[j].start_rb && seen[k].nb_rb==due[j].nb_rb
+          && seen[k].start_symbol==due[j].start_symbol && seen[k].comb==due[j].comb && seen[k].comb_offset==due[j].comb_offset) got=true;
+        pending+=!got;
+      }
+      if(!pending) break;
+    }
   }
   srs_budget_checkpoint(&cpu_begin);
   if(did_gate && !tracking && !any_comb && !budget_exhausted) {
@@ -320,7 +336,7 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   atomic_store(&sr.pregate_skip,0);atomic_store(&sr.backoff_skip,0);
   atomic_store(&sr.budget_skip,0);atomic_store(&sr.idle_resets,0);
   atomic_store(&sr.per_predicted,0);atomic_store(&sr.per_hit,0);atomic_store(&sr.per_miss,0);atomic_store(&sr.per_demoted,0);
-  atomic_store(&sr.per_confirmed,0);atomic_store(&sr.per_audit_hit,0);atomic_store(&sr.per_audits,0);sr.audit_tick=sr.audits=0;
+  atomic_store(&sr.per_confirmed,0);atomic_store(&sr.per_audit_hit,0);atomic_store(&sr.per_audits,0);sr.audit_tick=sr.audits=sr.scan_rot=0;
   sr.slots_per_subframe=fp->slots_per_subframe;
   LOG_W(PHY,"SENSING: blind SRS sequence hopping v=1 is unsupported\n");
   sr.samples_per_second=1000.0*fp->samples_per_subframe;

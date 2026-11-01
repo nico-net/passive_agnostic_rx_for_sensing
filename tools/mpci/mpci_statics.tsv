@@ -2906,6 +2906,8 @@ openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	job_write	file_static	unsign
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	jobs	file_static	prach_jobs_t [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	observed_gain_db	file_static	_Atomic int [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_drops	file_static	_Atomic uint64_t [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
+openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_detections	file_static	_Atomic uint64_t [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
+openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_margin_max	file_static	_Atomic int [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_occasions	file_static	_Atomic uint64_t [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_paused	file_static	_Atomic bool [converted]	PER_CELL	CELLFEAT	MPCI-INT: cell retired, PRACH process() returns at once
 openair1/PHY/NR_UE_TRANSPORT/nr_prach_passive.c	121	prach_skipped	file_static	_Atomic uint64_t [converted]	PER_CELL	CELLFEAT	per-cell PRACH state: pending list, RAR ring, floors, job queue, worker, counters (CELLFEAT)

@@ -72,6 +72,22 @@ TEST_F(SrsBlind,SrsBackoffResetsOnCandidate) {
   EXPECT_EQ(idle.interval,1u);
   EXPECT_TRUE(nr_srs_idle_scan(&idle,64,false));
 }
+// Eligible (UL) slots come every 5th slot on a DDDSU pattern; SRS periods are 5*2^k slots. A scan taken on every
+// 64th eligible slot is locked to one residue class mod 320 and never sees an SRS at another offset.
+TEST_F(SrsBlind,SrsBackoffScansEveryResidueClass) {
+  for(unsigned period:{20u,40u,80u,160u}) for(unsigned off:{4u,9u,14u}) {
+    if(off>=period) continue;
+    nr_srs_idle_t idle{};
+    for(uint64_t i=0;i<400;i++) if(nr_srs_idle_scan(&idle,5*i+4,false)) nr_srs_idle_result(&idle,false);
+    ASSERT_EQ(idle.interval,64u);
+    unsigned hit=0;
+    for(uint64_t i=400;i<400+40000;i++) {
+      uint64_t slot=5*i+4;
+      if(nr_srs_idle_scan(&idle,slot,false)) {hit+=(slot%period==off);nr_srs_idle_result(&idle,false);}
+    }
+    EXPECT_GT(hit,0u) << period << "/" << off;
+  }
+}
 TEST_F(SrsBlind,SrsBackoffCountsEligibleSlots) {
   nr_srs_idle_t idle{};
   unsigned scans=0;
