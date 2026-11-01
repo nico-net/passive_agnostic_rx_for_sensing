@@ -28,6 +28,9 @@
  */
 
 #include "nr_pdsch_data_aided.h"
+#include "nr_pdsch_da_snap.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.h" // nr_bgq_prepare / nr_bgq_start
+#include "common/utils/nr_cell.h"
 
 /* Set by a DEFERRED caller to this job's monotonic absolute slot; 0 = derive from proc. */
 __thread uint64_t nr_isac_abs_slot_override = 0;
@@ -36,6 +39,7 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -66,6 +70,14 @@ uint64_t nr_isac_pdsch_data_aided_g_refused(void)
   return atomic_load_explicit(&g_data_aided_g_refused, memory_order_relaxed);
 }
 
+/* the G of this tap's RE model (no SSB / CSI-RS / PT-RS hole) */
+static uint32_t da_tap_G(const fapi_nr_dl_cw_info_t *cw, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, const freq_alloc_bitmap_t *freq_alloc)
+{
+  const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
+  const uint16_t dmrs_len = get_num_dmrs(dlsch_config->dlDmrsSymbPos);
+  return nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len, 0, cw->qamModOrder, cw->Nl);
+}
+
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
                                      const fapi_nr_dl_cw_info_t *cw,
@@ -84,10 +96,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
    * whose X, differs from what is re-encoded here -- and the enumeration is still self-consistent with
    * its own G, so the mod_idx invariant further down cannot catch it. Checked FIRST, before the
    * sensing gate, so the refusal is independent of the sensing configuration. */
-  const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
-  const uint16_t dmrs_len = get_num_dmrs(dlsch_config->dlDmrsSymbPos);
-  const uint32_t tap_G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
-                                  0 /* no SSB/CSI-RS/PT-RS hole in this RE model */, cw->qamModOrder, cw->Nl);
+  const uint32_t tap_G = da_tap_G(cw, dlsch_config, freq_alloc);
   if (decode_G != tap_G) {
     const uint64_t n = atomic_fetch_add_explicit(&g_data_aided_g_refused, 1, memory_order_relaxed) + 1;
     if (n == 1 || n % 200 == 0)
@@ -461,4 +470,171 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       }
     }
   }
+}
+
+/* ---- the tap off the decode thread (nr_isac_pdsch_data_aided_submit_async) ---- */
+#define DA_POOL 4
+#define DA_TB_CAP 65536 /* bytes: one layer, 273 PRB x 12 x 14 REs x 8 bits / 8 = 45.9 kB + CRC */
+typedef struct {
+  PHY_VARS_NR_UE *ue;
+  UE_nr_rxtx_proc_t proc;
+  fapi_nr_dl_cw_info_t cw;
+  fapi_nr_dl_config_dlsch_pdu_rel15_t dlsch;
+  freq_alloc_bitmap_t fa;
+  uint16_t rnti;
+  uint32_t harq_tag, G;
+  double nvar;
+  uint64_t abs_slot;
+  c16_t *rx; /* nant x stride c16, the layout of the consumer's rxdataF; only the grant's region is written */
+  uint8_t *tb;
+  int idx;
+} da_job_t;
+typedef struct {
+  da_job_t *job[DA_POOL];
+  unsigned free_mask; /* bit i = job i is free */
+  uint32_t stride;    /* samples_per_slot_wCP */
+  int nant;
+  _Atomic int ready;
+  _Atomic uint64_t queued, inl, done;
+  _Atomic uint64_t run_ns, snap_ns; /* worker time of the tap / consumer time of the snapshot of the queued grants: saved = run - snap */
+} da_pool_t;
+/* mpci: the pool, its queue and its worker are the cell's (the consumer calling _async is bound to it); the worker binds to the cell of each item (nr_gpu_bgq.h) */
+NR_CELL_STATIC(da_pool_t, g_da)
+#define g_da NR_CELL_REF(g_da)
+NR_CELL_STATIC(nr_bgq_t, g_da_q)
+#define g_da_q NR_CELL_REF(g_da_q)
+
+void nr_isac_pdsch_data_aided_async_prepare(int cell)
+{
+  if (!nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+    return;
+  (void)nr_bgq_prepare(&g_da_q_cells[cell], DA_POOL, "daBg", cell);
+}
+
+void nr_isac_pdsch_data_aided_async_init(const PHY_VARS_NR_UE *ue)
+{
+  da_pool_t *P = &g_da;
+  if (atomic_load(&P->ready) || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+    return;
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  P->stride = (uint32_t)fp->samples_per_slot_wCP;
+  P->nant = fp->nb_antennas_rx;
+  const size_t rx_b = (size_t)P->nant * P->stride * sizeof(c16_t);
+  for (int i = 0; i < DA_POOL; i++) {
+    da_job_t *j = calloc(1, sizeof(*j));
+    if (j) {
+      j->rx = aligned_alloc(64, (rx_b + 63) / 64 * 64);
+      j->tb = aligned_alloc(64, DA_TB_CAP);
+    }
+    if (!j || !j->rx || !j->tb) {
+      if (j) { free(j->rx); free(j->tb); free(j); }
+      break;
+    }
+    memset(j->rx, 0, rx_b); /* prefault now, not on the decode path */
+    memset(j->tb, 0, DA_TB_CAP);
+    j->idx = i;
+    P->job[i] = j;
+    P->free_mask |= 1u << i;
+  }
+  if (!P->free_mask)
+    return;
+  if (nr_bgq_start(&g_da_q, DA_POOL, "daBg") != 0) {
+    P->free_mask = 0; /* no worker: every submit stays inline */
+    return;
+  }
+  atomic_store(&P->ready, 1);
+  LOG_A(NR_PHY, "SENSING: data-aided tap off the decode thread: %u jobs, worker daBg\n", (unsigned)__builtin_popcount(P->free_mask));
+}
+
+void nr_isac_pdsch_data_aided_async_counts(uint64_t *queued, uint64_t *inl, uint64_t *done, uint64_t *saved_us)
+{
+  *queued = atomic_load(&g_da.queued);
+  *inl = atomic_load(&g_da.inl);
+  *done = atomic_load(&g_da.done);
+  const uint64_t r = atomic_load(&g_da.run_ns), c = atomic_load(&g_da.snap_ns);
+  *saved_us = r > c ? (r - c) / 1000 : 0;
+}
+
+static uint64_t da_now_ns(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+static void da_run(void *arg)
+{
+  da_job_t *j = arg;
+  da_pool_t *P = &g_da; /* the worker was bound to the item's cell by nr_bgq_run_one */
+  const uint64_t t0 = da_now_ns();
+  nr_isac_abs_slot_override = j->abs_slot;
+  nr_isac_pdsch_data_aided_submit(j->ue, &j->proc, &j->cw, &j->dlsch, &j->fa, j->rnti, j->tb, j->harq_tag, (const c16_t(*)[P->stride])j->rx, j->nvar, j->G);
+  nr_isac_abs_slot_override = 0;
+  atomic_fetch_add(&P->run_ns, da_now_ns() - t0);
+  const uint64_t n = atomic_fetch_add(&P->done, 1) + 1;
+  if (n == 1 || n % 2000 == 0) {
+    uint64_t q, i, d, sv;
+    nr_isac_pdsch_data_aided_async_counts(&q, &i, &d, &sv);
+    LOG_A(NR_PHY, "SENSING: DATA_AIDED_ASYNC done=%lu queued=%lu inline=%lu consumer_us_saved=%lu\n", (unsigned long)d, (unsigned long)q, (unsigned long)i, (unsigned long)sv);
+  }
+  __atomic_fetch_or(&P->free_mask, 1u << j->idx, __ATOMIC_RELEASE);
+}
+
+int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
+                                          const UE_nr_rxtx_proc_t *proc,
+                                          const fapi_nr_dl_cw_info_t *cw,
+                                          const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                          const freq_alloc_bitmap_t *freq_alloc,
+                                          uint16_t rnti,
+                                          const uint8_t *tb_bytes,
+                                          uint32_t harq_pid_tag,
+                                          const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                          double nvar,
+                                          uint32_t decode_G)
+{
+  da_pool_t *P = &g_da;
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const uint32_t A = cw->TBS;
+  const size_t tb_n = ((size_t)A + (A > NR_MAX_PDSCH_TBS ? 24 : 16) + 7) / 8;
+  /* eligibility = what the inline tap would do beyond its early returns: a single layer, the tap's own G, an enabled source (those early returns stay in submit and run inline) */
+  int ok = atomic_load_explicit(&P->ready, memory_order_acquire) && cw->Nl == 1 && freq_alloc->n_prb_list == 0 && tb_n <= DA_TB_CAP && decode_G == da_tap_G(cw, dlsch_config, freq_alloc) &&
+           (int)P->nant == fp->nb_antennas_rx && P->stride == (uint32_t)fp->samples_per_slot_wCP && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA) && nr_bgq_room(&g_da_q);
+  da_job_t *j = NULL;
+  if (ok) {
+    unsigned m = __atomic_load_n(&P->free_mask, __ATOMIC_ACQUIRE);
+    while (m && !j)
+      if (__atomic_compare_exchange_n(&P->free_mask, &m, m & (m - 1u), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        j = P->job[__builtin_ctz(m)];
+    ok = j != NULL;
+  }
+  const uint64_t t_snap0 = ok ? da_now_ns() : 0;
+  if (ok) {
+    const int start_re = (fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB) % fp->ofdm_symbol_size;
+    const int num_sc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+    ok = nr_da_snap_copy((uint32_t *)j->rx, (const uint32_t *)&rxdataF[0][0], P->nant, P->stride, fp->ofdm_symbol_size, dlsch_config->start_symbol, dlsch_config->number_symbols, start_re,
+                         num_sc) == 0;
+  }
+  if (ok) {
+    j->ue = ue;
+    j->proc = *proc;
+    j->cw = *cw;
+    j->dlsch = *dlsch_config;
+    j->fa = *freq_alloc;
+    j->rnti = rnti;
+    j->harq_tag = harq_pid_tag;
+    j->G = decode_G;
+    j->nvar = nvar;
+    j->abs_slot = nr_isac_abs_slot_override;
+    memcpy(j->tb, tb_bytes, tb_n);
+    if (nr_bgq_push(&g_da_q, da_run, j) == 0) {
+      atomic_fetch_add(&P->snap_ns, da_now_ns() - t_snap0);
+      atomic_fetch_add(&P->queued, 1);
+      return 1;
+    }
+  }
+  if (j)
+    __atomic_fetch_or(&P->free_mask, 1u << j->idx, __ATOMIC_RELEASE);
+  atomic_fetch_add(&P->inl, 1);
+  nr_isac_pdsch_data_aided_submit(ue, proc, cw, dlsch_config, freq_alloc, rnti, tb_bytes, harq_pid_tag, rxdataF, nvar, decode_G);
+  return 0;
 }

@@ -92,6 +92,33 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      double nvar,
                                      uint32_t decode_G);
 
+/**
+ * @brief The same tap, off the decode thread. The consumer thread of a CRC-OK single-layer grant otherwise spends the whole
+ * re-encode (LDPC + scramble + modulate, [MEASURED DGX 2026-11-01, PCI 415 sensing on: pdsch_data producer 169 us mean per
+ * grant, 3020 grants]) between two grants, which is queue wait for the next one. Here the consumer copies the TB bytes and the
+ * part of rxdataF the tap reads (nr_pdsch_da_snap.h) into a pre-allocated per-cell job and hands it to a nice-19 worker that
+ * calls nr_isac_pdsch_data_aided_submit on the copy: same inputs, same CFR rows, later. Never drops: a grant the worker cannot
+ * take (no free job, queue busy, non-contiguous allocation, TB larger than the job, pool not built) runs inline exactly as before.
+ * Returns 1 = queued, 0 = ran inline. Honours nr_isac_abs_slot_override of the caller (re-applied on the worker).
+ */
+int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
+                                          const UE_nr_rxtx_proc_t *proc,
+                                          const fapi_nr_dl_cw_info_t *cw,
+                                          const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                          const freq_alloc_bitmap_t *freq_alloc,
+                                          uint16_t rnti,
+                                          const uint8_t *tb_bytes,
+                                          uint32_t harq_pid_tag,
+                                          const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                          double nvar,
+                                          uint32_t decode_G);
+/// Before the RX fence, on cell `cell`'s thread: the parked worker (armed by _async_init). No-op when sensing is off.
+void nr_isac_pdsch_data_aided_async_prepare(int cell);
+/// Before the RX fence (queue start): the cell's job pool (4 jobs, TB + snapshot buffers prefaulted) and the worker arm. Without it every submit runs inline.
+void nr_isac_pdsch_data_aided_async_init(const PHY_VARS_NR_UE *ue);
+/// queued, ran inline (ineligible / pool busy / queue busy), finished by the worker, consumer-thread microseconds freed (worker run time of the queued grants minus the consumer's snapshot time): cumulative, this cell
+void nr_isac_pdsch_data_aided_async_counts(uint64_t *queued, uint64_t *inl, uint64_t *done, uint64_t *saved_us);
+
 /// Submissions refused because the decode's G differed from the tap's RE model (see decode_G above).
 uint64_t nr_isac_pdsch_data_aided_g_refused(void);
 

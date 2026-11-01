@@ -2318,8 +2318,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
            * submit derives the index from proc->frame_rx, which wraps at 1024 -- harmless in order,
            * fatal once several consumers submit concurrently across a wrap. */
           nr_isac_abs_slot_override = (uint64_t)job.absolute_slot;
-          nr_isac_pdsch_data_aided_submit(ue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
-                                          dec.tb, job.harq_pid_tag, rxdataF, (double)dec.nvar, dec.G);
+          nr_isac_pdsch_data_aided_submit_async(ue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
+                                                dec.tb, job.harq_pid_tag, rxdataF, (double)dec.nvar, dec.G); /* the re-encode runs on the daBg worker; the consumer only snapshots */
           nr_isac_abs_slot_override = 0;
         }
       }
@@ -2596,6 +2596,8 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
       return false;
     }
   }
+
+  nr_isac_pdsch_data_aided_async_init(ue); /* before the RX fence: job pool + daBg worker (the data-aided tap runs off the consumer thread) */
 
   if (nr_csirs_disc_enabled()) {
     for (int i = 0; i < n_consumers; ++i)
@@ -3086,6 +3088,7 @@ void nr_pdsch_passive_queue_stop(void)
 void nr_pdsch_passive_queue_cell_prealloc(int cell)
 {
   cdmrs_prepare(cell);
+  nr_isac_pdsch_data_aided_async_prepare(cell);
   { /* lazy-thread audit: dmrsScan ring buffers + parked worker of this cell (the first scan job only arms it) */
     int ok = 1;
     for (int i = 0; i < DSCAN_Q; i++) {
