@@ -1134,15 +1134,15 @@ static void pred_update(int ul, uint64_t key, uint32_t obs_ns)
 /* GPUQ: passes in flight at a launch (this one included), clipped to 1..4: how many same-window grants a batched launch could have merged (batch_size histogram) */
 static std::atomic<int> g_infl{0};
 static std::atomic<uint64_t> g_infl_hist[4];
-static void wait_done_inner(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns);
-static void wait_done(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns)
+static void wait_done(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns);
+static void wait_done_counted(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns)
 {
   const int n = g_infl.fetch_add(1) + 1;
   ++g_infl_hist[std::min(std::max(n, 1), 4) - 1];
-  wait_done_inner(I, ul, key, t_launch_ns);
+  wait_done(I, ul, key, t_launch_ns);
   g_infl.fetch_sub(1);
 }
-static void wait_done_inner(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns)
+static void wait_done(Inst &I, int ul, uint64_t key, uint64_t t_launch_ns)
 {
   cudaError_t e = cudaEventQuery(I.done);
   const int sp = g_spin_us.load();
@@ -2049,7 +2049,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     return -1;
   }
   if (split) ++g_entry[skip_c];
-  wait_done(I, 0, k.pack(), ts_l1);
+  wait_done_counted(I, 0, k.pack(), ts_l1);
   const uint64_t ts_d = nr_gpu_pass_now_ns();
   const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   if (g_dead) { ++g_fb_err; return -1; }
@@ -2230,7 +2230,7 @@ extern "C" int nr_gpu_pass_ul_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     g_dead = 1;
     return -1;
   }
-  wait_done(I, 1, k.pack(), ts_l1);
+  wait_done_counted(I, 1, k.pack(), ts_l1);
   const uint64_t ts_d = nr_gpu_pass_now_ns();
   const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
   if (g_dead) { ++g_ul_fb_err; return -1; }
