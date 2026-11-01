@@ -1,6 +1,6 @@
 # pred1101/harq -- DL HARQ retransmission anticipation
 
-Branch pred1101/harq (from mpci-int-1031). Status: code + tests written; build/test results in the section "Results" (filled when the host lock released).
+Branch pred1101/harq (from mpci-int-1031). Status: built and tested.
 
 ## What already existed (kept)
 The per-cell soft store (`g_harqc`, 64 entries, LRU, host buffer or device blocks, `harq_retx_decide` + `nr_hq_retx_rule`) already retains the soft sum of every CRC-failed
@@ -28,3 +28,8 @@ first transmission on both the CPU path (`passive_ldpc_decode`) and the GPU pass
 - On-air: HARQC line `retx_no_history=ok/n refused evicted`, EVMGRANT hq=2, ISAC_METRICS keys above.
 - GpuPassCells.HarqSlabsAreSeparate: not touched, not in this path.
 - Same-file risk: nr_pdsch_passive_decode.c, nr_pdcch_blind_monitor_rt.c (gate at the solver block), nr_passive_metrics*.
+
+## Results [OFFLINE VERIFIED, DGX aarch64 unit]
+Build (heavy.sh, -j6): nr-uesoftmodem pdsch_gpu ldpc_cuda + test targets, no errors. ctest passed: test_nr_hq_retry, test_nr_td_cb0_batch (+_discrete, _cpu; includes the new real-LDPC
+soundness test), test_nr_snr_gate, test_nr_harq_init_tx, test_nr_pdsch_retry_pred/_gate, test_static_audit_scanner, static_audit_check (`static_audit.py --check` and `--strict` rc 0;
+tools/mpci/mpci_statics.tsv updated: 6 PER_CELL counters, 1 TLS). Full ctest and GpuPassCells not run.
