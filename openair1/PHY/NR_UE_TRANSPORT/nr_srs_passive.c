@@ -21,7 +21,10 @@
 #include <string.h>
 #include <math.h>
 
-#define SRS_DEPTH 4
+/* Queue depth from the rate: every eligible slot (UL or special slot with uplink symbols) is queued, at most 0.8 per ms (TDD 3:1, 30 kHz SCS). The worker takes the time-domain
+ * comb gate (no pool lease) on each and the pool lease only for a slot that needs FFTs, so 32 jobs absorb a lease wait of 40 ms (SENSING: CORE_POOL long wait class=4 logged
+ * 50-100 ms); jobs lost beyond that are counted in srs_jobs_dropped. */
+#define SRS_DEPTH 32
 #define SRS_MARGIN 400
 #define SRS_EVENTS 64
 #define SRS_AUDIT_EVERY 16 /* while resources are tracked, the blind search still runs on every 16th eligible slot to find new ones */
@@ -44,7 +47,7 @@ typedef struct {
 } srs_job_t;
 /* ---- per-cell passive SRS state (mpci CELLFEAT, common/utils/nr_cell.h) ----
  * One blind SRS searcher per cell: its queue, events, hint, tracks (nr_srs_blind_t) and worker (created bound to the cell by nr_srs_passive_start on the
- * cell's thread). The state (~110 KB: 4 jobs with their symbol windows + the event ring) is a NR_CELL_STATIC_HEAP object pre-allocated for every admitted
+ * cell's thread). The state (~0.7 MB: 32 jobs with their rotation tables + the event ring; the symbol windows are allocated by nr_srs_passive_start) is a NR_CELL_STATIC_HEAP object pre-allocated for every admitted
  * cell before the RX fence (nr_srs_passive_cell_prealloc), also when SRS is not enabled: the producers (PUSCH / PDCCH threads) read sr.active on every
  * call. The lock is a per-cell static (an all-zero heap object would only be a valid mutex by the glibc layout). */
 NR_CELL_STATIC_INIT(pthread_mutex_t, srs_lock, PTHREAD_MUTEX_INITIALIZER)
@@ -59,6 +62,7 @@ typedef struct {
   uint64_t audit_tick, audits, scan_rot;
   nr_srs_idle_t idle;
   bool stop;
+  bool leased; /* worker thread only: holds the float lease */
   unsigned head, tail, count;
   PHY_VARS_NR_UE *owner;
   nr_srs_grid_t grid;
@@ -110,6 +114,20 @@ void nr_srs_passive_cell_pause(int cell,bool pause)
   nr_cell_bind(prev);
 }
 
+/* The float lease (mpci B5) is taken only when a job really transforms symbols, and kept across the next queued jobs (srs_worker releases it when the queue is empty):
+ * a job that the comb gate or the tracker skips costs microseconds and never waits for a pool token behind DECODE/DISC work. */
+static void srs_lease_in(void)
+{
+  if(sr.leased) return;
+  nr_pool_site_float_acquire(NR_POOL_HOUSE, nr_cell_idx(), 0);
+  sr.leased=true;
+}
+static void srs_lease_out(void)
+{
+  if(!sr.leased) return;
+  nr_pool_site_float_release();
+  sr.leased=false;
+}
 static void process_srs(srs_job_t *job)
 {
   nr_sense_prod_scope_t prod __attribute__((cleanup(nr_sense_prod_scope_stop))) =
@@ -151,16 +169,30 @@ static void process_srs(srs_job_t *job)
    * runs as a sparse audit (to find resources that are not tracked yet and to catch pattern changes). */
   bool blind=!tracking;
   if(!tracking) {
-    /* Backed-off idle scan: decide before the first FFT. The 24 symbol FFTs of a scan used to be paid on every
-     * UL slot and only then discarded by the backoff, which alone exceeded the CPU budget and filled the queue. */
-    scanned=nr_srs_idle_scan(&sr.idle,job->meta.abs_slot,false);
-    if(!scanned) {srs_budget_checkpoint(&cpu_begin);return;}
+    sr.idle.eligible++;sr.idle.scans++;
     sr.scan_rot++;
   } else {
     blind=(++sr.audit_tick%SRS_AUDIT_EVERY)==0;
     if(blind) {sr.audits++;sr.scan_rot++;}
     if(!ndue && !blind) {srs_budget_checkpoint(&cpu_begin);return;}
   }
+  /* Undirected search (no predicted occasion): the time-domain comb gate on EVERY eligible slot (~30 us against ~1.2 ms for the 24 FFTs of a scan), so the SRS occasions of any
+   * period are all examined; noise and non-comb UL traffic stop here. The old 1-in-interval backoff aliased with the occasions (an SRS is up to 640 slots apart, the interval
+   * decayed in tens of slots) and is no longer applied to the gate. */
+  bool td_hit=false;
+  if(blind && !ndue) {
+    td_hit=nr_srs_td_comb_gate(N,sr.grid.n_ant,job->mask,(const int16_t *)(job->raw+SRS_MARGIN),win,NULL);
+    if(!td_hit) {
+      sr.idle.pregate_skip++;
+      if(!tracking) nr_srs_idle_result(&sr.idle,false);
+      srs_budget_checkpoint(&cpu_begin);return;
+    }
+  }
+  /* Symbols to transform: all uplink symbols of the slot for an undirected search, only the symbols of the tracked resources when every occasion is predicted. */
+  uint16_t need=blind?job->mask:0;
+  if(!blind) for(int j=0;j<ndue;j++) for(int l=due[j].start_symbol;l<due[j].start_symbol+due[j].n_symbols && l<14;l++) need|=1u<<l;
+  need&=job->mask;
+  srs_lease_in();
   static const int offsets[]={0,-100,100,-200,200,-300,300,-400,400};
   nr_srs_candidate_t candidates[NR_SRS_MAX_CANDIDATES];
   bool predicted[NR_SRS_MAX_CANDIDATES]={false};
@@ -168,11 +200,11 @@ static void process_srs(srs_job_t *job)
   for(unsigned d=0;d<sizeof(offsets)/sizeof(*offsets);d++) {
     /* An undirected scan examines one receive-window offset (rotating, so all nine are covered over consecutive scans)
      * instead of re-transforming the slot nine times; predicted occasions keep the full sweep until found. */
-    if(!ndue && d!=sr.scan_rot%(sizeof(offsets)/sizeof(*offsets))) continue;
+    if(!ndue && !td_hit && d!=sr.scan_rot%(sizeof(offsets)/sizeof(*offsets))) continue;
     if(!srs_budget_checkpoint(&cpu_begin)) {budget_exhausted=true;break;}
     memset(sr.freq,0,sr.grid.n_ant*stride*sizeof(c16_t));
     for(int a=0;a<sr.grid.n_ant;a++) for(int l=0;l<6;l++) {
-      if(!(job->mask&(1u<<(l+8)))) continue;
+      if(!(need&(1u<<(l+8)))) continue;
       const c16_t *raw=job->raw+(a*6+l)*win+SRS_MARGIN+offsets[d];
       nr_srs_fep_symbol(&sr.grid,sr.slots_per_subframe,job->shift,job->rot,job->meta.slot,l+8,
         job->fo_hz,sr.samples_per_second/1000,job->sample[l]+SRS_MARGIN+offsets[d],raw,
@@ -287,9 +319,7 @@ static void *srs_worker(void *arg)
     if(done) break;
     if(!job) {struct timespec ts={.tv_nsec=1000000};nanosleep(&ts,NULL);continue;}
     struct timespec begin,end;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&begin);
-    nr_pool_site_float_acquire(NR_POOL_HOUSE, nr_cell_idx(), 0); /* mpci B5: one HOUSE lease per job (bound cell); no-op when the float lane is not merged */
     process_srs(job);
-    nr_pool_site_float_release();
     clock_gettime(CLOCK_THREAD_CPUTIME_ID,&end);
     const uint64_t elapsed_ns=(int64_t)(end.tv_sec-begin.tv_sec)*1000000000+end.tv_nsec-begin.tv_nsec;
     atomic_fetch_add(&sr.elapsed_us,elapsed_ns/1000);
@@ -297,8 +327,11 @@ static void *srs_worker(void *arg)
     atomic_store(&sr.backoff_skip,sr.idle.backoff_skip);
     atomic_store(&sr.budget_skip,sr.idle.budget_skip);
     atomic_store(&sr.idle_resets,sr.idle.resets);
-    pthread_mutex_lock(&srs_lock);sr.tail=(sr.tail+1)%SRS_DEPTH;sr.count--;pthread_mutex_unlock(&srs_lock);
+    pthread_mutex_lock(&srs_lock);sr.tail=(sr.tail+1)%SRS_DEPTH;sr.count--;bool more=sr.count>0;pthread_mutex_unlock(&srs_lock);
+    if(!more) srs_lease_out();
+    else if(sr.leased) nr_pool_site_float_yield(); /* hands the token to a waiting higher class and queues for it again */
   }
+  srs_lease_out();
   return NULL;
 }
 /* nr_srs_passive_start: starts the passive SRS (uplink sounding) worker when the build enables it (NR_SRS_EXPORT_ON), the sensing and the SRS source are on, and the frame is TDD: reads cfr_max_re and cfr_antennas from [sensing], allocates the frequency and CFR buffers and the job ring, and starts the worker.
@@ -335,6 +368,7 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   sr.idle=(nr_srs_idle_t){.pct=5};
   atomic_store(&sr.pregate_skip,0);atomic_store(&sr.backoff_skip,0);
   atomic_store(&sr.budget_skip,0);atomic_store(&sr.idle_resets,0);
+  sr.leased=false;
   atomic_store(&sr.per_predicted,0);atomic_store(&sr.per_hit,0);atomic_store(&sr.per_miss,0);atomic_store(&sr.per_demoted,0);
   atomic_store(&sr.per_confirmed,0);atomic_store(&sr.per_audit_hit,0);atomic_store(&sr.per_audits,0);sr.audit_tick=sr.audits=sr.scan_rot=0;
   sr.slots_per_subframe=fp->slots_per_subframe;
@@ -365,7 +399,7 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
   if(pthread_mutex_trylock(&srs_lock)) {atomic_fetch_add(&sr.dropped,1);return;}
   if(!atomic_load_explicit(&sr.active,memory_order_relaxed) || ue!=sr.owner) {pthread_mutex_unlock(&srs_lock);return;}
   const NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
-  if(sr.count==SRS_DEPTH || fp->ofdm_symbol_size!=sr.grid.fft_size
+  if(fp->ofdm_symbol_size!=sr.grid.fft_size
       || fp->slots_per_subframe!=sr.slots_per_subframe || fp->nb_antennas_rx!=sr.grid.n_ant || 1000.0*fp->samples_per_subframe!=sr.samples_per_second || fp->frame_type!=TDD || fp->ofdm_offset_divisor==0) {
     atomic_fetch_add(&sr.dropped,1);pthread_mutex_unlock(&srs_lock);return;
   }
@@ -381,6 +415,8 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
     for(int l=8;l<14;l++) if(sl->max_num_of_symbol_per_slot_list[l].slot_config==1) mask|=1u<<l;
   }
   if(!mask) {pthread_mutex_unlock(&srs_lock);return;}
+  /* Only slots that carry UL symbols are eligible, so only they can be lost to a full queue (before: the full-queue test ran first and counted every slot of the frame). */
+  if(sr.count==SRS_DEPTH) {atomic_fetch_add(&sr.dropped,1);pthread_mutex_unlock(&srs_lock);return;}
   srs_job_t *job=&sr.jobs[sr.head];job->mask=mask;
   job->n_rb=fp->N_RB_UL;job->first_carrier_offset=fp->first_carrier_offset;
   memcpy(job->rot,fp->symbol_rotation[link_type_ul],sizeof(job->rot));

@@ -9,6 +9,7 @@
 #include "nr_sense_ul.h"
 #include "PHY/NR_UE_ISAC/nr_isac_ssb_axis.h"
 extern "C" void srs_test_init(void);
+extern "C" double srs_test_fep_cost_ns(int,int,int,int);
 extern "C" bool srs_test_generate(const nr_srs_grid_t *,const nr_srs_candidate_t *,int16_t *);
 // x86 AVX2 dft() requires 32 B aligned output; the SRS FEP writes straight into iq
 template <class T> struct Align32 {
@@ -447,4 +448,65 @@ TEST_F(SrsBlind,CfrKabsConventionConsistentAcrossSources) {
     if(sc==0) EXPECT_EQ(k[i],nr_sense_crb_re(crb,0)); // CSI-RS per-RB estimate
     if(i>=5) EXPECT_EQ(k[i],ssb[i-5]); // SSB retains its sub-RB shift
   }
+}
+
+// ---- time-domain comb gate (fix1101/srsq) ----
+namespace {
+// 4 antennas x 6 symbols x (N + 800) interleaved int16: white noise, plus (optionally) a comb-K signal of `nrb` RBs at per-sample amplitude `amp`
+std::vector<int16_t> td_window(int n,int ant,int win,unsigned seed,double sigma,int comb,double amp,bool dc)
+{
+  std::vector<int16_t> w((size_t)ant*6*win*2);
+  uint64_t x=seed*2654435761u+1;
+  auto gauss=[&]{double u=0;for(int i=0;i<12;i++){x=x*6364136223846793005ull+1442695040888963407ull;u+=(x>>40)/16777216.0;}return u-6.0;};
+  for(int a=0;a<ant;a++) for(int l=0;l<6;l++) {
+    int16_t *p=&w[2*(size_t)(a*6+l)*win];
+    // a comb-K signal is periodic with period n/K: random block of n/K samples repeated
+    std::vector<double> blk(2*(n/(comb?comb:1)));
+    for(auto &v:blk) v=amp*gauss();
+    for(int i=0;i<win;i++) for(int c=0;c<2;c++) {
+      double v=sigma*gauss()+(dc?300:0);
+      if(comb && amp>0) v+=blk[2*((i%(n/comb)))+c];
+      p[2*i+c]=(int16_t)lrint(v);
+    }
+  }
+  return w;
+}
+}
+TEST_F(SrsBlind,TdGateNoiseAndDcStayClosed) {
+  const int n=4096,win=n+800;
+  unsigned open=0;double mx=0;
+  for(unsigned t=0;t<600;t++) {
+    double st;
+    auto w=td_window(n,4,win,t,100,0,0,t&1);
+    open+=nr_srs_td_comb_gate(n,4,0x3f00,w.data(),win,&st);mx=std::max(mx,st);
+  }
+  EXPECT_EQ(open,0u) << "max stat " << mx;
+}
+TEST_F(SrsBlind,TdGateOpensOnEveryCombAndShortSlots) {
+  const int n=4096,win=n+800;
+  for(int comb:{2,4,8}) for(uint16_t mask:{0x3f00,0x3c00,0x3000}) {
+    unsigned open=0;
+    for(unsigned t=0;t<40;t++) {
+      auto w=td_window(n,4,win,t,100,comb,60,false); // per-sample SNR of the comb part: -4.4 dB
+      open+=nr_srs_td_comb_gate(n,4,mask,w.data(),win,nullptr);
+    }
+    EXPECT_EQ(open,40u) << "comb " << comb << " mask " << std::hex << mask;
+  }
+}
+TEST_F(SrsBlind,TdGateSensitivityAndCost) {
+  const int n=4096,win=n+800;
+  for(double amp:{10.0,15.0,20.0,30.0}) {
+    unsigned open=0;
+    for(unsigned t=0;t<100;t++) open+=nr_srs_td_comb_gate(n,4,0x3f00,td_window(n,4,win,t,100,4,amp,false).data(),win,nullptr);
+    printf("td gate: comb-4 signal/noise power per sample %.1f dB: open %u/100\n",20*log10(amp/100),open);
+  }
+  auto w=td_window(n,4,win,1,100,2,30,false);
+  struct timespec a,b;clock_gettime(CLOCK_MONOTONIC,&a);
+  volatile bool sink=false;
+  for(int i=0;i<2000;i++) sink=sink^nr_srs_td_comb_gate(n,4,0x3f00,w.data(),win,nullptr);
+  clock_gettime(CLOCK_MONOTONIC,&b);
+  const double gate_us=((b.tv_sec-a.tv_sec)*1e9+(b.tv_nsec-a.tv_nsec))/2000/1e3;
+  const double scan_us=srs_test_fep_cost_ns(n,4,6,300)/1e3,pred_us=srs_test_fep_cost_ns(n,4,2,300)/1e3;
+  printf("cost per slot (4 ant, N=4096): td gate %.1f us; FFTs of an undirected scan (6 symbols, one offset) %.1f us; FFTs of a predicted occasion (2 symbols) %.1f us\n",gate_us,scan_us,pred_us);
+  EXPECT_LT(gate_us,scan_us/5);
 }
