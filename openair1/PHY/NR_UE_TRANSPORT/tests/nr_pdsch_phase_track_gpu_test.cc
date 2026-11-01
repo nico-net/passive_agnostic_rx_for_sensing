@@ -175,3 +175,215 @@ TEST_F(PhaseTrackGpu, TinterpKernelMatchesCpuBitExact)
     cudaStreamDestroy(st);
   }
 }
+
+/* ---- FP32 class vs the double (bit-exact) class, randomized grants -------------------------------------------------------------------------------------------------------------------
+ * The production graph pass runs every PHASE-TRACK kernel (k_tinterp, k_cpe_*) and the IRC final stage in float (G.fp32 = nr_gpu_pass_fp32_default() = 1); the double instantiation stays
+ * the CPU-exact reference. Same random 4-RX grant (Nl 1..4, 51..273 PRB, QPSK..256QAM, CFO + per-branch LO drift, 20..35 dB), run through both instantiations of the module.
+ * Tolerances, from the quantisation of the chain:
+ *  - the channel rows are int16 after the CPE rotation (nrpt_rot_re rounds): float and double may differ by one LSB where the rounding boundary lies between them, never by more
+ *    (the float phasor error is ~1e-6 rad x |h| (<= 2^14) = 0.02 LSB);
+ *  - the CPE angle is a ratio of sums over >= 48 REs, float rel. error ~1e-6 -> |dphi| <= 1e-4 rad (the rotation of a 2^13 channel by 1e-4 rad is 0.8 LSB);
+ *  - the LLR is an int16 saturating function of z/thresholds that are themselves rounded to int16 (nr_mmse3_s16): a rounding-boundary flip of z or a threshold moves an LLR by its
+ *    slope (<= 2^(Qm/2 - 1) LSB per LSB of z for 256QAM, 8 here), so |dLLR| <= 8 LSB for every LLR that is not saturated, with such flips on < 0.5 % of the LLRs;
+ *  - a hard decision (LLR sign) may differ only where the double LLR is within the same bound of zero (the decision is then a coin flip of the rounding). */
+namespace {
+struct Rg {
+  int nprb, ncol, nl, qm, N;
+  std::vector<std::vector<int16_t>> est, y; /* est [nl*4][N*14*2], y [4][N*14*2] */
+};
+double g_u()
+{
+  static std::mt19937_64 r(20261101);
+  return std::uniform_real_distribution<double>(0.0, 1.0)(r);
+}
+int g_pick(std::initializer_list<int> v)
+{
+  return *(v.begin() + (size_t)(g_u() * v.size()) % v.size());
+}
+Rg random_grant()
+{
+  static std::mt19937_64 gen(77);
+  std::normal_distribution<double> nrm(0.0, std::sqrt(0.5));
+  Rg g;
+  g.nprb = g_pick({51, 79, 106, 160, 217, 273});
+  g.nl = 1 + (int)(g_u() * 4) % 4;
+  g.qm = g_pick({2, 4, 6, 8});
+  g.ncol = 12 * g.nprb;
+  g.N = 4096;
+  const int nrx = 4, dm0 = 2, dm1 = 11;
+  const double A = 6000.0, f_hz = (g_u() - 0.5) * 800.0, dmrs_db = 30.0, data_db = 20.0 + 15.0 * g_u(), sym_s = 1e-3 / 28.0;
+  double drift[4];
+  for (double &d : drift) d = (g_u() - 0.5) * 160.0;
+  std::vector<std::complex<double>> H((size_t)g.nl * nrx * g.ncol);
+  for (auto &v : H) v = std::complex<double>(nrm(gen), nrm(gen)) * A;
+  g.est.assign((size_t)g.nl * nrx, std::vector<int16_t>((size_t)g.N * 14 * 2, 0));
+  g.y.assign(nrx, std::vector<int16_t>((size_t)g.N * 14 * 2, 0));
+  auto ph = [&](int a, int m) { return 2 * M_PI * (f_hz + drift[a]) * (m - dm0) * sym_s + 0.3 * a; };
+  auto put = [](std::vector<int16_t> &v, size_t idx, std::complex<double> c) {
+    v[2 * idx] = (int16_t)std::lround(std::max(-32767.0, std::min(32767.0, c.real())));
+    v[2 * idx + 1] = (int16_t)std::lround(std::max(-32767.0, std::min(32767.0, c.imag())));
+  };
+  const double nd = A * std::pow(10.0, -dmrs_db / 20.0), nda = A * std::pow(10.0, -data_db / 20.0);
+  for (int r = 0; r < g.nl * nrx; r++)
+    for (int m : {dm0, dm1})
+      for (int k = 0; k < g.ncol; k++)
+        put(g.est[r], (size_t)m * g.N + k, H[(size_t)r * g.ncol + k] * std::polar(1.0, ph(r % nrx, m)) + std::complex<double>(nrm(gen), nrm(gen)) * nd);
+  const int mq = 1 << (g.qm / 2);
+  double pw = 0;
+  for (int i = 0; i < mq; i++) pw += (2.0 * i - (mq - 1)) * (2.0 * i - (mq - 1));
+  pw = 2 * pw / mq;
+  for (int m = 0; m < 14; m++)
+    for (int k = 0; k < g.ncol; k++) {
+      std::complex<double> s[4];
+      for (int l = 0; l < g.nl; l++)
+        s[l] = std::complex<double>(2.0 * (int)(g_u() * mq) - (mq - 1), 2.0 * (int)(g_u() * mq) - (mq - 1)) / std::sqrt(pw);
+      for (int a = 0; a < nrx; a++) {
+        std::complex<double> v = 0;
+        for (int l = 0; l < g.nl; l++) v += H[((size_t)l * nrx + a) * g.ncol + k] * std::polar(1.0, ph(a, m)) * s[l];
+        put(g.y[a], (size_t)m * g.N + k, v + std::complex<double>(nrm(gen), nrm(gen)) * nda);
+      }
+    }
+  return g;
+}
+struct Out {
+  std::vector<int16_t> llr;
+  std::vector<int16_t> h;       /* rotated channel rows (run) */
+  float phi[14][4];
+  std::vector<int16_t> est;     /* the interpolated estimate planes (dev) */
+};
+/* host-run path (k_cpe in the instantiation `f32`); `dev`: launch-only path with the interpolation (k_tinterp) */
+void run_one(const Rg &g, int f32, bool dev, Out &o, int cpe = 1)
+{
+  const int ext = (g.ncol + 15) & ~15, nrx = 4;
+  nr_gpu_demod_job_t j;
+  memset(&j, 0, sizeof(j));
+  Bufs B;
+  B.rx = mm<int16_t>((size_t)nrx * 14 * g.N * 2);
+  B.est = mm<int16_t>((size_t)g.nl * nrx * 14 * g.N * 2);
+  B.gy = mm<int16_t>((size_t)14 * ext * 2);
+  B.gh = mm<int16_t>((size_t)14 * ext * 2);
+  const size_t arr = (size_t)14 * 4 * ext * 2;
+  B.comp = mm<int16_t>(arr); B.mag = mm<int16_t>(arr); B.magb = mm<int16_t>(arr); B.magr = mm<int16_t>(arr);
+  const size_t nllr = (size_t)12 * g.ncol * g.qm * g.nl;
+  B.llr = mm<int16_t>(nllr);
+  for (int a = 0; a < nrx; a++) memcpy(B.rx + (size_t)a * 14 * g.N * 2, g.y[a].data(), (size_t)14 * g.N * 4);
+  for (int r = 0; r < g.nl * nrx; r++) memcpy(B.est + (size_t)r * 14 * g.N * 2, g.est[r].data(), (size_t)14 * g.N * 4);
+  if (!dev) { /* the host-run path takes the interpolated estimate (the CPU does it ahead of the kernels) */
+    std::vector<c16_t *> rows(g.nl * nrx);
+    for (int r = 0; r < g.nl * nrx; r++) rows[r] = (c16_t *)(B.est + (size_t)r * 14 * g.N * 2);
+    ASSERT_EQ(nr_pdsch_phase_tinterp(rows.data(), g.nl, nrx, g.N, g.ncol, (1u << 2) | (1u << 11), 2, 14), 1);
+  }
+  for (int m = 0; m < 14; m++)
+    for (int i = 0; i < ext; i++) {
+      B.gy[((size_t)m * ext + i) * 2] = (int16_t)i;  B.gy[((size_t)m * ext + i) * 2 + 1] = i < g.ncol ? 1 : 0;
+      B.gh[((size_t)m * ext + i) * 2] = (int16_t)i;  B.gh[((size_t)m * ext + i) * 2 + 1] = (int16_t)(m + 1);
+    }
+  j.nbRx = nrx; j.nl = g.nl; j.qm = g.qm; j.N = g.N;
+  j.start_symbol = 2; j.nb_symbols = 12; j.first_symbol = 3;
+  for (int m = 2; m < 14; m++) j.sym_mask |= (uint16_t)(1u << m);
+  j.rx_stride = 14 * g.N; j.est_stride = 14 * g.N; j.buf = ext; j.ext = ext;
+  uint32_t off = 0;
+  for (int m = 2; m < 14; m++) { j.nre[m] = g.ncol; j.llr_off[m] = off; off += g.ncol * g.qm * g.nl; }
+  j.rxdataF = B.rx; j.est = B.est; j.geo_y = B.gy; j.geo_h = B.gh;
+  j.comp = B.comp; j.mag = B.mag; j.magb = B.magb; j.magr = B.magr; j.llr = B.llr;
+  j.mode = 3; j.thr_coef = std::pow(10.0, -1.2); j.align = 2;
+  j.qam_mode = g.nl >= 2 ? 3 : 0;
+  j.m3_nvfac = std::pow(10.0, 2.1);
+  j.nvar = 1000;
+  j.mag_per_layer = g.nl >= 2;
+  j.want_kappa = 1;
+  j.cpe = cpe; j.tint = dev ? 1 : 0; j.tint_cols = g.ncol;
+  j.tint_dm = (1u << 2) | (1u << 11);
+  j.demod_fp32 = f32;
+  if (!dev) {
+    ASSERT_EQ(g_run(&j), 0);
+    o.h.assign((const int16_t *)j.h_ext, (const int16_t *)j.h_ext + (size_t)14 * 16 * NR_GPU_DEMOD_MAX_EXT * 2);
+    memcpy(o.phi, j.cpe_phi, sizeof(o.phi));
+    o.llr.assign(B.llr, B.llr + nllr);
+    g_rel(j.ctx);
+  } else {
+    cudaStream_t st;
+    ASSERT_EQ(cudaStreamCreate(&st), cudaSuccess);
+    nr_gpu_buf_t lb = {};
+    lb.dev = B.llr;
+    ASSERT_EQ(g_dev(&j, &lb, st), 0);
+    ASSERT_EQ(cudaStreamSynchronize(st), cudaSuccess);
+    cudaStreamDestroy(st);
+    o.est.assign(B.est, B.est + (size_t)g.nl * nrx * 14 * g.N * 2);
+    o.llr.assign(B.llr, B.llr + nllr);
+  }
+  for (int16_t *p : {B.rx, B.est, B.gy, B.gh, B.comp, B.mag, B.magb, B.magr, B.llr}) cudaFree(p);
+}
+} // namespace
+
+TEST_F(PhaseTrackGpu, Fp32ClassMatchesDoubleClassRandomGrants)
+{
+  struct Cnt { long n = 0, big = 0, sign = 0, sign_far = 0, diff = 0; int worst = 0; };
+  auto cmp = [](Cnt &c, const Out &a, const Out &b) {
+    for (size_t q = 0; q < a.llr.size(); q++) {
+      const int x = a.llr[q], y = b.llr[q], dl = std::abs(x - y);
+      c.n++;
+      c.worst = std::max(c.worst, dl);
+      c.big += dl > 8;
+      c.diff += dl > 0;
+      if ((x > 0 && y < 0) || (x < 0 && y > 0)) {
+        c.sign++;
+        c.sign_far += std::abs(x) > 8;
+      }
+    }
+  };
+  Cnt on, off, dv;
+  long n_h = 0, n_h2 = 0, n_est = 0, n_est2 = 0, cpe_n = 0;
+  double max_dphi = 0;
+  const int trials = 48;
+  for (int t = 0; t < trials; t++) {
+    const Rg g = random_grant();
+    Out d, f, dn, fn, di, fi;
+    run_one(g, 0, false, d);
+    run_one(g, 1, false, f);
+    run_one(g, 0, false, dn, 0);
+    run_one(g, 1, false, fn, 0);
+    run_one(g, 0, true, di);
+    run_one(g, 1, true, fi);
+    if (HasFatalFailure()) return;
+    /* CPE angle and rotated channel rows */
+    for (int m = 3; m < 14; m++) {
+      if (m == 11) continue;
+      for (int l = 0; l < g.nl; l++) {
+        max_dphi = std::max(max_dphi, (double)std::fabs(d.phi[m][l] - f.phi[m][l]));
+        cpe_n += d.phi[m][l] != 0.f;
+      }
+      for (int r = 0; r < g.nl * 4; r++)
+        for (int i = 0; i < g.ncol; i++)
+          for (int c = 0; c < 2; c++) {
+            const size_t ix = (((size_t)m * 16 + r) * NR_GPU_DEMOD_MAX_EXT + i) * 2 + c;
+            n_h++;
+            n_h2 += std::abs((int)d.h[ix] - (int)f.h[ix]) > 1;
+          }
+    }
+    /* the interpolated estimate planes */
+    for (int r = 0; r < g.nl * 4; r++)
+      for (int m = 2; m < 14; m++)
+        for (int i = 0; i < g.ncol; i++)
+          for (int c = 0; c < 2; c++) {
+            const size_t ix = (((size_t)r * 14 + m) * g.N + i) * 2 + c;
+            n_est++;
+            n_est2 += std::abs((int)di.est[ix] - (int)fi.est[ix]) > 1;
+          }
+    cmp(on, d, f);
+    cmp(off, dn, fn);
+    cmp(dv, di, fi);
+  }
+  printf("fp32 vs fp64, %d grants. PHASE-TRACK outputs: CPE %ld tracked layer-symbols, max |dphi| %.2e rad; rotated h %ld values, %ld off by >1 LSB; interpolated est %ld values, %ld off by >1 LSB\n"
+         "  LLRs (whole FP32 class vs whole double class): tracker on %ld LLRs, %.3f %% differ, %ld sign diffs (%ld with |LLR|>8), max %d; tracker off: %.3f %% differ, %ld sign diffs, max %d; "
+         "pass path (launch-only, with interpolation): %ld LLRs, %.4f %% differ, %ld sign diffs, %ld with |d|>8, max %d\n",
+         trials, cpe_n, max_dphi, n_h, n_h2, n_est, n_est2, on.n, 100.0 * on.diff / on.n, on.sign, on.sign_far, on.worst, 100.0 * off.diff / off.n, off.sign, off.worst, dv.n, 100.0 * dv.diff / dv.n, dv.sign, dv.big, dv.worst);
+  EXPECT_GT(cpe_n, 100) << "the CFO grants must exercise the tracker";
+  EXPECT_LE(max_dphi, 1e-4);
+  EXPECT_EQ(n_h2, 0);
+  EXPECT_EQ(n_est2, 0);
+  /* the LLR gate of the production FP32 pass (nr_gpu_pass_fp32_shadow): sign disagreement <= 0.1 %; the tracker must not add to what the float demod does by itself */
+  EXPECT_LE(dv.sign, dv.n / 1000);
+  EXPECT_LE(dv.big, dv.n / 1000) << "|dLLR| > 8 LSB on more than 0.1 % of the LLRs";
+  EXPECT_LE(on.sign, off.sign + on.n / 100000) << "the float tracker added sign flips (> 0.001 %) on top of the float demod's";
+}

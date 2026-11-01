@@ -1484,8 +1484,12 @@ __global__ void k_fir(const Par j, const nr_gpu_chest_row_t *rows, const short2 
 /* D4 IRC (2026-10-31): the DM-RS interference covariance of the DL graph pass. After k_fir the LS scratch rows still hold the pilot-pair LS values and the estimate rows the
  * final estimate, so the residual of nr_pdsch_channel_estimation's noise estimate (LS - estimate, one vector per LS value, across the nb RX rows of one (DM-RS symbol, layer))
  * is added to the per-group integer sums acc[g] (nr_irc_sum_t, order independent: bit-equal to the CPU's nr_pdsch_irc_cov). Block (p, g): row set p, group g (96 estimate subcarriers); the rows of a chunk are ordered (DM-RS symbol, layer, antenna), nb consecutive rows per pair. */
-__global__ void k_irc(const nr_gpu_chest_row_t *rows, const short2 *ls, int nb, unsigned long long *acc)
+/* GPUPERF: NB (the RX branch count) is a template argument so that v[] and the loops over it live in registers (with a run-time nb the 33 sums went to local memory), and the block is one warp:
+ * a group has 12 NR_IRC_GRP_PRB / rep (<= 24) LS values, 128 threads left three of four warps idle and reduced 33 sums over all of them */
+#define IRC_THREADS 32
+template <int NB> __global__ void k_irc(const nr_gpu_chest_row_t *rows, const short2 *ls, unsigned long long *acc)
 {
+  constexpr int nb = NB;
   const int p = blockIdx.x, g = blockIdx.y, nre = 12 * rows[p * nb].nb_rb;
   const int rep = rows[p * nb].type == 1 ? 4 : 6;
   const int klo = 12 * NR_IRC_GRP_PRB * g, khi = min(nre, klo + 12 * NR_IRC_GRP_PRB); /* the group's estimate subcarriers; a group past the row's band has none */
@@ -1506,20 +1510,24 @@ __global__ void k_irc(const nr_gpu_chest_row_t *rows, const short2 *ls, int nb, 
       }
     v[32]++;
   }
-  __shared__ long long red[8][33];
+  __shared__ long long red[33];
   for (int q = 0; q < 33; q++) {
     for (int off = 16; off > 0; off >>= 1)
       v[q] += __shfl_down_sync(0xffffffffu, v[q], off);
-    if ((threadIdx.x & 31) == 0)
-      red[threadIdx.x >> 5][q] = v[q];
+    if (threadIdx.x == 0)
+      red[q] = v[q];
   }
-  __syncthreads();
-  if (threadIdx.x < 33) {
-    long long t = 0;
-    for (int w = 0; w < (int)(blockDim.x >> 5); w++)
-      t += red[w][threadIdx.x];
-    if (t)
-      atomicAdd(acc + (size_t)g * (sizeof(nr_irc_sum_t) / sizeof(long long)) + threadIdx.x, (unsigned long long)t); /* two's complement: negative sums add correctly */
+  __syncwarp();
+  for (int q = threadIdx.x; q < 33; q += IRC_THREADS) /* 33 sums, 32 lanes */
+    if (red[q] != 0)
+      atomicAdd(acc + (size_t)g * (sizeof(nr_irc_sum_t) / sizeof(long long)) + q, (unsigned long long)red[q]); /* two's complement: negative sums add correctly */
+}
+static void launch_irc(dim3 g, const nr_gpu_chest_row_t *rows, const short2 *ls, int nb, unsigned long long *acc, cudaStream_t s)
+{
+  switch (nb) {
+    case 2: k_irc<2><<<g, IRC_THREADS, 0, s>>>(rows, ls, acc); break;
+    case 3: k_irc<3><<<g, IRC_THREADS, 0, s>>>(rows, ls, acc); break;
+    default: k_irc<4><<<g, IRC_THREADS, 0, s>>>(rows, ls, acc); break;
   }
 }
 } // namespace nrch
@@ -1783,7 +1791,7 @@ extern "C" int nr_pdsch_gpu_chest_irc_at(const nr_gpu_chest_job_t *j, int r0, in
   if (g_init_state != 1 || !g_exact_ok || !j || !acc || nb < 2 || nb > 4 || n < nb || n % nb || r0 < 0 || r0 + n > j->n_rows || n > PASS_LS_ROWS || nrb_max < 1
       || 12 * nrb_max > 4096 || j->type == 3 || slot < 0 || slot >= PASS_SLOTS)
     return -1;
-  nrch::k_irc<<<dim3(n / nb, nr_irc_groups_of(nrb_max)), 128, 0, (cudaStream_t)stream>>>(g_pass_rd[slot] + r0, g_pass_ls[slot], nb, (unsigned long long *)acc);
+  nrch::launch_irc(dim3(n / nb, nr_irc_groups_of(nrb_max)), g_pass_rd[slot] + r0, g_pass_ls[slot], nb, (unsigned long long *)acc, (cudaStream_t)stream);
   return cudaPeekAtLastError() == cudaSuccess ? 0 : -1;
 }
 extern "C" int nr_pdsch_gpu_chest_dev(const nr_gpu_chest_job_t *j, int n, nr_gpu_buf_t *est_dev, nr_gpu_buf_t *nvar_dev, int slot, void *stream)
@@ -1824,7 +1832,7 @@ extern "C" int nr_pdsch_gpu_bench_irc(int nprb, int nl, int nb, int reps, void *
   const dim3 g(nrows / nb, nr_irc_groups_of(nprb));
   for (int r = -2; r < reps; r++) {
     if (r == 0) cudaEventRecord(e0);
-    nrch::k_irc<<<g, 128>>>(rows, ls, nb, (unsigned long long *)acc);
+    nrch::launch_irc(g, rows, ls, nb, (unsigned long long *)acc, 0);
   }
   cudaEventRecord(e1);
   cudaEventSynchronize(e1);

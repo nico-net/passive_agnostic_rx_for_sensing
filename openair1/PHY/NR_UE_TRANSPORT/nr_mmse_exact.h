@@ -19,6 +19,7 @@
 #if defined(__CUDACC__)
 #define NR_MMSE_FN static __host__ __device__ inline
 #define NR_MMSE_HD static __host__ __device__ inline
+#define NR_MMSE_FN_INL static __host__ __device__ __forceinline__ /* GPUPERF: a function the kernel calls with a literal branch count, so its loops unroll into registers */
 #elif defined(__GNUC__) && !defined(__clang__)
 #define NR_MMSE_FN static __attribute__((noinline, unused, optimize("fp-contract=off")))
 #else
@@ -26,6 +27,9 @@
 #endif
 #ifndef NR_MMSE_HD
 #define NR_MMSE_HD static inline
+#endif
+#ifndef NR_MMSE_FN_INL
+#define NR_MMSE_FN_INL NR_MMSE_FN
 #endif
 
 /* D4 IRC: per-group sums of the DM-RS LS residual outer products (exact integers) and the layout of a group's whitening matrix, see nr_mmse_exact_body.h */

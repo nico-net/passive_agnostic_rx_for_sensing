@@ -160,7 +160,7 @@ NR_MMSE_FN void NR_MMSE_NM(nr_mmse3_re)(int nl, int nrx, const int16_t hre[4][4]
  * whitened noise per dimension mu * noise_fac; the nvar-based s2 of a square channel (nrx == nl) is multiplied by it. Ill-conditioned (pivot spread above 400, a non-finite
  * pivot) or too few samples: identity, i.e. the scalar model unchanged. w[group * NR_IRC_WSTRIDE]: wr[10], wi[10] (lower triangle, row-major a (a + 1) / 2 + k), w[20] = 1 when
  * active, w[21] = noise_fac, w[22] = whitening gain estimate (linear). */
-NR_MMSE_FN void NR_MMSE_NM(nr_irc_final)(const nr_irc_sum_t *s, int nb, NR_MMSE_R *w)
+NR_MMSE_FN_INL void NR_MMSE_NM(nr_irc_final)(const nr_irc_sum_t *s, int nb, NR_MMSE_R *w)
 {
   for (int t = 0; t < NR_IRC_WSTRIDE; t++)
     w[t] = ((NR_MMSE_R)0.0);

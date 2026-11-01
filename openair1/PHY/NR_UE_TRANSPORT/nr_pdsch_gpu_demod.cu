@@ -577,12 +577,20 @@ template <typename R = double> __global__ void k_align(__grid_constant__ const J
  * tree (nr_pdsch_phase_track.c): the interpolation block (pair, branch, 48 subcarriers) forms the integer correlation sum (exact in any order), the phasor and every RE of every symbol between
  * the pair; k_cpe_* give each NRPT_CPE_BLK-RE chunk of a symbol to one thread (sequential, RE order, like the CPU), then add the chunk partials in chunk order. ---- */
 #define TI_MAXD 4 /* DM-RS symbols of a grant */
-template <typename R> __global__ void k_tinterp(__grid_constant__ const JobK jk_)
+template <typename R> __device__ void irc_final_body(const nr_gpu_demod_job_t &j, const nr_irc_sum_t *acc, R *w, Shared *sh);
+/* GPUPERF: grid z = 0 is the IRC finalize (k_irc_final's work, `acc` non-null) running beside the interpolation instead of ahead of it: the two are independent (the whitening is first read
+ * by the mode-3 solve, the interpolated estimate by the extraction), so its ~9 us chain no longer adds to the critical path; z = 1 .. TI_MAXD are the DM-RS pairs */
+template <typename R> __global__ void k_tinterp(__grid_constant__ const JobK jk_, const nr_irc_sum_t *acc, R *irc_w, Shared *sh)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
+  if (blockIdx.z == 0) {
+    if (acc && blockIdx.x == 0 && blockIdx.y == 0)
+      irc_final_body<R>(j, acc, irc_w, sh);
+    return;
+  }
   if (!j.tint)
     return;
-  const int c = blockIdx.x, a = blockIdx.y, p = blockIdx.z, t = threadIdx.x; /* block c of branch a, DM-RS index p (the pair p, p + 1; p = 0 / nd - 1 also hold the outer symbols) */
+  const int c = blockIdx.x, a = blockIdx.y, p = blockIdx.z - 1, t = threadIdx.x; /* block c of branch a, DM-RS index p (the pair p, p + 1; p = 0 / nd - 1 also hold the outer symbols) */
   const int ncol = j.tint_cols, N = j.N;
   int dsym[TI_MAXD], nd = 0;
   for (int m = 0; m < 14 && nd < TI_MAXD; m++)
@@ -688,7 +696,8 @@ template <typename R> struct CpeScr {
   uint32_t n[4][NRPT_CPE_MAXCH]; /* pass 2: terms taken, per layer and chunk */
   uint32_t ok[NRPT_CPE_MAXCH];   /* pass 1: bit k = the chunk's RE k was solved */
 };
-#define CPE_THREADS 32
+#define CPE_CPB 16 /* chunks of NRPT_CPE_BLK REs per block of k_cpe_pass1 / _pass2 */
+#define CPE_PT (CPE_CPB * NRPT_CPE_BLK) /* their threads: one per RE */
 #define CPE_APPLY_RE 256
 /* the symbol the launch works on, or -1: PHASE-TRACK enabled, a data symbol of the grant, the layer count the kernel was instantiated for, a trackable geometry */
 template <int NL> __device__ __forceinline__ bool cpe_gate(const nr_gpu_demod_job_t &j, const Shared *sh, int m, int &a0, int &nb, uint32_t &nre)
@@ -702,51 +711,80 @@ template <int NL> __device__ __forceinline__ bool cpe_gate(const nr_gpu_demod_jo
   return !(nb < 1 || a0 + nb > 4 || nre < NRPT_MIN_RE || nre > (uint32_t)EXT);
 }
 static_assert(sizeof(CpeScr<double>) <= CPE_SCR_BYTES, "CPE scratch size");
+/* the zero-forcing solution of one RE of the tracker (NB branches from a0), as the CPU's nrpt_zf */
+template <int NL, int NB, typename R> __device__ __forceinline__ int cpe_zf_re(const nrd_c16 *y, const nrd_c16 *h, int nbRx, int m, int a0, uint32_t i, R *xr, R *xi)
+{
+  int yr[4], yi[4], hr[4][4], hi[4][4];
+  for (int a = 0; a < NB; a++) {
+    const nrd_c16 yv = y[((size_t)m * NR_GPU_DEMOD_MAX_RX + a0 + a) * EXT + i];
+    yr[a] = yv.r;
+    yi[a] = yv.i;
+    for (int l = 0; l < NL; l++) {
+      const nrd_c16 hv = h[((size_t)m * 16 + l * nbRx + a0 + a) * EXT + i];
+      hr[l][a] = hv.r;
+      hi[l][a] = hv.i;
+    }
+  }
+  if constexpr (std::is_same<R, double>::value) return nrpt_zf_d(NL, NB, yr, yi, hr, hi, xr, xi);
+  else return nrpt_zf_f(NL, NB, yr, yi, hr, hi, xr, xi);
+}
 template <int NL, typename R> __global__ void k_cpe_pass1(__grid_constant__ const JobK jk_, const nrd_c16 *y, const nrd_c16 *h, Shared *sh, Cx2<R> *xs, CpeScr<R> *scr)
 {
   const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
-  const int m = blockIdx.y;
+  const int m = blockIdx.y, t = threadIdx.x;
   int a0, nb;
   uint32_t nre;
   if (!cpe_gate<NL>(j, sh, m, a0, nb, nre))
     return;
-  const uint32_t c = blockIdx.x * CPE_THREADS + threadIdx.x, nch = (nre + NRPT_CPE_BLK - 1) / NRPT_CPE_BLK;
-  if (c >= nch)
+  const uint32_t nch = (nre + NRPT_CPE_BLK - 1) / NRPT_CPE_BLK;
+  if (blockIdx.x * CPE_CPB >= nch)
     return;
   CpeScr<R> &S = scr[m];
-  R pp[NL];
-  for (int l = 0; l < NL; l++)
-    pp[l] = (R)0;
-  uint32_t mask = 0;
-  const uint32_t i1 = (c + 1) * NRPT_CPE_BLK < nre ? (c + 1) * NRPT_CPE_BLK : nre;
-  for (uint32_t i = c * NRPT_CPE_BLK; i < i1; i++) {
-    int yr[4], yi[4], hr[4][4], hi[4][4];
-    for (int a = 0; a < nb; a++) {
-      const nrd_c16 yv = y[((size_t)m * NR_GPU_DEMOD_MAX_RX + a0 + a) * EXT + i];
-      yr[a] = yv.r;
-      yi[a] = yv.i;
-      for (int l = 0; l < NL; l++) {
-        const nrd_c16 hv = h[((size_t)m * 16 + l * j.nbRx + a0 + a) * EXT + i];
-        hr[l][a] = hv.r;
-        hi[l][a] = hv.i;
-      }
-    }
+  /* a thread per RE (the ZF of an RE is independent of its neighbours); the chunk's power sum and valid mask are then formed by one thread per chunk from the shared per-RE
+   * values, in RE order from zero as before, so the partials are the CPU's bit for bit in double */
+  __shared__ R s_pw[NL][CPE_PT];
+  __shared__ uint8_t s_ok[CPE_PT];
+  const uint32_t i = blockIdx.x * CPE_PT + t;
+  uint8_t ok = 0;
+  if (i < nre) {
     R xr[4], xi[4];
-    int ok;
-    if constexpr (std::is_same<R, double>::value) ok = nrpt_zf_d(NL, nb, yr, yi, hr, hi, xr, xi);
-    else ok = nrpt_zf_f(NL, nb, yr, yi, hr, hi, xr, xi);
-    if (!ok)
-      continue;
-    mask |= 1u << (i - c * NRPT_CPE_BLK);
+    int zok;
+    switch (nb) { /* the branch count as a literal: the per-RE matrices stay in registers */
+      case 4: zok = cpe_zf_re<NL, 4, R>(y, h, j.nbRx, m, a0, i, xr, xi); break;
+      case 3: zok = cpe_zf_re<NL, 3, R>(y, h, j.nbRx, m, a0, i, xr, xi); break;
+      case 2: zok = cpe_zf_re<NL, 2, R>(y, h, j.nbRx, m, a0, i, xr, xi); break;
+      default: zok = cpe_zf_re<NL, 1, R>(y, h, j.nbRx, m, a0, i, xr, xi); break;
+    }
+    ok = (uint8_t)zok;
     for (int l = 0; l < NL; l++) {
-      if constexpr (std::is_same<R, double>::value) pp[l] = pp[l] + nrpt_pow2_d(xr[l], xi[l]);
-      else pp[l] = pp[l] + nrpt_pow2_f(xr[l], xi[l]);
-      xs[((size_t)m * 4 + l) * EXT + i] = Cx2<R>{xr[l], xi[l]};
+      R pw = (R)0;
+      if (zok) {
+        if constexpr (std::is_same<R, double>::value) pw = nrpt_pow2_d(xr[l], xi[l]);
+        else pw = nrpt_pow2_f(xr[l], xi[l]);
+        xs[((size_t)m * 4 + l) * EXT + i] = Cx2<R>{xr[l], xi[l]};
+      }
+      s_pw[l][t] = pw;
     }
   }
-  for (int l = 0; l < NL; l++)
-    S.p[0][l][c] = pp[l];
-  S.ok[c] = mask;
+  s_ok[t] = ok;
+  __syncthreads();
+  const uint32_t c = blockIdx.x * CPE_CPB + t;
+  if (t < CPE_CPB && c < nch) {
+    R pp[NL];
+    for (int l = 0; l < NL; l++)
+      pp[l] = (R)0;
+    uint32_t mask = 0;
+    for (int k = 0; k < NRPT_CPE_BLK; k++) {
+      if (!s_ok[t * NRPT_CPE_BLK + k])
+        continue;
+      mask |= 1u << k;
+      for (int l = 0; l < NL; l++)
+        pp[l] = pp[l] + s_pw[l][t * NRPT_CPE_BLK + k];
+    }
+    for (int l = 0; l < NL; l++)
+      S.p[0][l][c] = pp[l];
+    S.ok[c] = mask;
+  }
 }
 template <int NL, typename R> __global__ void k_cpe_pass2(__grid_constant__ const JobK jk_, Shared *sh, const Cx2<R> *xs, CpeScr<R> *scr)
 {
@@ -756,11 +794,13 @@ template <int NL, typename R> __global__ void k_cpe_pass2(__grid_constant__ cons
   uint32_t nre;
   if (!cpe_gate<NL>(j, sh, m, a0, nb, nre))
     return;
-  const uint32_t c = blockIdx.x * CPE_THREADS + t, nch = (nre + NRPT_CPE_BLK - 1) / NRPT_CPE_BLK;
-  if (blockIdx.x * CPE_THREADS >= nch)
+  const uint32_t nch = (nre + NRPT_CPE_BLK - 1) / NRPT_CPE_BLK;
+  if (blockIdx.x * CPE_CPB >= nch)
     return;
   CpeScr<R> &S = scr[m];
   __shared__ R s_g[4];
+  __shared__ R s_t[3][NL][CPE_PT]; /* the RE's terms (re, im, q) of its layer; 0 for an RE left out */
+  __shared__ uint8_t s_use[NL][CPE_PT];
   if (t < NL) { /* the layer's mean power: the chunk partials in chunk order (the CPU's sum), one lane per layer */
     R pw = (R)0;
     uint32_t npw = 0;
@@ -771,37 +811,43 @@ template <int NL, typename R> __global__ void k_cpe_pass2(__grid_constant__ cons
     s_g[t] = pw > (R)0 && npw > 0 ? divR((R)1, divR(pw, (R)npw)) : (R)0;
   }
   __syncthreads();
-  if (c >= nch)
-    return;
-  R pr[NL], pi[NL], pq[NL];
-  uint32_t pn[NL];
+  const uint32_t i = blockIdx.x * CPE_PT + t, c0 = i / NRPT_CPE_BLK;
+  /* a thread per RE: the term of each layer from the kept ZF output (REs whose ZF failed are not in the mask) */
   for (int l = 0; l < NL; l++) {
-    pr[l] = pi[l] = pq[l] = (R)0;
-    pn[l] = 0;
-  }
-  const uint32_t mask = S.ok[c], i1 = (c + 1) * NRPT_CPE_BLK < nre ? (c + 1) * NRPT_CPE_BLK : nre;
-  for (uint32_t i = c * NRPT_CPE_BLK; i < i1; i++) {
-    if (!((mask >> (i - c * NRPT_CPE_BLK)) & 1))
-      continue;
-    for (int l = 0; l < NL; l++) {
+    uint8_t use = 0;
+    R tr = (R)0, ti = (R)0, tq = (R)0;
+    if (i < nre && ((S.ok[c0] >> (i - c0 * NRPT_CPE_BLK)) & 1)) {
       const Cx2<R> x = xs[((size_t)m * 4 + l) * EXT + i];
-      R tr, ti, tq;
       int ok;
       if constexpr (std::is_same<R, double>::value) ok = s_g[l] > (R)0 && nrpt_term4_d(x.x, x.y, s_g[l], &tr, &ti, &tq);
       else ok = s_g[l] > (R)0 && nrpt_term4_f(x.x, x.y, s_g[l], &tr, &ti, &tq);
-      if (ok) {
-        pr[l] = pr[l] + tr;
-        pi[l] = pi[l] + ti;
-        pq[l] = pq[l] + tq;
-        pn[l]++;
-      }
+      use = (uint8_t)ok;
     }
+    s_use[l][t] = use;
+    s_t[0][l][t] = tr;
+    s_t[1][l][t] = ti;
+    s_t[2][l][t] = tq;
   }
-  for (int l = 0; l < NL; l++) {
-    S.p[1][l][c] = pr[l];
-    S.p[2][l][c] = pi[l];
-    S.p[3][l][c] = pq[l];
-    S.n[l][c] = pn[l];
+  __syncthreads();
+  const uint32_t c = blockIdx.x * CPE_CPB + t;
+  if (t < CPE_CPB && c < nch) {
+    for (int l = 0; l < NL; l++) {
+      R pr = (R)0, pi = (R)0, pq = (R)0;
+      uint32_t pn = 0;
+      for (int k = 0; k < NRPT_CPE_BLK; k++) {
+        const int q = t * NRPT_CPE_BLK + k;
+        if (!s_use[l][q])
+          continue;
+        pr = pr + s_t[0][l][q];
+        pi = pi + s_t[1][l][q];
+        pq = pq + s_t[2][l][q];
+        pn++;
+      }
+      S.p[1][l][c] = pr;
+      S.p[2][l][c] = pi;
+      S.p[3][l][c] = pq;
+      S.n[l][c] = pn;
+    }
   }
 }
 template <int NL, typename R> __global__ void k_cpe_apply(__grid_constant__ const JobK jk_, Shared *sh, nrd_c16 *h, const CpeScr<R> *scr)
@@ -889,9 +935,9 @@ template <int NL, typename R> __global__ void k_cpe_apply(__grid_constant__ cons
 }
 template <int NL, typename R> static void launch_cpe_nl(const nr_gpu_demod_job_t &jj, const nrd_c16 *y, nrd_c16 *h, Shared *dsh, void *xs, void *scr, cudaStream_t s)
 {
-  constexpr int GX = (NRPT_CPE_MAXCH + CPE_THREADS - 1) / CPE_THREADS;
-  k_cpe_pass1<NL, R><<<dim3(GX, NSYM), CPE_THREADS, 0, s>>>(K(jj), y, h, dsh, (Cx2<R> *)xs, (CpeScr<R> *)scr);
-  k_cpe_pass2<NL, R><<<dim3(GX, NSYM), CPE_THREADS, 0, s>>>(K(jj), dsh, (const Cx2<R> *)xs, (CpeScr<R> *)scr);
+  constexpr int GX = (NRPT_CPE_MAXCH + CPE_CPB - 1) / CPE_CPB;
+  k_cpe_pass1<NL, R><<<dim3(GX, NSYM), CPE_PT, 0, s>>>(K(jj), y, h, dsh, (Cx2<R> *)xs, (CpeScr<R> *)scr);
+  k_cpe_pass2<NL, R><<<dim3(GX, NSYM), CPE_PT, 0, s>>>(K(jj), dsh, (const Cx2<R> *)xs, (CpeScr<R> *)scr);
   k_cpe_apply<NL, R><<<dim3((EXT + CPE_APPLY_RE - 1) / CPE_APPLY_RE, NSYM), CPE_APPLY_RE, 0, s>>>(K(jj), dsh, h, (const CpeScr<R> *)scr);
 }
 
@@ -1291,8 +1337,25 @@ __device__ __forceinline__ int m3_exact(int nl, int nb, const int16_t (&hre)[4][
 {
   return nr_mmse_exact_re_f(nl, nb, hre, him, yre, yim, sc, s2, xre, xim, ainv, r);
 }
-__device__ __forceinline__ void nr_irc_final_t(const nr_irc_sum_t *s, int nb, double *w) { nr_irc_final(s, nb, w); }
-__device__ __forceinline__ void nr_irc_final_t(const nr_irc_sum_t *s, int nb, float *w) { nr_irc_final_f(s, nb, w); }
+/* the branch count (2..4) as a literal: nr_irc_final's matrices stay in registers (the generic nb put them in local memory, 544 bytes of stack, and made the 36 threads' chain ~9 us) */
+__device__ __forceinline__ void nr_irc_final_t(const nr_irc_sum_t *s, int nb, double *w)
+{
+  switch (nb) {
+    case 2: nr_irc_final(s, 2, w); break;
+    case 3: nr_irc_final(s, 3, w); break;
+    case 4: nr_irc_final(s, 4, w); break;
+    default: nr_irc_final(s, 0, w); break; /* < 2 or > 4: the identity */
+  }
+}
+__device__ __forceinline__ void nr_irc_final_t(const nr_irc_sum_t *s, int nb, float *w)
+{
+  switch (nb) {
+    case 2: nr_irc_final_f(s, 2, w); break;
+    case 3: nr_irc_final_f(s, 3, w); break;
+    case 4: nr_irc_final_f(s, 4, w); break;
+    default: nr_irc_final_f(s, 0, w); break;
+  }
+}
 /* D4 IRC: the same with the group's whitening (w == nullptr: the scalar model, the functions above) */
 __device__ __forceinline__ int m3_exact_w(int nl, int nb, const double *w, const int16_t (&hre)[4][4], const int16_t (&him)[4][4], const int16_t (&yre)[4], const int16_t (&yim)[4],
                                           double sc, double s2, double *xre, double *xim, double *ainv, double *r)
@@ -1441,9 +1504,8 @@ template <int NL, typename R> __device__ __forceinline__ void re_mmse3(const nr_
 
 /* D4 IRC, graph pass: one thread per group turns the integer sums of nr_pdsch_gpu_chest_irc_at into the group's whitening (nr_irc_final, the CPU's function in the instantiation of
  * the pass), thread 0 the mean gain estimate over the usable groups. A group without samples (a segmented grant, a skipped chest) comes out inactive = the scalar model. */
-template <typename R> __global__ void k_irc_final(__grid_constant__ const JobK jk_, const nr_irc_sum_t *acc, R *w, Shared *sh)
+template <typename R> __device__ void irc_final_body(const nr_gpu_demod_job_t &j, const nr_irc_sum_t *acc, R *w, Shared *sh)
 {
-  const nr_gpu_demod_job_t &j = NRD_JOB(jk_);
   __shared__ R gsum[NR_IRC_NG_MAX];
   __shared__ int act[NR_IRC_NG_MAX];
   const int g = threadIdx.x;
@@ -1466,6 +1528,10 @@ template <typename R> __global__ void k_irc_final(__grid_constant__ const JobK j
     sh->irc_active = n;
     sh->irc_gain_db = n ? 10.0f * log10f((float)t / (float)n) : 0.0f;
   }
+}
+template <typename R> __global__ void k_irc_final(__grid_constant__ const JobK jk_, const nr_irc_sum_t *acc, R *w, Shared *sh)
+{
+  irc_final_body<R>(NRD_JOB(jk_), acc, w, sh);
 }
 
 /* ---- ISAC_PDSCH_EVM_GRANT on the GPU (nr_rx_pdsch()'s EVM block, Nl <= 2; Nl <= 4 with EVM_NL34): one block per symbol. Per-RE terms
@@ -2263,8 +2329,8 @@ extern "C" int nr_pdsch_gpu_demod_init(int nant)
     j.demod_fp32 = 0;
   }
   j.nl = 0;
-  k_tinterp<double><<<1, 64, 0, g_ctx[0].s>>>(K(j));
-  k_tinterp<float><<<1, 64, 0, g_ctx[0].s>>>(K(j));
+  k_tinterp<double><<<1, 64, 0, g_ctx[0].s>>>(K(j), nullptr, (double *)nullptr, nullptr);
+  k_tinterp<float><<<1, 64, 0, g_ctx[0].s>>>(K(j), nullptr, (float *)nullptr, nullptr);
   k_tail<0><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_tail<1><<<dim3(1, NSYM), 128, 0, g_ctx[0].s>>>(K(j), g_ctx[0].y, g_ctx[0].h, g_ctx[0].dsh);
   k_level<<<1, 256, 0, g_ctx[0].s>>>(K(j), g_ctx[0].h, g_ctx[0].dsh);
@@ -2402,11 +2468,11 @@ static void launch_cpe(const nr_gpu_demod_job_t &jj, Ctx &x, cudaStream_t s)
   }
 }
 /* PHASE-TRACK: the channel time interpolation into the data-symbol planes of the (device) estimate; a block per (48 subcarriers, branch, DM-RS symbol). Launched ahead of k_gather. */
-static void launch_tinterp(const nr_gpu_demod_job_t &jj, cudaStream_t s)
+static void launch_tinterp(const nr_gpu_demod_job_t &jj, cudaStream_t s, const nr_irc_sum_t *irc_acc = nullptr, void *irc_w = nullptr, Shared *dsh = nullptr)
 {
-  const dim3 g(MAXCH, jj.nbRx > 0 ? jj.nbRx : 1, TI_MAXD);
-  if (jj.demod_fp32) k_tinterp<float><<<g, 64, 0, s>>>(K(jj));
-  else k_tinterp<double><<<g, 64, 0, s>>>(K(jj));
+  const dim3 g(MAXCH, jj.nbRx > 0 ? jj.nbRx : 1, TI_MAXD + 1);
+  if (jj.demod_fp32) k_tinterp<float><<<g, 64, 0, s>>>(K(jj), irc_acc, (float *)irc_w, dsh);
+  else k_tinterp<double><<<g, 64, 0, s>>>(K(jj), irc_acc, (double *)irc_w, dsh);
 }
 
 extern "C" void nr_pdsch_gpu_demod_release(int c)
@@ -2620,12 +2686,9 @@ extern "C" int nr_pdsch_gpu_demod_pass_dev(int inst, const nr_gpu_demod_job_t *j
   jj.jref = (const nr_gpu_demod_job_t *)g_jb[inst].dev;
   jj.irc_w = jj.irc_ng > 0 ? x.irc_d : nullptr;
   if (nr_gpu_buf_h2d_async(&g_jb[inst], 0, sizeof(JobK), s) != 0) return -1;
-  if (jj.irc_ng > 0) { /* D4 IRC: the DM-RS covariance sums the chest left (nr_pdsch_gpu_chest_irc_at) -> the whitening of the grant, before the extraction */
-    if (jj.demod_fp32) k_irc_final<float><<<1, 64, 0, s>>>(K(jj), x.irc_acc, (float *)x.irc_d, x.dsh);
-    else k_irc_final<double><<<1, 64, 0, s>>>(K(jj), x.irc_acc, x.irc_d, x.dsh);
-  }
   const int gx = (int)((jj.ext + 127) / 128);
-  launch_tinterp(jj, s);
+  /* D4 IRC: the DM-RS covariance sums the chest left (nr_pdsch_gpu_chest_irc_at) -> the whitening of the grant, before the extraction (finalized by the interpolation launch's block z = 0) */
+  launch_tinterp(jj, s, jj.irc_ng > 0 ? x.irc_acc : nullptr, x.irc_d, x.dsh);
   k_gather<<<dim3(gx, NSYM), 128, 0, s>>>(K(jj), x.y, x.h);
   k_level<<<jj.nl * jj.nbRx, 256, 0, s>>>(K(jj), x.h, x.dsh);
   k_mask_pw<<<NSYM, 256, 0, s>>>(K(jj), x.y, x.h, x.dsh);
@@ -2711,7 +2774,7 @@ extern "C" void *nr_pdsch_gpu_irc_acc(int inst)
 }
 
 /* GPUPERF bench (tests/nr_pdsch_phase_gpu_bench.cc): times the PHASE-TRACK kernels and k_irc_final of one synthetic grant (nprb PRBs, nl layers, nb RX, three DM-RS symbols 2, 7, 11) on the
- * module's test context, `reps` launches each, in microseconds per launch into us[0..2] = k_tinterp, k_cpe, k_irc_final. Random int16 data (a well-conditioned ZF for nearly every RE);
+ * module's test context, `reps` launches each, in microseconds per launch into us[0..3] = k_tinterp, k_cpe, k_irc_final, k_tinterp with the IRC finalize fused in (the production launch). Random int16 data (a well-conditioned ZF for nearly every RE);
  * `acc` (device, nr_irc_sum_t [NR_IRC_NG_MAX], filled by nr_pdsch_gpu_bench_irc) feeds k_irc_final. Reads and writes nothing of a live context. 0 or -1. */
 __global__ void k_bench_fill(int16_t *p, size_t n, uint32_t seed, int amp)
 {
@@ -2750,10 +2813,11 @@ extern "C" int nr_pdsch_gpu_demod_bench(int nprb, int nl, int nb, int fp32, int 
   cudaEvent_t e0, e1;
   cudaEventCreate(&e0);
   cudaEventCreate(&e1);
-  for (int k = 0; k < 3; k++) {
+  for (int k = 0; k < 4; k++) {
     for (int r = -2; r < reps; r++) { /* two warm-up launches, then reps timed */
       if (r == 0) cudaEventRecord(e0, s);
       if (k == 0) launch_tinterp(jj, s);
+      else if (k == 3) launch_tinterp(jj, s, (const nr_irc_sum_t *)acc, x.irc_d, x.dsh); /* production: the IRC finalize rides on the interpolation launch */
       else if (k == 1) launch_cpe(jj, x, s);
       else if (jj.demod_fp32) k_irc_final<float><<<1, 64, 0, s>>>(K(jj), (const nr_irc_sum_t *)acc, (float *)x.irc_d, x.dsh);
       else k_irc_final<double><<<1, 64, 0, s>>>(K(jj), (const nr_irc_sum_t *)acc, x.irc_d, x.dsh);
