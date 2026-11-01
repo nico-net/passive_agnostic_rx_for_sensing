@@ -824,6 +824,8 @@ typedef struct {
 } bg_arg_t;
 /* mpci B5: float-lane lease of one background item (DISC class, the cell that started the queue); no-ops when the float lane is not merged */
 static void bg_lease_in(int cell) { nr_pool_site_float_acquire(NR_POOL_DISC, cell, 0); }
+/* the data-aided tap workers lease SENSE: served ahead of discovery / housekeeping, which yield to it at their next chunk step; DL decode and scan keep strict priority */
+static void bg_lease_in_sense(int cell) { nr_pool_site_float_acquire(NR_POOL_SENSE, cell, 0); }
 static void bg_cores(cpu_set_t *cs, char *list, size_t nlist);
 static void bg_lease_out(void) { nr_pool_site_float_release(); }
 static void *bg_main(void *a)
@@ -910,7 +912,7 @@ int nr_bgq_prepare(nr_bgq_t *q, unsigned cap, const char *name, int cell)
   }
   nr_bgq_init(q, cap);
   q->cell = cell;
-  q->lease_in = bg_lease_in;
+  q->lease_in = strncmp(name, "daBg", 4) ? bg_lease_in : bg_lease_in_sense;
   q->lease_out = bg_lease_out;
   arg->q = q;
   arg->aff = 1;
@@ -949,7 +951,7 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
     return -1;
   arg->q = q;
   q->cell = nr_cell_idx();
-  q->lease_in = bg_lease_in;
+  q->lease_in = strncmp(name, "daBg", 4) ? bg_lease_in : bg_lease_in_sense;
   q->lease_out = bg_lease_out;
   snprintf(arg->name, sizeof(arg->name), "%s", name);
   cpu_set_t cs;

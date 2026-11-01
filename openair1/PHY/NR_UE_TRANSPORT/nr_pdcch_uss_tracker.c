@@ -173,6 +173,7 @@ static void score_compute_ref(const uss_sample_t *sample, int n,
   /* The full RNTI domain is integer-only here. For a fixed N and M, candidate positions are a
    * translation of seven precomputed delta sets; no polar decode or sample access occurs. */
   for (uint32_t rnti = 1; rnti <= 65535u; ++rnti) {
+    if (!(rnti & 0x3ffu)) (void)nr_pool_site_float_yield(); /* chunk step (~1 ms): a waiting SENSE / decode-side job gets the token; no-op when the float lane is not merged */
     float rnti_best = -INFINITY;
     uint16_t rnti_hits = 0;
     uint8_t rnti_hash = 0, rnti_m = 0;
@@ -260,6 +261,7 @@ static void score_compute_fast(const uss_sample_t *sample, int n,
   }
 
   for (uint32_t rnti = 1; rnti <= 65535u; ++rnti) {
+    if (!(rnti & 0x3ffu)) (void)nr_pool_site_float_yield(); /* chunk step (~1 ms): a waiting SENSE / decode-side job gets the token; no-op when the float lane is not merged */
     float rnti_best = -INFINITY;
     uint16_t rnti_hits = 0;
     uint8_t rnti_hash = 0, rnti_m = 0;

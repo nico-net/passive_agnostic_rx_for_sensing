@@ -1230,3 +1230,127 @@ int main(int argc, char **argv)
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---- NR_POOL_SENSE: the sensing exporters (data-aided tap workers) between RETRY and DISC ----
+TEST(CorePoolSense, ServedAfterRetryBeforeDiscAndHouse)
+{
+  nr_pool_t *p = mk(1);
+  const auto o = grant_order(p, {{NR_POOL_HOUSE, 0, 0, 5}, {NR_POOL_DISC, 0, 0, 4}, {NR_POOL_SENSE, 0, 0, 3}, {NR_POOL_RETRY, 0, 0, 2}, {NR_POOL_DECODE, 0, 0, 1}, {NR_POOL_SCAN, 0, 0, 0}});
+  EXPECT_EQ(o, (std::vector<int>{0, 1, 2, 3, 4, 5}));
+  nr_pool_destroy(p);
+}
+
+// (b) unchanged: SENSE counts as a low class, a token stays for scan and decode.
+TEST(CorePoolSense, CapsLeaveATokenForDecodeAndScan)
+{
+  nr_pool_t *p = mk(4);
+  std::atomic<int> st{0}, r[5];
+  for (auto &x : r) x = -2;
+  std::vector<std::thread> hold;
+  auto holder = [&](int prio, int slot) {
+    hold.emplace_back([&, prio, slot] {
+      r[slot] = nr_pool_try_acquire(p, prio, 0, 0);
+      while (st < 1) usleep(100);
+      nr_pool_release(p);
+    });
+    wait_until([&] { return r[slot] != -2; });
+  };
+  holder(NR_POOL_SENSE, 0);
+  holder(NR_POOL_SENSE, 1);
+  holder(NR_POOL_SENSE, 2); // low classes <= N-2 = 2
+  EXPECT_GE(r[0], 0);
+  EXPECT_GE(r[1], 0);
+  EXPECT_EQ(r[2], -1);
+  holder(NR_POOL_DECODE, 3);
+  holder(NR_POOL_SCAN, 4);
+  EXPECT_GE(r[3], 0); // the decode reserve is intact
+  EXPECT_GE(r[4], 0);
+  st = 1;
+  for (auto &t : hold) t.join();
+  nr_pool_destroy(p);
+}
+
+// Age promotion: a SENSE waiter held back by the scan reserve is promoted at its age (20 ms in the default config), never starved longer.
+TEST(CorePoolSense, PromotedAtItsAge)
+{
+  nr_pool_cfg_t c = nr_pool_cfg_default();
+  c.pin = false;
+  EXPECT_EQ(c.age_ns[NR_POOL_SENSE], 20000000ull);
+  int cores[2] = {0, 1};
+  nr_pool_t *p = nr_pool_create(cores, nullptr, 2, &c);
+  std::atomic<int> scan_up{0}, stop{0};
+  std::thread scan([&] {
+    nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+    scan_up = 1;
+    while (!stop) usleep(200);
+    nr_pool_release(p);
+  });
+  wait_until([&] { return scan_up == 1; });
+  const uint64_t t0 = nr_pool_now_ns();
+  nr_pool_acquire(p, NR_POOL_SENSE, 0, 0); // N=2: SCAN holds one, low <= N-2 = 0: only the promotion can grant it
+  const uint64_t waited = nr_pool_now_ns() - t0;
+  nr_pool_release(p);
+  stop = 1;
+  scan.join();
+  nr_pool_stats_t st;
+  nr_pool_stats(p, &st);
+  EXPECT_EQ(st.promoted[NR_POOL_SENSE], 1u);
+  EXPECT_LT(waited, 200000000ull);
+  EXPECT_GE(waited, 15000000ull);
+  nr_pool_destroy(p);
+}
+
+// Per-cell fairness inside the class: two cells' SENSE waiters interleave (the cell with less usage first).
+TEST(CorePoolSense, CellsShareTheClass)
+{
+  nr_pool_t *p = mk(1);
+  const auto o = grant_order(p, {{NR_POOL_SENSE, 0, 0, 0}, {NR_POOL_SENSE, 0, 0, 1}, {NR_POOL_SENSE, 0, 0, 2}, {NR_POOL_SENSE, 1, 0, 3}, {NR_POOL_SENSE, 1, 0, 4}, {NR_POOL_SENSE, 1, 0, 5}});
+  ASSERT_EQ(o.size(), 6u);
+  // usage-based inside the class (see CellsAlternateWithinAClass): the cell that has used less goes first, but neither cell waits out the other's whole backlog
+  size_t first0 = 6, first1 = 6;
+  for (size_t i = 0; i < 6; i++) (o[i] < 3 ? first0 : first1) = std::min(o[i] < 3 ? first0 : first1, i);
+  EXPECT_LE(first0, 3u) << "cell 0 starved behind cell 1's backlog";
+  EXPECT_LE(first1, 3u) << "cell 1 starved behind cell 0's backlog";
+  nr_pool_destroy(p);
+}
+
+// A discovery lease that yields between its steps hands the core to a waiting SENSE job within one step.
+TEST(CorePoolSense, DiscoveryYieldsToSense)
+{
+  nr_pool_t *p = mk(1);
+  std::atomic<int> disc_up{0}, stop{0};
+  std::thread disc([&] {
+    nr_pool_acquire(p, NR_POOL_DISC, 0, 0);
+    disc_up = 1;
+    while (!stop) {
+      usleep(1000); // one chunk step
+      nr_pool_yield(p);
+    }
+    nr_pool_release(p);
+  });
+  wait_until([&] { return disc_up == 1; });
+  const uint64_t t0 = nr_pool_now_ns();
+  nr_pool_acquire(p, NR_POOL_SENSE, 0, 0);
+  const uint64_t waited = nr_pool_now_ns() - t0;
+  nr_pool_release(p);
+  stop = 1;
+  disc.join();
+  nr_pool_stats_t st;
+  nr_pool_stats(p, &st);
+  EXPECT_LT(waited, 20000000ull);
+  EXPECT_GE(st.yields, 1u);
+  EXPECT_EQ(st.leases[NR_POOL_SENSE], 1u);
+  nr_pool_destroy(p);
+}
+
+// The CORE_POOL line carries the SENSE class (n, waited, promo, wait histogram).
+TEST(CorePoolSense, StatsLineHasTheClass)
+{
+  nr_pool_t *p = mk(2);
+  nr_pool_acquire(p, NR_POOL_SENSE, 0, 0);
+  nr_pool_release(p);
+  char buf[2048];
+  ASSERT_GT(nr_pool_stats_line(p, buf, sizeof(buf)), 0);
+  EXPECT_NE(std::string(buf).find(" sense[n=1 "), std::string::npos) << buf;
+  nr_pool_destroy(p);
+}
