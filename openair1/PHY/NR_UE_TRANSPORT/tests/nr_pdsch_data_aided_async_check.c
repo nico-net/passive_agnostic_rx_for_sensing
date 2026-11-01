@@ -148,8 +148,12 @@ void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac, int sourc
 }
 
 /* stand-in for the LDPC encoder: coded bits (packed) from a hash of the first segment, deterministic */
+static int enc_pool_violations;
 static int32_t fake_encoder(nrLDPC_slot_encoding_parameters_t *p)
 {
+  /* on the daBg worker the segments must be encoded by the worker itself: a pool without threads (not the shared decode Tpool) */
+  if (!pthread_equal(pthread_self(), cap_main) && p->threadPool->len_thr != 0)
+    enc_pool_violations++;
   nrLDPC_TB_encoding_parameters_t *tb = p->TBs;
   uint64_t s = fnv(1469598103934665603ull, tb->segments[0].c, 64) ^ tb->G;
   for (uint32_t i = 0; i < (tb->G + 7) / 8; i++) {
@@ -337,6 +341,28 @@ int main(void)
     nr_isac_pdsch_data_aided_async_counts(&q, &d, &n, &sv);
     CHECK(q > 0 && n > 0, "queued %lu done %lu after the real init sequence", (unsigned long)q, (unsigned long)n);
   }
+  /* the measured PCI 923 arrival: ~190 tap calls/s (9.1k queued + 9.8k shed over 100 s at the old depth), grants arriving in per-slot bursts of up to 5 consumers */
+  {
+    uint64_t q0, d0, n0, s0, q1, d1, n1, s1;
+    nr_isac_pdsch_data_aided_async_counts(&q0, &d0, &n0, &s0);
+    fapi_nr_dl_cw_info_t cw = {.Nl = 2, .qamModOrder = 6, .ldpcBaseGraph = 1, .TBS = 1200};
+    fapi_nr_dl_config_dlsch_pdu_rel15_t d = {.number_symbols = 14, .dlDmrsSymbPos = 0x84, .dmrsConfigType = NFAPI_NR_DMRS_TYPE1, .n_dmrs_cdm_groups = 2, .dmrs_ports = 0x3};
+    freq_alloc_bitmap_t fa = {.first_rb = 0, .num_rbs = 90, .last_rb = 89};
+    uint8_t tb[160] = {1};
+    const uint32_t G = nr_get_G(fa.num_rbs, 14, get_num_dmrs_re_per_rb(d.dmrsConfigType, 2), get_num_dmrs(d.dlDmrsSymbPos), 0, 6, 2);
+    const UE_nr_rxtx_proc_t proc = {.frame_rx = 1, .nr_slot_rx = 1};
+    int sent = 0;
+    for (int burst = 0; burst < 150; burst++) { /* 150 bursts x 5 per 26 ms = 192/s for 3.9 s */
+      for (int i = 0; i < 5; i++, sent++)
+        (void)nr_isac_pdsch_data_aided_submit_async(ue, &proc, &cw, &d, &fa, 0x4601, tb, 9, (const c16_t(*)[14 * FFT])rx2, 7.5, G, 12.25f);
+      usleep(26000);
+    }
+    nr_isac_pdsch_data_aided_async_counts(&q1, &d1, &n1, &s1);
+    const double drop = (double)(d1 - d0) / sent;
+    printf("measured-923-rate burst: %d grants, %lu shed (%.2f %%)\n", sent, (unsigned long)(d1 - d0), 100 * drop);
+    CHECK(drop < 0.05, "shed %.1f %% at the measured PCI 923 arrival rate (want < 5 %%)", 100 * drop);
+  }
+  CHECK(enc_pool_violations == 0, "the worker's re-encode used the shared decode Tpool (%d times)", enc_pool_violations);
   if (failures) {
     fprintf(stderr, "%d failure(s)\n", failures);
     return 1;
