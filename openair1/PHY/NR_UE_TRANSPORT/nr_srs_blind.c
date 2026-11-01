@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 #include "nr_srs_blind_internal.h"
@@ -65,37 +66,59 @@ bool nr_srs_pregate(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint16_t
   return false;
 }
 
-/* Time-domain comb gate. A symbol that carries only every K-th subcarrier (comb 2, 4, 8) is periodic with period N/K, hence with period N/2: x[n] = x[n+N/2].
- * One complex lag-N/2 correlation per symbol and antenna (N/4 multiply-accumulates, no FFT) tells "a comb-like signal is present" from noise; every SRS comb passes it, the
- * timing offset does not matter (a cyclic shift of a periodic signal is periodic) and the receive window may start anywhere inside the cyclic prefix. The mean of each half is removed
- * first (DC / LO leakage correlates at every lag). Under white noise m*rho^2 of one (antenna, symbol) is ~Exp(1) (m = N/4 pairs), so the sum S over the K examined (antenna, symbol)
- * pairs is ~Gamma(K,1); the gate opens at K + 8 sqrt(K), a pure CPU gate: a false open costs a frequency-domain scan, a false close costs a missed slot. */
+/* Time-domain comb gate. A symbol that carries only every K-th subcarrier (comb 2, 4, 8) is periodic with period N/K, hence with period N/2: x[n] = x[n+N/2], i.e. the
+ * lag-N/2 correlation c0 = sum x[n] conj(x[n+N/2]) = sum_k P_k (-1)^k is far from what a non-comb signal gives. Its size under "no comb" is NOT a constant: coloured noise, an analog
+ * filter slope, a narrowband PUCCH/PUSCH or a spectral line all move it (measured on the 2026-10-24 captures: 1.3-2.6x the white-noise value, p99 up to 23x). The gate therefore measures
+ * its own null: four reference correlations at lags N/2 + {101,-173,251,-331} (no periodicity of the comb sits there; the same data, hence the same colour) give the mean |c|^2 per pair
+ * of the signal as it is, and the (antenna, symbol) statistic is r = (|c0|^2/m0) / mean(|cref|^2/mref), an F-type variable with p = (1 + r/4)^-4 under "no comb". -ln p ~ Exp(1), so the
+ * sum S = 4 sum ln(1 + r/4) over the K examined (antenna, symbol) pairs is Gamma(K,1) and the gate opens at K + 8 sqrt(K). Each window is centred (DC / LO leakage). Timing offset is
+ * irrelevant (a cyclic shift of a periodic signal is periodic) and the window may start anywhere inside the cyclic prefix. A false open costs a frequency-domain scan, a false close a
+ * missed slot. Cost: ~2 N/4 complex MACs per (antenna, symbol), no FFT. */
+static double td_corr2(const int16_t *x,int lag,int m)
+{
+  int64_t cr=0,ci=0,s1r=0,s1i=0,s2r=0,s2i=0;
+  const int16_t *y=x+2*lag;
+  for(int n=0;n<m;n++) {
+    const int32_t ar=x[2*n],ai=x[2*n+1],br=y[2*n],bi=y[2*n+1];
+    cr+=ar*br+ai*bi;ci+=ai*br-ar*bi;
+    s1r+=ar;s1i+=ai;s2r+=br;s2i+=bi;
+  }
+  const double inv=1.0/m;
+  const double m1r=s1r*inv,m1i=s1i*inv,m2r=s2r*inv,m2i=s2i*inv;
+  const double ccr=cr-m*(m1r*m2r+m1i*m2i),cci=ci-m*(m1i*m2r-m1r*m2i);
+  return (ccr*ccr+cci*cci)/m;
+}
 bool nr_srs_td_comb_gate(int fft_size,int n_ant,uint16_t mask,const int16_t *raw,int win,double *stat)
 {
+  const int ref_lag[4]={101,-173,251,-331};
   if(stat) *stat=0;
-  if(!raw || fft_size<64 || (fft_size&1) || n_ant<1 || !(mask&0x3f00)) return false;
-  const int lag=fft_size/2,m=lag/2; /* the central N/4 pairs (samples N/8..3N/8 against 5N/8..7N/8): half the memory traffic, immune to a symbol boundary shifted by up to N/8 */
-  double sum=0;int k=0;
-  for(int a=0;a<n_ant;a++) for(int l=8;l<14;l++) {
+  if(!raw || fft_size<1024 || (fft_size&1) || n_ant<1 || !(mask&0x3f00)) return false;
+  const int lag=fft_size/2,m0=lag/2,mr=m0/4,base=lag/4; /* central N/4 pairs for the comb lag, N/16 for each reference lag */
+  double t[6]={0};
+  for(int l=8;l<14;l++) {
     if(!(mask&(1u<<l))) continue;
-    const int16_t *x=raw+2*((size_t)(a*6+l-8)*win+lag/4);
-    const int16_t *y=x+2*lag;
-    int64_t cr=0,ci=0,e1=0,e2=0,s1r=0,s1i=0,s2r=0,s2i=0;
-    for(int n=0;n<m;n++) {
-      const int32_t ar=x[2*n],ai=x[2*n+1],br=y[2*n],bi=y[2*n+1];
-      cr+=ar*br+ai*bi;ci+=ai*br-ar*bi;
-      e1+=ar*ar+ai*ai;e2+=br*br+bi*bi;
-      s1r+=ar;s1i+=ai;s2r+=br;s2i+=bi;
+    for(int a=0;a<n_ant;a++) {
+      const int16_t *x=raw+2*((size_t)(a*6+l-8)*win+base);
+      const double c0=td_corr2(x,lag,m0); /* |c|^2/m: E = sigma^4 for any m, so the pair counts need no scaling */
+      double ref=0;
+      for(int r=0;r<4;r++) ref+=td_corr2(x,lag+ref_lag[r],mr);
+      ref/=4;
+      if(ref>0) t[l-8]+=4.0*log1p(c0/ref/4.0);
     }
-    const double inv=1.0/m;
-    const double m1r=s1r*inv,m1i=s1i*inv,m2r=s2r*inv,m2i=s2i*inv;
-    const double ccr=cr-m*(m1r*m2r+m1i*m2i),cci=ci-m*(m1i*m2r-m1r*m2i);
-    const double v1=e1-m*(m1r*m1r+m1i*m1i),v2=e2-m*(m2r*m2r+m2i*m2i);
-    k++;
-    if(v1>0 && v2>0) sum+=m*(ccr*ccr+cci*cci)/(v1*v2);
   }
-  if(stat) *stat=sum;
-  return k && sum>k+8.0*sqrt((double)k);
+  /* An SRS covers 1, 2 or 4 consecutive symbols: test every window of 1, 2 and 4 consecutive examined symbols (Gamma(K,1) each, K = n_ant * symbols) against K + 9 sqrt(K); the 9 (8 for the
+   * single full-slot sum before) pays for the ~14 windows per slot. Concentrating the evidence on the SRS symbols gains up to 3 dB over summing the whole slot. */
+  bool open=false;double best=0;
+  for(int len=1;len<=4;len*=2) for(int l0=0;l0+len<=6;l0++) {
+    double sum=0;bool all=true;
+    for(int q=0;q<len;q++) {if(!(mask&(1u<<(8+l0+q)))) all=false;sum+=t[l0+q];}
+    if(!all) continue;
+    const double k=(double)n_ant*len,ex=(sum-k)/sqrt(k);
+    if(ex>best) best=ex;
+    if(ex>9.0) open=true;
+  }
+  if(stat) *stat=best;
+  return open;
 }
 void nr_srs_idle_result(nr_srs_idle_t *idle,bool candidate)
 {
@@ -146,6 +169,87 @@ void nr_srs_cpu_charge(nr_srs_idle_t *idle,uint64_t now,uint64_t ns)
   idle->cpu_time[idle->cpu_head]=now;idle->cpu_ns[idle->cpu_head]=ns;
   idle->cpu_head=(idle->cpu_head+1)%NR_SRS_CPU_SAMPLES;idle->cpu_count++;idle->cpu_used+=ns;
 }
+/* Statistical comb detector, run after the time-domain gate has said a comb-like symbol is present (the strict RB-local test below needs ~+8 dB per RE: every RB of the SRS must
+ * put 85 % of its power on one comb phase). Per symbol, per comb K in {2,4,8} and phase o, each RB gets z = (mean power on the comb bins - mean power on the other bins) / its own
+ * standard error (summed over the antennas, so ~N(0,1) without a comb whatever the noise colour, because both means come from the same RB). For every geometry the sequence search can
+ * test (nb_rb a legal m_SRS, any start RB; the gate cannot know them) the score sum(z - 1)/sqrt(nb_rb) is maximised with prefix sums; the best geometry of a symbol is a candidate when
+ * its score exceeds 6.5 (14 phases x ~40 widths x ~200 starts are correlated hypotheses; the threshold is a Gaussian tail, not fitted to a cell). */
+static int legal_widths(int n_rb,int *m)
+{
+  int n=0;
+  for(int b=0;b<4;b++) for(int v=0;v<64;v++) {
+    int w=get_m_srs(v,b);
+    if(w<4 || w>n_rb) continue;
+    bool dup=false;for(int i=0;i<n;i++) if(m[i]==w) dup=true;
+    if(!dup && n<256) m[n++]=w;
+  }
+  return n;
+}
+static int soft_comb_detect(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint16_t mask,nr_srs_candidate_t out[NR_SRS_MAX_CANDIDATES])
+{
+  int widths[256];const int nw=legal_widths(g->n_rb,widths);
+  if(!nw) return 0;
+  struct {double score;int comb,off,start,nb;} best[6]={{0}};
+  double P[275*12];
+  double pre[276];
+  for(int l=8;l<14;l++) {
+    if(!(mask&(1u<<l))) continue;
+    const int n_re=g->n_rb*12;
+    for(int k=0;k<n_re;k++) {
+      const int bin=(g->first_carrier_offset+k)%g->fft_size;
+      double e=0;
+      for(int a=0;a<g->n_ant;a++) {const int16_t *v=iq+2*(a*stride+l*g->fft_size+bin);e+=(double)v[0]*v[0]+(double)v[1]*v[1];}
+      P[k]=e;
+    }
+    /* z of every RB for every comb phase (cheap), then the width/start search only for the phase with the most excess */
+    double zz[14][276];
+    double excess[14]={0};int pi=0,bk=0,bo=0,pj=0;double bexc=-1;
+    for(int comb=2;comb<=8;comb*=2) for(int off=0;off<comb;off++,pi++) {
+      for(int rb=0;rb<g->n_rb;rb++) {
+        double on=0,of=0;int non=0,nof=0;
+        for(int k=0;k<12;k++) if((rb*12+k)%comb==off) {on+=P[rb*12+k];non++;} else {of+=P[rb*12+k];nof++;}
+        double z=0;
+        if(of>0) {
+          const double mo=on/non,mf=of/nof;
+          const double se=mf*sqrt(1.0/(g->n_ant*non)+1.0/(g->n_ant*nof));
+          z=(mo-mf)/se;
+          if(z>20) z=20;
+        }
+        zz[pi][rb]=z;
+        if(z>1) excess[pi]+=z-1;
+      }
+      if(excess[pi]>bexc) {bexc=excess[pi];bk=comb;bo=off;pj=pi;}
+    }
+    {
+      pre[0]=0;
+      for(int rb=0;rb<g->n_rb;rb++) pre[rb+1]=pre[rb]+(zz[pj][rb]-1.0);
+      for(int wi=0;wi<nw;wi++) {
+        const int w=widths[wi];
+        for(int st=0;st+w<=g->n_rb;st++) {
+          const double sc=(pre[st+w]-pre[st])/sqrt((double)w);
+          if(sc>best[l-8].score) best[l-8]=(typeof(best[0])){sc,bk,bo,st,w};
+        }
+      }
+    }
+  }
+  int count=0;
+  bool used[6]={false};
+  for(int l=0;l<6;l++) {
+    if(used[l] || best[l].score<6.5) continue;
+    int ns=1;
+    for(int n=1;n<4 && l+n<6;n++) {
+      if(best[l+n].score<6.5 || best[l+n].comb!=best[l].comb || best[l+n].off!=best[l].off
+         || best[l+n].start!=best[l].start || best[l+n].nb!=best[l].nb) break;
+      ns++;
+    }
+    if(ns==3) ns=2;
+    if(count==NR_SRS_MAX_CANDIDATES) break;
+    out[count++]=(nr_srs_candidate_t){.comb=best[l].comb,.comb_offset=(best[l].off-best[l].start*12%best[l].comb+best[l].comb)%best[l].comb,
+      .start_symbol=l+8,.n_symbols=ns,.start_rb=best[l].start,.nb_rb=best[l].nb,.group=-1,.cs=-1,.attribution="anonymous"};
+    for(int n=0;n<ns;n++) used[l+n]=true;
+  }
+  return count;
+}
 int nr_srs_comb_detect(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint16_t mask,nr_srs_candidate_t out[NR_SRS_MAX_CANDIDATES])
 {
   if (!iq || !out || !nr_srs_valid_grid(g,stride)) return 0;
@@ -192,6 +296,13 @@ int nr_srs_comb_detect(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint1
     rb=end;
   }
   return count;
+}
+int nr_srs_comb_detect_soft(const nr_srs_grid_t *g,const int16_t *iq,int stride,uint16_t mask,nr_srs_candidate_t out[NR_SRS_MAX_CANDIDATES])
+{
+  if (!iq || !out || !nr_srs_valid_grid(g,stride)) return 0;
+  /* the statistical detector yields only legal m_SRS widths (the strict one reports whatever run of RBs it sees, e.g. 217 for a 216-RB SRS next to a stray RB) */
+  int n=soft_comb_detect(g,iq,stride,mask,out);
+  return n?n:nr_srs_comb_detect(g,iq,stride,mask,out);
 }
 /* Use BWP start for the observed absolute RB start: the upstream generator's
  * k_0_p is uint8_t, so placing a wide-band start in n_shift would wrap it. */
@@ -244,6 +355,14 @@ static double score_sequence(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_s
       if(k) {dr+=zr[k]*zr[k-1]+zi[k]*zi[k-1];di+=zi[k]*zr[k-1]-zr[k]*zi[k-1];}
     }
     double slope=atan2(di,dr), cr=0,ci=0;
+    /* The lag-1 phase alone is a poor slope estimate at low SNR (its error accumulates over n resource elements: 16 rad of ramp across 1300 REs at 10 dB, so the coherent sum
+     * collapsed to ~0.25 where 0.9 is available). Refine with longer lags, each unwrapped by the previous estimate: the error of a lag-L phase is 1/L of that of lag 1. */
+    for(int lagk=4;lagk<n/2;lagk*=4) {
+      double lr=0,li=0;
+      for(int k=lagk;k<n;k++) {lr+=zr[k]*zr[k-lagk]+zi[k]*zi[k-lagk];li+=zi[k]*zr[k-lagk]-zr[k]*zi[k-lagk];}
+      const double psi=atan2(li,lr);
+      slope=(psi+2*M_PI*round((slope*lagk-psi)/(2*M_PI)))/lagk;
+    }
     for(int k=0;k<n;k++) {
       double r=cos(slope*k),i=sin(slope*k);
       cr+=zr[k]*r+zi[k]*i;ci+=zi[k]*r-zr[k]*i;
@@ -266,9 +385,10 @@ static bool group_cs_search(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_sr
   nr_srs_candidate_t best=*c;
   double best_rank=-1;
   const int ncs=c->comb==2?8:c->comb==4?12:6;
-  /* A union-bound-inspired floor increases with the 30 groups and bounded
-   * geometry/window trials. This is a conservative heuristic, not a calibrated PFA. */
-  const double threshold=fmax(0.65,1-exp(-log(30.0*16*9/1e-6)/fmax(1,c->nb_rb*12/c->comb-2)));
+  /* Without a sequence the normalised coherent power rho^2 = |sum z|^2/(n sum|z|^2) of n independent samples is Beta(1,n-1): P(rho^2 > t) = (1-t)^(n-1). The threshold is the t
+   * that keeps the union over the 30 groups and the bounded geometry/window trials (30*16*9) at a false-alarm probability of 1e-6. The former fixed floor of 0.65 required about
+   * +3 dB per RE on every antenna and made a long SRS (n >= 100) undetectable below it; 0.05 only guards the closed form against very long sequences. */
+  const double threshold=fmax(0.05,1-exp(-log(30.0*16*9/1e-6)/fmax(1,c->nb_rb*12/c->comb-2)));
   for(int trial=-1;trial<(hint_only?0:30);trial++) {
     nr_srs_candidate_t test=*c;
     if(trial<0) {
