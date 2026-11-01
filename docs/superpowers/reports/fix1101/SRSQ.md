@@ -71,3 +71,10 @@ Findings `[OFFLINE VERIFIED, DGX aarch64, captures 2026-10-24]`:
 - Live chain on real pci415 slots plus injected SRS (one SRS every 10-20 ms, `[OFFLINE VERIFIED]`): exported and confirmed from 0 dB per RE for 96/216 RB comb 2, from +5 dB for 48 RB and 216 RB comb 4;
   exported but not confirmed at -5 dB (216 RB comb 2: 7 records); a 24 RB comb-4 SRS (2.8 % of the band power) is below the time-domain gate at +5 dB. srs_jobs_dropped = 0. The capture alone: 0 gate opens, 16 ms CPU per 0.8 s (pci415).
 Limits: the real uplink of these captures contains no detectable SRS at the gate's sensitivity (hence no real SRS record can be expected from them); multi-port SRS and SRS frequency hopping were not injected.
+
+## Round 4: srs_jobs_dropped in the clean replay (597-1382 / 21-35k / 62-131k) `[HYPOTHESIS on air, OFFLINE VERIFIED reproduction]`
+The counter has five increment sites; after round 3 the queue-full and lease paths are not the live ones (the gate is quiet, scans take the lease only for FFTs). The remaining ones are the event posts
+(`post_event`, PDCCH / PUSCH monitor threads): a try-lock miss or a full 64-entry ring counted as a dropped job. The slot thread's `nr_srs_passive_capture` held `srs_lock` during the whole 470 KB
+sample copy (~50-100 us, 800 times/s) so a few % of all posts met the held lock, and the ring was only drained when an uplink slot's job ran. Fix: copy outside the lock (the slot at `head`
+is private until published), blocking lock for the microsecond critical sections, events also drained on every 1 ms idle poll of the worker. Test `EventTrafficDoesNotCountAsDroppedJobs`
+(two threads posting ~7k events/s during captures): 170 drops (1.3 %) on 23bdc92123, 0 now. The error counters are not split by cause on air; if drops persist, the ring-full case (> 64 events per job interval) is the remaining one.
