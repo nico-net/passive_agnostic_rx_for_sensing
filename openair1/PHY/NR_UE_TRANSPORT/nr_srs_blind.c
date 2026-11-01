@@ -414,6 +414,13 @@ void nr_srs_note_grant(nr_srs_blind_t *s,uint64_t slot,uint16_t mask,int start,i
   s->grants[i].slot=slot;s->grants[i].mask=mask;s->grants[i].start=start;
   s->grants[i].width=width;s->grants[i].valid=true;
 }
+/* Symbols of `slot` whose comb-like content a known PUSCH grant explains (its DM-RS symbols; the DCI 0_x grants are posted by the PUSCH monitor k2 slots ahead). */
+uint16_t nr_srs_grant_symbols(const nr_srs_blind_t *s,uint64_t slot)
+{
+  uint16_t m=0;
+  if(s) for(unsigned i=0;i<256;i++) if(s->grants[i].valid && s->grants[i].slot==slot) m|=s->grants[i].mask;
+  return m;
+}
 bool nr_srs_search_slot(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_srs_candidate_t *c,
                         const nr_srs_candidate_t *hint,uint64_t slot)
 {

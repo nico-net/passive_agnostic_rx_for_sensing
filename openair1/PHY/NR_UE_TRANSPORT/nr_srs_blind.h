@@ -61,6 +61,7 @@ bool nr_srs_group_cs_search(nr_srs_blind_t *s, const int16_t *iq, int stride,
 bool nr_srs_valid_capture_grid(const nr_srs_grid_t *g);
 bool nr_srs_refresh_grid(nr_srs_blind_t *s,const nr_srs_grid_t *g);
 bool nr_srs_sources_selected(const char *sources);
+uint16_t nr_srs_grant_symbols(const nr_srs_blind_t *s, uint64_t slot);
 void nr_srs_note_grant(nr_srs_blind_t *s, uint64_t slot, uint16_t dmrs_mask, int start_rb, int nb_rb);
 bool nr_srs_search_slot(nr_srs_blind_t *s, const int16_t *iq, int stride,
                         nr_srs_candidate_t *c, const nr_srs_candidate_t *hint, uint64_t slot);

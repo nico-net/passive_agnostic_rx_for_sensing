@@ -120,12 +120,15 @@ struct Result {
   unsigned records;
   unsigned confirmed_records;
   nr_ptrack_counters_t pc;
+  uint64_t gate_unexplained, gate_pusch;
   uint64_t dropped, backoff, leases, budget, pregate, resets, us;
   double cpu_us_per_job;
 };
 
 /* Runs `periods` SRS periods at the slot rate (0.5 ms) and returns what reached the record file. */
-Result run(int comb, int comb_off, int period, int slot_off, int periods, int stall_us)
+/* dmrs: every UL slot also carries a comb-2 PUSCH DM-RS (symbol 9, other RBs) of a grant the receiver knows (nr_srs_passive_grant), as a PUSCH of another UE would;
+ * srs_on false = the DM-RS is the only comb signal. */
+Result run(int comb, int comb_off, int period, int slot_off, int periods, int stall_us, bool dmrs = false, bool srs_on = true)
 {
   Bed bed;
   nr_cell_bind(0);
@@ -142,6 +145,10 @@ Result run(int comb, int comb_off, int period, int slot_off, int periods, int st
   c.comb = comb; c.comb_offset = comb_off; c.start_symbol = 12; c.n_symbols = 2; c.start_rb = 4; c.nb_rb = 8; c.group = 17; c.cs = 3;
   std::vector<int16_t> grid(4 * 14 * N * 2 + 64, 0);
   EXPECT_TRUE(srs_test_generate(&G, &c, grid.data()));
+  nr_srs_candidate_t dm = c;
+  dm.comb = 2; dm.comb_offset = 1; dm.start_symbol = 9; dm.n_symbols = 1; dm.start_rb = 12; dm.nb_rb = 8; dm.group = 5; dm.cs = 0;
+  std::vector<int16_t> dgrid(4 * 14 * N * 2 + 64, 0);
+  EXPECT_TRUE(srs_test_generate(&G, &dm, dgrid.data()));
   uint64_t b_dropped, b_backoff, d1, d2, d3;
   uint64_t us0, us1;
   nr_srs_passive_metrics(&us0, &b_dropped, &d1, &b_backoff, &d2, &d3);
@@ -152,9 +159,14 @@ Result run(int comb, int comb_off, int period, int slot_off, int periods, int st
   for (uint64_t s = 1; s < total; s++) {
     /* the capture at slot s serves slot s-1 */
     bool occ = ((s - 1) % period) == (uint64_t)slot_off;
-    bed.write_slot(s - 1, occ ? &c : nullptr, grid.data(), 1);
+    const bool ul = ((s - 1) % 5) == 4;
+    const bool srs_here = occ && srs_on;
+    const bool dm_here = dmrs && ul;
+    if (dm_here) { nr_srs_passive_grant(s - 1, 1u << 9, 12, 8); bed.write_slot(s - 1, &dm, dgrid.data(), 1); }
+    bed.write_slot(s - 1, srs_here ? &c : nullptr, grid.data(), 1);
     nr_srs_passive_capture(&bed.ue, (int)((s / SLOTS) % 1024), (int)(s % SLOTS), s);
-    bed.write_slot(s - 1, occ ? &c : nullptr, grid.data(), -1);
+    bed.write_slot(s - 1, srs_here ? &c : nullptr, grid.data(), -1);
+    if (dm_here) bed.write_slot(s - 1, &dm, dgrid.data(), -1);
     std::this_thread::sleep_until(t0 + std::chrono::microseconds(500 * s));
   }
   g_stall_us = 0;
@@ -163,6 +175,7 @@ Result run(int comb, int comb_off, int period, int slot_off, int periods, int st
   uint64_t audits;
   nr_srs_passive_periodic_metrics(&r.pc, &audits);
   uint64_t dr;
+  nr_srs_passive_gate_metrics(&r.gate_unexplained, &r.gate_pusch);
   nr_srs_passive_metrics(&us1, &dr, &r.pregate, &r.backoff, &r.budget, &r.resets);
   r.us = us1;
   r.dropped = dr - b_dropped;
@@ -234,4 +247,27 @@ TEST_F(SrsProduction, Comb4Period40NoStall)
 {
   Result r = run(4, 1, 40, 29, 75, 0);
   printf("c4 nostall records=%u hit=%lu dropped=%lu leases=%lu pregate=%lu backoff=%lu\n", r.records, (unsigned long)r.pc.hit, (unsigned long)r.dropped, (unsigned long)r.leases, (unsigned long)r.pregate, (unsigned long)r.backoff);
+}
+
+/* PUSCH DM-RS (comb 2, a known grant) is the only comb signal on every UL slot: the gate must not start scans; the opens are counted as PUSCH-explained. */
+TEST_F(SrsProduction, PuschDmrsOnlySlotDoesNotOpenTheGate)
+{
+  Result r = run(2, 0, 20, 9, 60, 0, true, false);
+  printf("dmrs only: unexplained=%lu pusch=%lu leases=%lu records=%u\n", (unsigned long)r.gate_unexplained, (unsigned long)r.gate_pusch, (unsigned long)r.leases, r.records);
+  /* a grant event is posted with a try-lock (a miss is a counted drop), so a few slots can reach the gate without their grant */
+  EXPECT_LE(r.gate_unexplained, 3u);
+  EXPECT_GT(r.gate_pusch, 100u);
+  EXPECT_LE(r.leases, 3u);
+  EXPECT_LE(r.records, 3u);
+}
+
+/* SRS in symbols 12-13 with the PUSCH DM-RS of another UE in symbol 9 of the same slots: the SRS is still found and confirmed. */
+TEST_F(SrsProduction, SrsWithConcurrentPuschDmrsStillOpensAndConfirms)
+{
+  Result r = run(2, 0, 20, 9, 150, 0, true, true);
+  printf("srs+dmrs: unexplained=%lu pusch=%lu records=%u confirmed=%u\n", (unsigned long)r.gate_unexplained, (unsigned long)r.gate_pusch, r.records, r.confirmed_records);
+  EXPECT_GT(r.gate_unexplained, 0u);
+  EXPECT_GT(r.gate_pusch, 0u);
+  EXPECT_GE(r.records, 20u);
+  EXPECT_GE(r.pc.confirmed, 1u);
 }

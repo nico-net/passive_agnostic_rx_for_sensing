@@ -62,6 +62,7 @@ typedef struct {
   uint64_t audit_tick, audits, scan_rot;
   nr_srs_idle_t idle;
   bool stop;
+  _Atomic uint64_t gate_unexplained, gate_pusch;
   bool leased; /* worker thread only: holds the float lease */
   unsigned head, tail, count;
   PHY_VARS_NR_UE *owner;
@@ -181,7 +182,13 @@ static void process_srs(srs_job_t *job)
    * decayed in tens of slots) and is no longer applied to the gate. */
   bool td_hit=false;
   if(blind && !ndue) {
-    td_hit=nr_srs_td_comb_gate(N,sr.grid.n_ant,job->mask,(const int16_t *)(job->raw+SRS_MARGIN),win,NULL);
+    /* SRS sits in the last 6 symbols (TS 38.211 6.4.1.4.1: l0 in 8..13, already the mask); a comb-2 PUSCH DM-RS is the same signature, so symbols that a known PUSCH grant
+     * explains (its DM-RS symbols) are kept out of the gate and a gate that opens only on them is counted apart and does not start a scan. */
+    const uint16_t explained=nr_srs_grant_symbols(sr.search,job->meta.abs_slot)&job->mask;
+    const uint16_t open_mask=job->mask&~explained;
+    if(open_mask) td_hit=nr_srs_td_comb_gate(N,sr.grid.n_ant,open_mask,(const int16_t *)(job->raw+SRS_MARGIN),win,NULL);
+    if(td_hit) atomic_fetch_add(&sr.gate_unexplained,1);
+    else if(explained && nr_srs_td_comb_gate(N,sr.grid.n_ant,explained,(const int16_t *)(job->raw+SRS_MARGIN),win,NULL)) atomic_fetch_add(&sr.gate_pusch,1);
     if(!td_hit) {
       sr.idle.pregate_skip++;
       if(!tracking) nr_srs_idle_result(&sr.idle,false);
@@ -368,7 +375,7 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   sr.idle=(nr_srs_idle_t){.pct=5};
   atomic_store(&sr.pregate_skip,0);atomic_store(&sr.backoff_skip,0);
   atomic_store(&sr.budget_skip,0);atomic_store(&sr.idle_resets,0);
-  sr.leased=false;
+  sr.leased=false;atomic_store(&sr.gate_unexplained,0);atomic_store(&sr.gate_pusch,0);
   atomic_store(&sr.per_predicted,0);atomic_store(&sr.per_hit,0);atomic_store(&sr.per_miss,0);atomic_store(&sr.per_demoted,0);
   atomic_store(&sr.per_confirmed,0);atomic_store(&sr.per_audit_hit,0);atomic_store(&sr.per_audits,0);sr.audit_tick=sr.audits=sr.scan_rot=0;
   sr.slots_per_subframe=fp->slots_per_subframe;
@@ -494,6 +501,10 @@ void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped,uint64_t *pregate,uin
   *us=atomic_load(&sr.elapsed_us);*dropped=atomic_load(&sr.dropped);
   *pregate=atomic_load(&sr.pregate_skip);*backoff=atomic_load(&sr.backoff_skip);
   *budget=atomic_load(&sr.budget_skip);*resets=atomic_load(&sr.idle_resets);
+}
+void nr_srs_passive_gate_metrics(uint64_t *unexplained,uint64_t *pusch)
+{
+  *unexplained=atomic_load(&sr.gate_unexplained);*pusch=atomic_load(&sr.gate_pusch);
 }
 void nr_srs_passive_periodic_metrics(nr_ptrack_counters_t *c,uint64_t *audits)
 {
