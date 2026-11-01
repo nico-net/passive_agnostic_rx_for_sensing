@@ -638,21 +638,33 @@ NR_CELL_STATIC(da_qs_t, g_da_qs)
 #define g_da_qs NR_CELL_REF(g_da_qs)
 static const char *const da_wname[DA_NW_MAX] = {"daBg0", "daBg1", "daBg2", "daBg3"};
 
-void nr_isac_pdsch_data_aided_async_prepare(int cell)
+/* workers: the load at the design point over a planned share of a core, capped by the background lane's cores shared by every cell of the process */
+static int da_workers_planned(void)
 {
-  if (!nr_isac_source_configured(NR_ISAC_SRC_PDSCH_DATA)) /* configured, not enabled: the cell's session is not open before the RX fence */
-    return;
-  /* workers: the load at the design point over a planned share of a core, capped by the background lane's cores shared by every cell of the process */
   int nw = (int)ceil(DA_RATE_PEAK * DA_COST_S / DA_UTIL);
   const int per_cell = nr_bgq_lane_cores() / (nr_cell_count() > 0 ? nr_cell_count() : 1);
   if (nw > per_cell)
     nw = per_cell;
-  nw = nw < 1 ? 1 : nw > DA_NW_MAX ? DA_NW_MAX : nw;
+  return nw < 1 ? 1 : nw > DA_NW_MAX ? DA_NW_MAX : nw;
+}
+
+/* May run before or after _async_init (the receiver calls init from the queue start and prepare from the cell prealloc, in either order): prepare only parks the
+ * workers; _async_init plans the same count itself and nr_bgq_start builds any worker that was not prepared. */
+void nr_isac_pdsch_data_aided_async_prepare(int cell)
+{
+  if (!nr_isac_source_configured(NR_ISAC_SRC_PDSCH_DATA)) /* configured, not enabled: the cell's session is not open before the RX fence */
+    return;
+  if (atomic_load(&g_da_cells[cell].ready))
+    return; /* the workers are already running: nr_bgq_prepare would re-initialise a live queue */
+  const int nw = da_workers_planned();
   da_qs_t *Q = &g_da_qs_cells[cell];
-  Q->n = 0;
+  int ok = 0;
   for (int i = 0; i < nw; i++)
     if (nr_bgq_prepare(&Q->q[i], DA_POOL, da_wname[i], cell) == 0)
-      Q->n++;
+      ok++;
+    else
+      LOG_W(NR_PHY, "SENSING: daBg prepare: worker %d of cell %d not parked (the start builds it)\n", i, cell);
+  Q->n = ok > Q->n ? ok : Q->n;
 }
 
 /* worker side, once, before RX start: build and prefault the worker's own scratch so the first grant allocates nothing */
@@ -667,8 +679,10 @@ static void da_warm(void *arg)
 void nr_isac_pdsch_data_aided_async_init(const PHY_VARS_NR_UE *ue)
 {
   da_pool_t *P = &g_da;
-  if (atomic_load(&P->ready) || !nr_isac_source_configured(NR_ISAC_SRC_PDSCH_DATA)) /* configured, not enabled: no session is open before the RX fence */
+  if (atomic_load(&P->ready))
     return;
+  if (!nr_isac_source_configured(NR_ISAC_SRC_PDSCH_DATA)) /* configured, not enabled: no session is open before the RX fence */
+    return; /* sensing without this source: nothing to build */
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   P->stride = (uint32_t)fp->samples_per_slot_wCP;
   P->nant = fp->nb_antennas_rx;
@@ -689,19 +703,25 @@ void nr_isac_pdsch_data_aided_async_init(const PHY_VARS_NR_UE *ue)
     P->job[i] = j;
     P->free_mask |= 1u << i;
   }
-  if (!P->free_mask)
+  if (!P->free_mask) {
+    LOG_W(NR_PHY, "SENSING: data-aided tap: job pool allocation failed, every grant will be shed\n");
     return;
+  }
   da_qs_t *Q = &g_da_qs;
+  const int nw = da_workers_planned();
   int started = 0;
   unsigned warm_bits = 0;
-  for (int w = 0; w < Q->n; w++) {
-    if (nr_bgq_start(&Q->q[w], DA_POOL, da_wname[w]) != 0)
+  for (int w = 0; w < nw; w++) {
+    if (nr_bgq_start(&Q->q[w], DA_POOL, da_wname[w]) != 0) {
+      LOG_W(NR_PHY, "SENSING: daBg worker %d/%d failed to start\n", w, nw);
       break;
+    }
     started++;
   }
   Q->n = started; /* no worker: every grant is shed (counted), none runs on the decode thread */
   if (!started) {
     P->free_mask = 0;
+    LOG_W(NR_PHY, "SENSING: data-aided tap: no daBg worker started, every grant will be shed\n");
     return;
   }
   /* each worker builds its own scratch (a job's slot is borrowed for the hand-off, returned by da_warm), then the pool opens */

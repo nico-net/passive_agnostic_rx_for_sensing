@@ -283,9 +283,9 @@ int main(void)
   PHY_VARS_NR_UE *ue = calloc(1, sizeof(*ue));
   make_fp2(&ue->frame_parms);
   ue->nrLDPC_coding_interface.nrLDPC_coding_encoder = fake_encoder;
-  /* receiver start-up order (nr_pdsch_passive_queue.c): cell_prealloc -> _async_prepare, queue start -> _async_init, all before the session is open */
-  nr_isac_pdsch_data_aided_async_prepare(0);
-  nr_isac_pdsch_data_aided_async_init(ue);
+  /* receiver start-up (nr_pdsch_passive_queue.c): _async_init (queue start) and _async_prepare (cell prealloc) in the order that left the daBg workers unstarted, session not yet open; real nr_bgq */
+  nr_isac_pdsch_data_aided_async_init(ue);    /* the queue start can run before the cell prealloc: workers not parked, the start builds them */
+  nr_isac_pdsch_data_aided_async_prepare(0);  /* late prepare must leave the running workers alone */
   cap_session_open = 1;
   {
     uint64_t q, d, n, sv;
