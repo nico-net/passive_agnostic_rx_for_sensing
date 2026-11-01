@@ -90,9 +90,12 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
   int cost_z=snprintf(sense_cost+cost_len,sizeof(sense_cost)-cost_len,
     ",\"sense_rec_us\":%" PRIu64 ",\"sense_write_us\":%" PRIu64
     ",\"sense_rec_count\":%" PRIu64 ",\"sense_write_count\":%" PRIu64
-    ",\"sense_unexported_pdsch_data\":%" PRIu64 ",\"sense_unexported_pusch_data\":%" PRIu64,
+    ",\"sense_unexported_pdsch_data\":%" PRIu64 ",\"sense_unexported_pusch_data\":%" PRIu64
+    ",\"uss_pruned\":%" PRIu64 ",\"uss_audit_tasks\":%" PRIu64 ",\"uss_audit_miss\":%" PRIu64
+    ",\"uss_rnti_demotions\":%" PRIu64 ",\"uss_rnti_repromotions\":%" PRIu64 ",\"uss_geom_resets\":%" PRIu64 ",\"uss_fits\":%" PRIu64,
     m->sense_rec_us,m->sense_write_us,m->sense_rec_count,m->sense_write_count,
-    m->sense_unexported_pdsch_data,m->sense_unexported_pusch_data);
+    m->sense_unexported_pdsch_data,m->sense_unexported_pusch_data,
+    m->uss_pruned,m->uss_audit_tasks,m->uss_audit_miss,m->uss_rnti_demotions,m->uss_rnti_repromotions,m->uss_geom_resets,m->uss_fits);
   if (cost_z<0 || (size_t)cost_z>=sizeof(sense_cost)-cost_len) return -1;
   int w = snprintf(buf, n,
       "{\"schema\":%d,\"t_mono_ns\":%" PRIu64 ",\"abs_slot\":%" PRId64 ",\"pci\":%d,\"acq_state\":\"%s\","
