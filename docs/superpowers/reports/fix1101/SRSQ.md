@@ -55,3 +55,19 @@ generated with the production `generate_srs_nr`) written into the 4-antenna samp
 ## Counters to read on air
 `srs_jobs_dropped` (now only real queue overflows of eligible slots; expect ~0), `srs_pregate_skip` (= gate-closed slots), `srs_backoff_skip` (= 0 by design), `srs_budget_skip`,
 `srs_us`, `periodic_srs_{predicted,hit,miss,confirmed}`, `sense_cfr_exported_srs`; and `CORE_POOL long wait class=4` lines (the lease wait itself is unchanged and now only hits real scans).
+
+
+## Round 3 (2026-11-01 night): real-capture physics check and live chain on real slots
+Tools (read-only on the captures): `tools/srs/srs_physics_check.py`, `srs_gate_stats.py`, `srs_null_stat.py`. Test: `test_nr_srs_real_inject --capture <dir> --slot0 <sample>` (skips without arguments).
+Findings `[OFFLINE VERIFIED, DGX aarch64, captures 2026-10-24]`:
+- TDD is DDDDDDDSUU with a 5 ms period; the uplink of raw_pci415_day_4s is at the noise floor (in-cell power over empty spectrum -0.1 dB median, p95 +0.3 dB over 1584 last-6 symbols);
+  no comb-2/4 RB run >= 4 RB; steady 4.4 dB elevated wideband blocks at symbols 0,1,8,9 of slots 8,9 (non-comb, every period: PUCCH-like).
+- The old gate statistic (white-noise Gamma) was 1.3-2.6x its null on this data (coloured noise, narrowband PUCCH/PUSCH): that is why it opened on 24-30 % of the slots. Replaced by a self-normalised statistic
+  (reference correlations at lags that carry no comb); on the captures the per-symbol excess (sum-K)/sqrt(K) has median 0.1, p99 4, max 8.8 on pci415 (gate level 9: 0 opens in 4 s), i.e. the null.
+  pci923 shows 44 opens in 4 s concentrated on slot 7 symbol 11 (excess ~20) and raw_pci415_12s_b shows 1639 symbols over 9 (excess up to 39, symbol 10): real comb-like UL (or DL tail) content, not SRS-verified.
+- Bug found by injecting a TS 38.211 SRS (production generator) into the real slots: (1) the strict RB-local comb detector needs ~+8 dB per RE and reported 217 RB for a 216 RB SRS (illegal width);
+  (2) the sequence search used a fixed score floor of 0.65 (needs ~+3 dB per RE on every antenna); (3) its lag-1 phase-slope estimate accumulates ~16 rad of ramp over 1300 REs at 10 dB, so the coherent score
+  collapsed to 0.25 where 0.83 is available. Fixed: statistical comb detector over legal m_SRS widths after a gate open, Beta(1,n-1)-derived threshold (1e-6 union), multi-lag unwrapped slope.
+- Live chain on real pci415 slots plus injected SRS (one SRS every 10-20 ms, `[OFFLINE VERIFIED]`): exported and confirmed from 0 dB per RE for 96/216 RB comb 2, from +5 dB for 48 RB and 216 RB comb 4;
+  exported but not confirmed at -5 dB (216 RB comb 2: 7 records); a 24 RB comb-4 SRS (2.8 % of the band power) is below the time-domain gate at +5 dB. srs_jobs_dropped = 0. The capture alone: 0 gate opens, 16 ms CPU per 0.8 s (pci415).
+Limits: the real uplink of these captures contains no detectable SRS at the gate's sensitivity (hence no real SRS record can be expected from them); multi-port SRS and SRS frequency hopping were not injected.

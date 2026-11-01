@@ -56,6 +56,9 @@ void nr_srs_blind_reset(nr_srs_blind_t *s);
  * ul_mask limits examination to the last six symbols actually available for UL. */
 int nr_srs_comb_detect(const nr_srs_grid_t *g, const int16_t *iq, int stride, uint16_t ul_mask,
                       nr_srs_candidate_t out[NR_SRS_MAX_CANDIDATES]);
+/* strict RB-local detector first, the statistical one (after a time-domain gate opening) when it finds nothing */
+int nr_srs_comb_detect_soft(const nr_srs_grid_t *g, const int16_t *iq, int stride, uint16_t ul_mask,
+                            nr_srs_candidate_t out[NR_SRS_MAX_CANDIDATES]);
 bool nr_srs_group_cs_search(nr_srs_blind_t *s, const int16_t *iq, int stride,
                             nr_srs_candidate_t *c, const nr_srs_candidate_t *hint);
 bool nr_srs_valid_capture_grid(const nr_srs_grid_t *g);

@@ -209,7 +209,7 @@ static void process_srs(srs_job_t *job)
      * instead of re-transforming the slot nine times; predicted occasions keep the full sweep until found. */
     if(!ndue && !td_hit && d!=sr.scan_rot%(sizeof(offsets)/sizeof(*offsets))) continue;
     if(!srs_budget_checkpoint(&cpu_begin)) {budget_exhausted=true;break;}
-    memset(sr.freq,0,sr.grid.n_ant*stride*sizeof(c16_t));
+    for(int a=0;a<sr.grid.n_ant;a++) for(int l=0;l<6;l++) if(need&(1u<<(l+8))) memset(sr.freq+a*stride+(l+8)*N,0,N*sizeof(c16_t)); /* only the rows read below */
     for(int a=0;a<sr.grid.n_ant;a++) for(int l=0;l<6;l++) {
       if(!(need&(1u<<(l+8)))) continue;
       const c16_t *raw=job->raw+(a*6+l)*win+SRS_MARGIN+offsets[d];
@@ -227,17 +227,19 @@ static void process_srs(srs_job_t *job)
       predicted[n]=true;candidates[n++]=due[j];
     }
     if(blind) {
-      bool comb=nr_srs_pregate(&sr.grid,(int16_t *)sr.freq,stride,job->mask);
+      bool comb=td_hit || nr_srs_pregate(&sr.grid,(int16_t *)sr.freq,stride,job->mask); /* the time-domain gate replaces the RB-local pregate (~+8 dB per RE) */
       did_gate=true;
       if(!tracking && comb) nr_srs_idle_result(&sr.idle,true);
       if(comb) {
         any_comb=true;
         nr_srs_candidate_t found[NR_SRS_MAX_CANDIDATES];
-        int nf=nr_srs_comb_detect(&sr.grid,(int16_t *)sr.freq,stride,job->mask,found);
+        int nf=td_hit?nr_srs_comb_detect_soft(&sr.grid,(int16_t *)sr.freq,stride,job->mask,found)
+                     :nr_srs_comb_detect(&sr.grid,(int16_t *)sr.freq,stride,job->mask,found);
         for(int i=0;i<nf && n<NR_SRS_MAX_CANDIDATES;i++) {predicted[n]=false;candidates[n++]=found[i];}
       }
     }
-    if(!n) continue;
+    /* nothing comb-like at this window offset: another offset only moves the window inside the cyclic prefix, it cannot create a comb; stop (a predicted occasion keeps sweeping) */
+    if(!n) {if(td_hit && !ndue) break;continue;}
     for(int i=0;i<n;i++) {
       if(!srs_budget_checkpoint(&cpu_begin)) {budget_exhausted=true;break;}
       nr_srs_candidate_t *c=&candidates[i];
@@ -282,6 +284,7 @@ static void process_srs(srs_job_t *job)
                            sr.grid.first_carrier_offset,N,job->advance-offsets[d]);
       }
       job->meta.ta_est_samples=c->delay_samples;
+      sr.hint=*c;sr.have_hint=true; /* a detected resource's sequence: its next occasions need one correlation, not the 30-group search */
       nr_srs_observe(sr.search,c,job->meta.abs_slot);
       nr_srs_idle_result(&sr.idle,true);
       job->meta.n_ant=sr.export_ant;
