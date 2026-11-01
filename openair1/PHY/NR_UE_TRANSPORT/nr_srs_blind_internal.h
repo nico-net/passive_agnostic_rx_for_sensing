@@ -3,10 +3,12 @@
 #define NR_SRS_BLIND_INTERNAL_H
 #include "nr_srs_blind.h"
 #include "PHY/defs_gNB.h"
+#include "nr_periodic_track.h"
 typedef struct {
   nr_srs_candidate_t key;
   uint64_t first, last, id;
-  unsigned gap, consistent_gaps, count, misses;
+  unsigned count;
+  nr_ptrack_t pt; /* periodicity learned from the detection slots */
 } srs_track_t;
 typedef struct {
   uint16_t rnti;
@@ -24,6 +26,7 @@ struct nr_srs_blind {
   struct {nr_srs_candidate_t key; uint64_t slot; bool valid, failed;} cache[64];
   struct {uint64_t slot; uint16_t mask; int start, width; bool valid;} grants[256];
   unsigned next_cache, next_grant;
+  nr_ptrack_counters_t periodic; /* NR_PTRACK_SRS: predicted occasions, hits, misses, demotions */
   c16_t *reference;
   PHY_VARS_gNB *gnb;
   NR_DL_FRAME_PARMS *fp;

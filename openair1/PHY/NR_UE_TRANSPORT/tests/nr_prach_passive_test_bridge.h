@@ -15,6 +15,7 @@ int test_prach_rar_entries(const uint8_t *pdu, uint32_t len, test_prach_rar_entr
 typedef struct { int preamble, delay, energy; } test_prach_detection_t;
 test_prach_detection_t test_prach_synth(int root, int shift);
 void test_prach_json(int relation, char *line, uint32_t capacity);
+void test_prach_diag(unsigned long *detections, int *margin_max);
 void test_prach_floor_reset(void);
 int test_prach_floor(int fdm, int gain_db, int energy);
 void test_prach_reset(void);

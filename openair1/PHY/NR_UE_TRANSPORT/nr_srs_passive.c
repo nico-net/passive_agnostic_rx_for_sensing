@@ -24,6 +24,7 @@
 #define SRS_DEPTH 4
 #define SRS_MARGIN 400
 #define SRS_EVENTS 64
+#define SRS_AUDIT_EVERY 16 /* while resources are tracked, the blind search still runs on every 16th eligible slot to find new ones */
 typedef struct {
   int type, n, delay; uint16_t rnti; unsigned request; uint64_t slot;
   float h[128]; uint16_t k[64];
@@ -54,6 +55,8 @@ typedef struct {
   _Atomic bool paused; /* MPCI-INT: retired cell (nr_srs_passive_cell_pause) */
   _Atomic uint64_t dropped, elapsed_us;
   _Atomic uint64_t pregate_skip, backoff_skip, budget_skip, idle_resets;
+  _Atomic uint64_t per_predicted, per_hit, per_miss, per_demoted, per_confirmed, per_audit_hit, per_audits;
+  uint64_t audit_tick, audits, scan_rot;
   nr_srs_idle_t idle;
   bool stop;
   unsigned head, tail, count;
@@ -141,13 +144,31 @@ static void process_srs(srs_job_t *job)
   }
   nr_srs_candidate_t seen[NR_SRS_MAX_CANDIDATES];int nseen=0;
   nr_srs_candidate_t due[NR_SRS_MAX_TRACKS];
+  bool scanned=true;
   bool tracking=nr_srs_has_confirmed(sr.search,job->meta.abs_slot);
   int ndue=tracking?nr_srs_confirmed_due(sr.search,job->meta.abs_slot,due):0;
-  if(tracking && !ndue) {srs_budget_checkpoint(&cpu_begin);return;}
+  /* Confirmed periodic resources are tested directly on their predicted occasions; the blind search then only
+   * runs as a sparse audit (to find resources that are not tracked yet and to catch pattern changes). */
+  bool blind=!tracking;
+  if(!tracking) {
+    /* Backed-off idle scan: decide before the first FFT. The 24 symbol FFTs of a scan used to be paid on every
+     * UL slot and only then discarded by the backoff, which alone exceeded the CPU budget and filled the queue. */
+    scanned=nr_srs_idle_scan(&sr.idle,job->meta.abs_slot,false);
+    if(!scanned) {srs_budget_checkpoint(&cpu_begin);return;}
+    sr.scan_rot++;
+  } else {
+    blind=(++sr.audit_tick%SRS_AUDIT_EVERY)==0;
+    if(blind) {sr.audits++;sr.scan_rot++;}
+    if(!ndue && !blind) {srs_budget_checkpoint(&cpu_begin);return;}
+  }
   static const int offsets[]={0,-100,100,-200,200,-300,300,-400,400};
   nr_srs_candidate_t candidates[NR_SRS_MAX_CANDIDATES];
-  bool budget_exhausted=false, scanned=true, did_gate=false, any_comb=false;
+  bool predicted[NR_SRS_MAX_CANDIDATES]={false};
+  bool budget_exhausted=false, did_gate=false, any_comb=false;
   for(unsigned d=0;d<sizeof(offsets)/sizeof(*offsets);d++) {
+    /* An undirected scan examines one receive-window offset (rotating, so all nine are covered over consecutive scans)
+     * instead of re-transforming the slot nine times; predicted occasions keep the full sweep until found. */
+    if(!ndue && d!=sr.scan_rot%(sizeof(offsets)/sizeof(*offsets))) continue;
     if(!srs_budget_checkpoint(&cpu_begin)) {budget_exhausted=true;break;}
     memset(sr.freq,0,sr.grid.n_ant*stride*sizeof(c16_t));
     for(int a=0;a<sr.grid.n_ant;a++) for(int l=0;l<6;l++) {
@@ -157,27 +178,27 @@ static void process_srs(srs_job_t *job)
         job->fo_hz,sr.samples_per_second/1000,job->sample[l]+SRS_MARGIN+offsets[d],raw,
         sr.freq+a*stride+(l+8)*N);
     }
-    if(!tracking) {
+    int n=0;
+    /* predicted occasions first: the tracked geometry, no comb detection */
+    for(int j=0;j<ndue && n<NR_SRS_MAX_CANDIDATES;j++) {
+      bool done=false;
+      for(int k=0;k<nseen;k++) if(seen[k].start_rb==due[j].start_rb && seen[k].nb_rb==due[j].nb_rb
+        && seen[k].start_symbol==due[j].start_symbol && seen[k].comb==due[j].comb && seen[k].comb_offset==due[j].comb_offset) done=true;
+      if(done) continue;
+      predicted[n]=true;candidates[n++]=due[j];
+    }
+    if(blind) {
       bool comb=nr_srs_pregate(&sr.grid,(int16_t *)sr.freq,stride,job->mask);
       did_gate=true;
-      if(d==0) scanned=nr_srs_idle_scan(&sr.idle,job->meta.abs_slot,comb);
-      else if(comb) nr_srs_idle_result(&sr.idle,true);
-      if(!scanned) break;
-      if(!comb) continue;
-      any_comb=true;
+      if(!tracking && comb) nr_srs_idle_result(&sr.idle,true);
+      if(comb) {
+        any_comb=true;
+        nr_srs_candidate_t found[NR_SRS_MAX_CANDIDATES];
+        int nf=nr_srs_comb_detect(&sr.grid,(int16_t *)sr.freq,stride,job->mask,found);
+        for(int i=0;i<nf && n<NR_SRS_MAX_CANDIDATES;i++) {predicted[n]=false;candidates[n++]=found[i];}
+      }
     }
-    int n=nr_srs_comb_detect(&sr.grid,(int16_t *)sr.freq,stride,job->mask,candidates);
-    if(tracking) {
-      int kept=0;
-      for(int i=0;i<n;i++) for(int j=0;j<ndue;j++)
-        if(candidates[i].comb==due[j].comb && candidates[i].comb_offset==due[j].comb_offset &&
-           candidates[i].start_rb==due[j].start_rb && candidates[i].nb_rb==due[j].nb_rb &&
-           candidates[i].start_symbol==due[j].start_symbol && candidates[i].n_symbols==due[j].n_symbols) {
-          candidates[kept++]=candidates[i];break;
-        }
-      n=kept;
-    }
-
+    if(!n) continue;
     for(int i=0;i<n;i++) {
       if(!srs_budget_checkpoint(&cpu_begin)) {budget_exhausted=true;break;}
       nr_srs_candidate_t *c=&candidates[i];
@@ -185,22 +206,21 @@ static void process_srs(srs_job_t *job)
       for(int j=0;j<nseen;j++) if(seen[j].start_rb==c->start_rb && seen[j].nb_rb==c->nb_rb
         && seen[j].start_symbol==c->start_symbol && seen[j].comb==c->comb && seen[j].comb_offset==c->comb_offset) duplicate=true;
       if(duplicate) continue;
-      nr_srs_candidate_t hint=*c;
-      bool use_hint=false;
-      if(tracking) for(int j=0;j<ndue;j++)
-        if(c->comb==due[j].comb && c->comb_offset==due[j].comb_offset &&
-           c->start_rb==due[j].start_rb && c->nb_rb==due[j].nb_rb &&
-           c->start_symbol==due[j].start_symbol && c->n_symbols==due[j].n_symbols) {
-          hint.group=due[j].group;hint.cs=due[j].cs;use_hint=true;break;
+      bool ok;
+      if(predicted[i]) ok=nr_srs_predicted_search(sr.search,(int16_t *)sr.freq,stride,c,job->meta.abs_slot);
+      else {
+        nr_srs_candidate_t hint=*c;
+        bool use_hint=false;
+        if(sr.have_hint && c->comb==sr.hint.comb && c->comb_offset==sr.hint.comb_offset) {
+          hint.group=sr.hint.group;hint.cs=sr.hint.cs;use_hint=true;
         }
-      if(!use_hint && sr.have_hint && c->comb==sr.hint.comb && c->comb_offset==sr.hint.comb_offset) {
-        hint.group=sr.hint.group;hint.cs=sr.hint.cs;use_hint=true;
+        ok=nr_srs_search_slot(sr.search,(int16_t *)sr.freq,stride,c,use_hint?&hint:NULL,job->meta.abs_slot);
       }
-      if(!nr_srs_search_slot(sr.search,(int16_t *)sr.freq,stride,c,use_hint?&hint:NULL,job->meta.abs_slot)) {
+      if(!ok) {
         /* Hopping may change u between symbols. Only export jointly when every
          * symbol validates; otherwise search each symbol independently. */
-        if(c->n_symbols>1) for(int l=0;l<c->n_symbols && n<NR_SRS_MAX_CANDIDATES;l++) {
-          candidates[n]=*c;candidates[n].start_symbol+=l;candidates[n++].n_symbols=1;
+        if(!predicted[i] && c->n_symbols>1) for(int l=0;l<c->n_symbols && n<NR_SRS_MAX_CANDIDATES;l++) {
+          predicted[n]=false;candidates[n]=*c;candidates[n].start_symbol+=l;candidates[n++].n_symbols=1;
         }
         continue;
       }
@@ -232,13 +252,29 @@ static void process_srs(srs_job_t *job)
       if(nseen<NR_SRS_MAX_CANDIDATES) seen[nseen++]=*c;
     }
     if(budget_exhausted || nseen==NR_SRS_MAX_CANDIDATES) break;
+    if(nseen) { /* found: later offsets would only repeat the same candidates */
+      int pending=0;
+      for(int j=0;j<ndue;j++) {
+        bool got=false;
+        for(int k=0;k<nseen;k++) if(seen[k].start_rb==due[j].start_rb && seen[k].nb_rb==due[j].nb_rb
+          && seen[k].start_symbol==due[j].start_symbol && seen[k].comb==due[j].comb && seen[k].comb_offset==due[j].comb_offset) got=true;
+        pending+=!got;
+      }
+      if(!pending) break;
+    }
   }
   srs_budget_checkpoint(&cpu_begin);
-  if(did_gate && !any_comb && !budget_exhausted) {
+  if(did_gate && !tracking && !any_comb && !budget_exhausted) {
     sr.idle.pregate_skip++;
     if(scanned && !budget_exhausted) nr_srs_idle_result(&sr.idle,false);
   }
   if(tracking && !budget_exhausted) nr_srs_confirmed_miss(sr.search,job->meta.abs_slot,seen,nseen);
+  if(sr.search) {
+    nr_ptrack_counters_t pc;nr_srs_periodic_counters(sr.search,&pc);
+    atomic_store(&sr.per_predicted,pc.predicted);atomic_store(&sr.per_hit,pc.hit);atomic_store(&sr.per_miss,pc.miss);
+    atomic_store(&sr.per_demoted,pc.demoted);atomic_store(&sr.per_confirmed,pc.confirmed);atomic_store(&sr.per_audit_hit,pc.audit_hit);
+    atomic_store(&sr.per_audits,sr.audits);
+  }
 }
 static void *srs_worker(void *arg)
 {
@@ -299,6 +335,8 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   sr.idle=(nr_srs_idle_t){.pct=5};
   atomic_store(&sr.pregate_skip,0);atomic_store(&sr.backoff_skip,0);
   atomic_store(&sr.budget_skip,0);atomic_store(&sr.idle_resets,0);
+  atomic_store(&sr.per_predicted,0);atomic_store(&sr.per_hit,0);atomic_store(&sr.per_miss,0);atomic_store(&sr.per_demoted,0);
+  atomic_store(&sr.per_confirmed,0);atomic_store(&sr.per_audit_hit,0);atomic_store(&sr.per_audits,0);sr.audit_tick=sr.audits=sr.scan_rot=0;
   sr.slots_per_subframe=fp->slots_per_subframe;
   LOG_W(PHY,"SENSING: blind SRS sequence hopping v=1 is unsupported\n");
   sr.samples_per_second=1000.0*fp->samples_per_subframe;
@@ -420,4 +458,10 @@ void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped,uint64_t *pregate,uin
   *us=atomic_load(&sr.elapsed_us);*dropped=atomic_load(&sr.dropped);
   *pregate=atomic_load(&sr.pregate_skip);*backoff=atomic_load(&sr.backoff_skip);
   *budget=atomic_load(&sr.budget_skip);*resets=atomic_load(&sr.idle_resets);
+}
+void nr_srs_passive_periodic_metrics(nr_ptrack_counters_t *c,uint64_t *audits)
+{
+  *c=(nr_ptrack_counters_t){.predicted=atomic_load(&sr.per_predicted),.hit=atomic_load(&sr.per_hit),.miss=atomic_load(&sr.per_miss),
+    .demoted=atomic_load(&sr.per_demoted),.confirmed=atomic_load(&sr.per_confirmed),.audit_hit=atomic_load(&sr.per_audit_hit)};
+  *audits=atomic_load(&sr.per_audits);
 }

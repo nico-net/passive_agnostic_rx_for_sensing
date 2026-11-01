@@ -96,6 +96,7 @@ void test_prach_json(int relation, char *line, uint32_t capacity)
   nr_prach_passive_format_test(relation, line, capacity);
 }
 
+void test_prach_diag(unsigned long *det, int *margin) { uint64_t o, d; nr_prach_passive_diag(&o, &d, margin); *det = (unsigned long)d; }
 void test_prach_floor_reset(void) { nr_prach_passive_floor_reset_test(); }
 int test_prach_floor(int fdm, int gain_db, int energy)
 {

@@ -1112,6 +1112,7 @@ set(PHY_NR_PASSIVE_UL_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_passive.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/srs_rx.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_blind.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_periodic_track.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_estimate.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_export.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c
@@ -2908,6 +2909,11 @@ if(ENABLE_TESTS)
   add_dependencies(test_nr_sense_gating params_libconfig)
   add_dependencies(tests test_nr_sense_gating)
   add_test(NAME test_nr_sense_gating COMMAND ./test_nr_sense_gating)
+  add_executable(test_nr_periodic_track ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_periodic_track.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_periodic_track_test.cc)
+  target_link_libraries(test_nr_periodic_track PRIVATE GTest::gtest_main)
+  target_include_directories(test_nr_periodic_track PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  add_dependencies(tests test_nr_periodic_track)
+  add_test(NAME test_nr_periodic_track COMMAND test_nr_periodic_track)
   add_executable(test_nr_srs_blind
     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
     ${OPENAIR1_DIR}/PHY/MODULATION/slot_fep_nr.c
@@ -2921,6 +2927,7 @@ if(ENABLE_TESTS)
     ${OPENAIR1_DIR}/PHY/NR_REFSIG/dmrs_nr.c
     ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_srs.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_srs_blind.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_periodic_track.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_srs_blind_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_srs_blind_fixture.c
     ${OPENAIR1_DIR}/PHY/NR_REFSIG/ul_ref_seq_nr.c)

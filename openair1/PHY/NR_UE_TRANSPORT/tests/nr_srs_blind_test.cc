@@ -72,6 +72,22 @@ TEST_F(SrsBlind,SrsBackoffResetsOnCandidate) {
   EXPECT_EQ(idle.interval,1u);
   EXPECT_TRUE(nr_srs_idle_scan(&idle,64,false));
 }
+// Eligible (UL) slots come every 5th slot on a DDDSU pattern; SRS periods are 5*2^k slots. A scan taken on every
+// 64th eligible slot is locked to one residue class mod 320 and never sees an SRS at another offset.
+TEST_F(SrsBlind,SrsBackoffScansEveryResidueClass) {
+  for(unsigned period:{20u,40u,80u,160u}) for(unsigned off:{4u,9u,14u}) {
+    if(off>=period) continue;
+    nr_srs_idle_t idle{};
+    for(uint64_t i=0;i<400;i++) if(nr_srs_idle_scan(&idle,5*i+4,false)) nr_srs_idle_result(&idle,false);
+    ASSERT_EQ(idle.interval,64u);
+    unsigned hit=0;
+    for(uint64_t i=400;i<400+40000;i++) {
+      uint64_t slot=5*i+4;
+      if(nr_srs_idle_scan(&idle,slot,false)) {hit+=(slot%period==off);nr_srs_idle_result(&idle,false);}
+    }
+    EXPECT_GT(hit,0u) << period << "/" << off;
+  }
+}
 TEST_F(SrsBlind,SrsBackoffCountsEligibleSlots) {
   nr_srs_idle_t idle{};
   unsigned scans=0;
@@ -134,6 +150,40 @@ TEST_F(SrsBlind,ConfirmedResourceOnlyOnItsOccasions) {
   EXPECT_FALSE(nr_srs_has_confirmed(s,10308)); // stale track cannot suppress blind search
   for(uint64_t slot:{87,107,127,147}) nr_srs_confirmed_miss(s,slot,nullptr,0);
   EXPECT_FALSE(nr_srs_has_confirmed(s,147));
+}
+TEST_F(SrsBlind,PeriodTolaratesMissedOccasionsAndCounts) {
+  auto c=truth;nr_ptrack_counters_t pc;
+  for(uint64_t slot:{7,27,67,87}) nr_srs_observe(s,&c,slot); // occasion 47 was not detected
+  EXPECT_EQ(c.period,20); EXPECT_EQ(c.slot_offset,7);
+  nr_srs_candidate_t due[NR_SRS_MAX_TRACKS];
+  ASSERT_EQ(nr_srs_confirmed_due(s,107,due),1); EXPECT_EQ(due[0].period,20);
+  nr_srs_observe(s,&c,107); // predicted hit
+  nr_srs_periodic_counters(s,&pc);
+  EXPECT_EQ(pc.confirmed,1u); EXPECT_EQ(pc.predicted,1u); EXPECT_EQ(pc.hit,1u); EXPECT_EQ(pc.miss,0u);
+  nr_srs_confirmed_miss(s,127,nullptr,0);
+  nr_srs_periodic_counters(s,&pc);
+  EXPECT_EQ(pc.predicted,2u); EXPECT_EQ(pc.miss,1u); EXPECT_EQ(pc.demoted,0u);
+  for(uint64_t slot:{147,167,187}) nr_srs_confirmed_miss(s,slot,nullptr,0);
+  nr_srs_periodic_counters(s,&pc);
+  EXPECT_EQ(pc.demoted,1u); EXPECT_FALSE(nr_srs_has_confirmed(s,187));
+}
+TEST_F(SrsBlind,PredictedSearchTestsOnlyTheTrackedSequence) {
+  generate();auto c=truth;
+  for(uint64_t slot:{7,27,47,67}) nr_srs_observe(s,&c,slot);
+  nr_srs_candidate_t due[NR_SRS_MAX_TRACKS];
+  ASSERT_EQ(nr_srs_confirmed_due(s,87,due),1);
+  auto trials=nr_srs_sequence_trials(s);
+  EXPECT_TRUE(nr_srs_predicted_search(s,iq.data(),14*512,&due[0],87));
+  EXPECT_EQ(nr_srs_sequence_trials(s)-trials,1u);
+  EXPECT_EQ(due[0].group,truth.group);
+  // a different sequence on the same comb is a miss and costs a single correlation, not a 30-group search
+  std::fill(iq.begin(),iq.end(),0);auto other=truth;other.group=(truth.group+5)%30;
+  ASSERT_TRUE(srs_test_generate(&g,&other,iq.data()));
+  for(int a=1;a<4;a++) std::copy_n(iq.data(),14*512*2,iq.data()+a*14*512*2);
+  ASSERT_EQ(nr_srs_confirmed_due(s,87,due),1);
+  trials=nr_srs_sequence_trials(s);
+  EXPECT_FALSE(nr_srs_predicted_search(s,iq.data(),14*512,&due[0],87));
+  EXPECT_EQ(nr_srs_sequence_trials(s)-trials,1u);
 }
 TEST_F(SrsBlind,IllegalGapNeverSuppressesBlindSearch) {
   auto c=truth;

@@ -3,6 +3,7 @@
 #define NR_SRS_PASSIVE_H
 #include <stdint.h>
 #include <stdbool.h>
+#include "nr_periodic_track.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,6 +27,8 @@ void nr_srs_passive_grant(uint64_t slot,uint16_t mask,int start_rb,int nb_rb);
 void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped,uint64_t *pregate,uint64_t *backoff,
                             uint64_t *budget,uint64_t *resets);
 bool nr_srs_passive_enabled(void);
+/* Periodic-resource tracker counters of the bound cell (SRS): predicted occasions, hits, misses, demotions, confirmations, audit hits, audits run. */
+void nr_srs_passive_periodic_metrics(nr_ptrack_counters_t *c, uint64_t *audits);
 #ifdef __cplusplus
 }
 #endif

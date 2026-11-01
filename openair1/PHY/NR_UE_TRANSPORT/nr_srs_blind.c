@@ -73,12 +73,20 @@ void nr_srs_idle_result(nr_srs_idle_t *idle,bool candidate)
     idle->interval=idle->interval ? (idle->interval<64 ? idle->interval*2 : 64) : 2;
   }
 }
+/* Which eligible slots a backed-off scan visits. A fixed stride (every interval-th eligible slot) is phase-locked to the SRS
+ * periodicity (periods are 5*2^k slots, strides 2^k eligible slots) and would look at the same offset forever; a hash of the
+ * eligible-slot counter visits every residue class with probability 1/interval. */
+static bool backoff_visits(uint64_t n,unsigned interval)
+{
+  n+=0x9e3779b97f4a7c15ull;n=(n^(n>>30))*0xbf58476d1ce4e5b9ull;n=(n^(n>>27))*0x94d049bb133111ebull;n^=n>>31;
+  return n%interval==0;
+}
 bool nr_srs_idle_scan(nr_srs_idle_t *idle,uint64_t slot,bool evidence)
 {
   (void)slot;
   idle->eligible++;
   if(evidence) nr_srs_idle_result(idle,true);
-  if(idle->interval>1 && idle->eligible%idle->interval) {idle->backoff_skip++;return false;}
+  if(idle->interval>1 && !backoff_visits(idle->eligible,idle->interval)) {idle->backoff_skip++;return false;}
   idle->scans++;return true;
 }
 static void cpu_expire(nr_srs_idle_t *idle,uint64_t now)
@@ -218,7 +226,7 @@ static double score_sequence(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_s
   c->residual_delay=delay;c->delay_samples=lrint(delay);
   return total_weight>0?combined/total_weight:0;
 }
-bool nr_srs_group_cs_search(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_srs_candidate_t *c,const nr_srs_candidate_t *hint)
+static bool group_cs_search(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_srs_candidate_t *c,const nr_srs_candidate_t *hint,bool hint_only)
 {
   if(!s || !iq || !nr_srs_valid_grid(&s->grid,stride) || !nr_srs_valid_candidate(&s->grid,c)) return false;
   nr_srs_info_t info;
@@ -229,7 +237,7 @@ bool nr_srs_group_cs_search(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_sr
   /* A union-bound-inspired floor increases with the 30 groups and bounded
    * geometry/window trials. This is a conservative heuristic, not a calibrated PFA. */
   const double threshold=fmax(0.65,1-exp(-log(30.0*16*9/1e-6)/fmax(1,c->nb_rb*12/c->comb-2)));
-  for(int trial=-1;trial<30;trial++) {
+  for(int trial=-1;trial<(hint_only?0:30);trial++) {
     nr_srs_candidate_t test=*c;
     if(trial<0) {
       if(!hint || hint->comb!=c->comb || hint->comb_offset!=c->comb_offset || hint->nb_rb!=c->nb_rb) continue;
@@ -254,6 +262,10 @@ bool nr_srs_group_cs_search(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_sr
   *c=best;
   return true;
 }
+bool nr_srs_group_cs_search(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_srs_candidate_t *c,const nr_srs_candidate_t *hint)
+{
+  return group_cs_search(s,iq,stride,c,hint,false);
+}
 uint64_t nr_srs_unsupported_lengths(const nr_srs_blind_t *s)
 {
   return s?s->unsupported_lengths:0;
@@ -276,34 +288,29 @@ void nr_srs_observe(nr_srs_blind_t *s,nr_srs_candidate_t *c,uint64_t slot)
   if (!t) {
     t=oldest;
     *t=(srs_track_t){.key=*c,.first=slot,.last=slot,.id=++s->next_id,.count=1};
-  } else if (slot<t->last || slot-t->last>10240) {
+    nr_ptrack_init(&t->pt);
+    nr_ptrack_hit(&t->pt,NR_PTRACK_SRS,slot,&s->periodic);
+  } else if (slot<t->last || slot-t->last>NR_PTRACK_EXPIRY) {
+    if (t->pt.confirmed) s->periodic.demoted++;
     *t=(srs_track_t){.key=*c,.first=slot,.last=slot,.id=++s->next_id,.count=1};
+    nr_ptrack_init(&t->pt);
+    nr_ptrack_hit(&t->pt,NR_PTRACK_SRS,slot,&s->periodic);
   } else if (slot>t->last) {
-    unsigned gap=slot-t->last;
-    t->consistent_gaps=t->gap==gap?t->consistent_gaps+1:1;
-    t->gap=gap;
     t->last=slot; t->count++;
+    nr_ptrack_hit(&t->pt,NR_PTRACK_SRS,slot,&s->periodic);
   }
-  t->misses=0;
   c->track_id=t->id; c->period=0; c->slot_offset=0;
-  static const unsigned periods[]={1,2,4,5,8,10,16,20,32,40,64,80,160,320,640,1280,2560};
-  if (t->consistent_gaps>=3) for(unsigned i=0;i<sizeof(periods)/sizeof(*periods);i++)
-    if(t->gap==periods[i]) { c->period=t->gap; c->slot_offset=t->last%t->gap; break; }
+  if (t->pt.confirmed) { c->period=t->pt.period; c->slot_offset=t->pt.offset; }
   c->confirmed=c->period>0;
 }
-static bool legal_period(unsigned gap)
+static bool track_confirmed(const srs_track_t *t,uint64_t slot)
 {
-  static const unsigned periods[]={1,2,4,5,8,10,16,20,32,40,64,80,160,320,640,1280,2560};
-  for(unsigned i=0;i<sizeof(periods)/sizeof(*periods);i++) if(periods[i]==gap) return true;
-  return false;
+  return t->id && t->pt.confirmed && slot>=t->last && slot-t->last<=NR_PTRACK_EXPIRY;
 }
 bool nr_srs_has_confirmed(const nr_srs_blind_t *s,uint64_t slot)
 {
   if(!s) return false;
-  for(int i=0;i<NR_SRS_MAX_TRACKS;i++) {
-    const srs_track_t *t=&s->tracks[i];
-    if(t->id && t->consistent_gaps>=3 && legal_period(t->gap) && slot>=t->last && slot-t->last<=10240) return true;
-  }
+  for(int i=0;i<NR_SRS_MAX_TRACKS;i++) if(track_confirmed(&s->tracks[i],slot)) return true;
   return false;
 }
 int nr_srs_confirmed_due(const nr_srs_blind_t *s,uint64_t slot,nr_srs_candidate_t out[NR_SRS_MAX_TRACKS])
@@ -312,23 +319,42 @@ int nr_srs_confirmed_due(const nr_srs_blind_t *s,uint64_t slot,nr_srs_candidate_
   int n=0;
   for(int i=0;i<NR_SRS_MAX_TRACKS;i++) {
     const srs_track_t *t=&s->tracks[i];
-    if(!t->id || t->consistent_gaps<3 || !legal_period(t->gap) || slot<t->last || slot-t->last>10240 ||
-       slot%t->gap!=t->last%t->gap) continue;
-    out[n++]=t->key;
+    if(!track_confirmed(t,slot) || !nr_ptrack_due(&t->pt,slot)) continue;
+    out[n]=t->key;out[n].period=t->pt.period;out[n].slot_offset=t->pt.offset;out[n].confirmed=true;
+    out[n++].track_id=t->id;
   }
   return n;
 }
+/* Every confirmed resource due at `slot` and not among the detections `seen` missed its predicted occasion.
+ * The caller only reports this for slots that were actually examined (not budget-truncated). */
 void nr_srs_confirmed_miss(nr_srs_blind_t *s,uint64_t slot,const nr_srs_candidate_t *seen,int nseen)
 {
   if(!s) return;
   for(int i=0;i<NR_SRS_MAX_TRACKS;i++) {
     srs_track_t *t=&s->tracks[i];
-    if(!t->id || t->consistent_gaps<3 || !legal_period(t->gap) || slot<=t->last ||
-       slot%t->gap!=t->last%t->gap) continue;
+    if(!track_confirmed(t,slot) || slot<=t->last || !nr_ptrack_due(&t->pt,slot)) continue;
     bool found=false;
     for(int j=0;j<nseen;j++) if(same_resource(&t->key,&seen[j])) {found=true;break;}
-    if(!found && ++t->misses>=4) t->consistent_gaps=0;
+    if(!found) nr_ptrack_miss(&t->pt,NR_PTRACK_SRS,slot,&s->periodic);
   }
+}
+/* Direct test of a predicted occasion: the geometry and sequence of the tracked resource are known, so one
+ * sequence correlation replaces the comb detector and the 30-group search. No result cache: the caller
+ * retries the same slot at several receive-window offsets. */
+bool nr_srs_predicted_search(nr_srs_blind_t *s,const int16_t *iq,int stride,nr_srs_candidate_t *c,uint64_t slot)
+{
+  if(!s || !c || !nr_srs_valid_candidate(&s->grid,c)) return false;
+  unsigned mask=((1u<<c->n_symbols)-1)<<c->start_symbol;
+  for(unsigned i=0;i<256;i++)
+    if(s->grants[i].valid && s->grants[i].slot==slot && (s->grants[i].mask&mask)
+       && c->start_rb<s->grants[i].start+s->grants[i].width
+       && s->grants[i].start<c->start_rb+c->nb_rb) return false;
+  nr_srs_candidate_t hint=*c;
+  return group_cs_search(s,iq,stride,c,&hint,true); /* only the tracked sequence: no 30-group search on a miss */
+}
+void nr_srs_periodic_counters(const nr_srs_blind_t *s,nr_ptrack_counters_t *out)
+{
+  if(out) *out=s?s->periodic:(nr_ptrack_counters_t){0};
 }
 
 void nr_srs_blind_reset(nr_srs_blind_t *s)

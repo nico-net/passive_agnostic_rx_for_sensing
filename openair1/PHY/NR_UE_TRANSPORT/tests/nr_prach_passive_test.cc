@@ -61,6 +61,23 @@ TEST_F(PassivePrach, PreambleAboveFloorDetected)
   EXPECT_EQ(test_prach_floor(0, 40, 354), 0);
 }
 
+TEST_F(PassivePrach, DiagExplainsMissingRecords)
+{
+  // idle cell: occasions are correlated but the best margin stays far below the 8 dB a Msg1 needs
+  test_prach_floor_reset();
+  for (int i = 0; i < 40; ++i) test_prach_floor(0, 40, 350 + i % 5);
+  unsigned long det = 0;
+  int margin = 0;
+  test_prach_diag(&det, &margin);
+  EXPECT_EQ(det, 0ul);
+  EXPECT_GT(margin, 0);
+  EXPECT_LT(margin, 80);
+  EXPECT_EQ(test_prach_floor(0, 40, 470), 1);
+  test_prach_diag(&det, &margin);
+  EXPECT_EQ(det, 1ul);
+  EXPECT_GE(margin, 80);
+}
+
 TEST_F(PassivePrach, SlotThreadOnlyCopies)
 {
   ASSERT_EQ(test_prach_start_calls(), 1u);

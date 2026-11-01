@@ -522,6 +522,7 @@ if(ENABLE_TESTS)
     ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/dmrs_nr.c
     ${CMAKE_SOURCE_DIR}/openair1/PHY/nr_phy_common/src/nr_phy_common_srs.c
     ${CF_TR}/nr_srs_blind.c
+    ${CF_TR}/nr_periodic_track.c
     ${CF_TR}/nr_srs_passive.c
     ${CF_TR}/tests/nr_mpci_cellfeat_srs_test.cc
     ${CF_TR}/tests/nr_srs_blind_fixture.c

@@ -3,6 +3,7 @@
 #define NR_SRS_BLIND_H
 #include <stdbool.h>
 #include <stdint.h>
+#include "nr_periodic_track.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -39,6 +40,9 @@ void nr_srs_cpu_charge(nr_srs_idle_t *idle, uint64_t now_ns, uint64_t cpu_ns);
 /* Return only due, confirmed resource geometries. count is zero when still blind. */
 int nr_srs_confirmed_due(const nr_srs_blind_t *s, uint64_t slot,
                          nr_srs_candidate_t out[NR_SRS_MAX_TRACKS]);
+/* Predicted occasion: test the tracked resource directly (c is a nr_srs_confirmed_due() entry); fills group/cs/score. */
+bool nr_srs_predicted_search(nr_srs_blind_t *s, const int16_t *iq, int stride, nr_srs_candidate_t *c, uint64_t slot);
+void nr_srs_periodic_counters(const nr_srs_blind_t *s, nr_ptrack_counters_t *out);
 bool nr_srs_has_confirmed(const nr_srs_blind_t *s, uint64_t slot);
 void nr_srs_confirmed_miss(nr_srs_blind_t *s, uint64_t slot,
                            const nr_srs_candidate_t *seen, int nseen);
