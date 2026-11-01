@@ -35,7 +35,7 @@
 
 typedef struct waiter {
   int prio, cell, tok, last;
-  bool ul;
+  bool ul, resume; /* resume: a token re-acquired after a GPU-wait give (picked first within its cell and class) */
   uint64_t deadline, t_enq, seq;
   pthread_cond_t *cv;
   struct waiter *prev, *next; /* intrusive wait list: the node lives on the waiting thread's stack, so the queue has no capacity limit and no allocation */
@@ -417,7 +417,7 @@ static waiter_t *select_waiter(nr_pool_t *p, uint64_t now, bool *promoted)
       best = NULL;
       for (waiter_t *w = p->wq_head; w; w = w->next) {
         if (w->prio != pr || w->cell != cell || !class_ok(p, pr, false, w->ul, cell, now)) continue;
-        if (!best || w->deadline < best->deadline || (w->deadline == best->deadline && w->seq < best->seq)) best = w;
+        if (!best || (w->resume && !best->resume) || (w->resume == best->resume && (w->deadline < best->deadline || (w->deadline == best->deadline && w->seq < best->seq)))) best = w;
       }
       if (!best) continue;
       if (!bw) { /* first candidate: U_c is computed only if a second cell competes */
@@ -505,9 +505,12 @@ static void go_home(const nr_pool_t *p)
   if (sched_setaffinity(0, sizeof(p->home), &p->home) == 0) tl.cur_core = -1;
 }
 
+static __thread bool tl_resume; /* the lease() in progress is a GPU-wait re-acquire */
+static __thread struct { bool on; nr_pool_park_t pk; } tl_gp; /* this thread gave its token away at a GPU wait and has not re-acquired yet */
 static int lease(nr_pool_t *p, int prio, int cell, uint64_t deadline, bool block)
 {
   if (!p) return -1;
+  if (tl_gp.on && !tl_resume) tl_gp.on = false; /* a lease request of the thread's own supersedes the pending re-acquire */
   if (tl.pool == p) { /* already holds one (nested request: keeps the outer class; a different class is counted, see header (c)) */
     if ((prio & ~NR_POOL_F_UL) != tl.prio) { pthread_mutex_lock(&p->mu); p->st.nested++; pthread_mutex_unlock(&p->mu); }
     return p->core[tl.tok];
@@ -518,7 +521,7 @@ static int lease(nr_pool_t *p, int prio, int cell, uint64_t deadline, bool block
   if (prio >= NR_POOL_NPRIO) prio = NR_POOL_NPRIO - 1;
   cell = (unsigned)cell % NR_POOL_MAX_CELLS;
   const uint64_t now = nr_pool_now_ns();
-  waiter_t w = {.prio = prio, .cell = cell, .tok = -1, .ul = ul, .last = tl_last, .deadline = deadline ? deadline : now, .t_enq = now, .cv = &tl_cv};
+  waiter_t w = {.prio = prio, .cell = cell, .tok = -1, .ul = ul, .last = tl_last, .deadline = deadline ? deadline : now, .t_enq = now, .cv = &tl_cv, .resume = tl_resume};
   pthread_mutex_lock(&p->mu);
   w.seq = p->seq++;
   if (!block) { /* grant only if no more urgent waiter could take this token */
@@ -661,6 +664,9 @@ static int pool_line_proc(const nr_pool_stats_t *sp, const nr_pool_t *p, char *b
   const nr_pool_stats_t s = *sp;
   int o = snprintf(buf, (size_t)len, "SENSING: CORE_POOL n=%d yields=%lu gpu_gives=%lu nested=%lu enforced=%lu", p ? p->n : 0, (unsigned long)s.yields,
                 (unsigned long)s.gpu_gives, (unsigned long)s.nested, (unsigned long)s.enforced);
+  if (s.gpu_gives && o < len)
+    o += snprintf(buf + o, (size_t)(len - o), " gpu_resume[wait_us p50<=%lu p99<=%lu max=%lu]", (unsigned long)hist_q_us(s.gpu_resume_hist, 0.5),
+                  (unsigned long)hist_q_us(s.gpu_resume_hist, 0.99), (unsigned long)(s.gpu_resume_max_ns / 1000));
   for (int i = 0; i < NR_POOL_NPRIO && o < len; i++) {
     if ((i == NR_POOL_CHAN || i == NR_POOL_SENSE) && !s.leases[i]) continue; /* no channelizer / no sensing exporter: the line is the pre-CHAN / pre-SENSE one */
     o += snprintf(buf + o, (size_t)(len - o), " %s[n=%lu waited=%lu promo=%lu wait_us p50<=%lu p99<=%lu max=%lu]", k_cls_nm[i],
@@ -1003,20 +1009,42 @@ static bool released_token_wanted(nr_pool_t *p)
   return want;
 }
 
-void nr_pool_gpu_wait(nr_pool_t *p)
+bool nr_pool_gpu_give(nr_pool_t *p)
 {
-  const struct timespec ts = {0, 20000};
-  if (!tl_give || !p || tl.pool != p || nr_pool_total_waiting(p) == 0 || !released_token_wanted(p)) {
-    nanosleep(&ts, NULL);
-    return;
-  }
-  nr_pool_park_t pk;
-  nr_pool_park(p, &pk);
+  if (tl_gp.on) return true; /* already given */
+  const bool eligible = p && tl.pool == p && (tl_give || tl.prio == NR_POOL_DECODE);
+  if (!eligible || nr_pool_total_waiting(p) == 0 || !released_token_wanted(p)) return false;
+  nr_pool_park(p, &tl_gp.pk);
+  tl_gp.on = tl_gp.pk.held;
   pthread_mutex_lock(&p->mu);
   p->st.gpu_gives++;
   pthread_mutex_unlock(&p->mu);
+  return tl_gp.on;
+}
+
+void nr_pool_gpu_wait(nr_pool_t *p)
+{
+  const struct timespec ts = {0, 20000};
+  nr_pool_gpu_give(p);
   nanosleep(&ts, NULL);
-  nr_pool_unpark(p, &pk);
+}
+
+void nr_pool_gpu_wait_end(nr_pool_t *p)
+{
+  if (!tl_gp.on) return;
+  tl_gp.on = false;
+  const uint64_t t0 = nr_pool_now_ns();
+  tl_resume = true;
+  nr_pool_unpark(p, &tl_gp.pk);
+  tl_resume = false;
+  const uint64_t w = nr_pool_now_ns() - t0;
+  uint64_t us = w / 1000;
+  int b = 0;
+  while (us && b < NR_POOL_WAIT_BINS - 1) us >>= 1, b++;
+  pthread_mutex_lock(&p->mu);
+  p->st.gpu_resume_hist[b]++;
+  if (w > p->st.gpu_resume_max_ns) p->st.gpu_resume_max_ns = w;
+  pthread_mutex_unlock(&p->mu);
 }
 
 void nr_pool_park(nr_pool_t *p, nr_pool_park_t *pk)
@@ -1041,6 +1069,8 @@ void nr_pool_note_scan_extra(nr_pool_t *p)
   pthread_mutex_unlock(&p->mu);
 }
 void nr_pool_site_gpu_wait(void) { nr_pool_gpu_wait(g_site); }
+bool nr_pool_site_gpu_give(void) { return nr_pool_gpu_give(g_site); }
+void nr_pool_site_gpu_wait_end(void) { nr_pool_gpu_wait_end(g_site); }
 void nr_pool_site_park(nr_pool_park_t *pk) { nr_pool_park(g_site, pk); }
 void nr_pool_site_unpark(const nr_pool_park_t *pk) { nr_pool_unpark(g_site, pk); }
 void nr_pool_site_note_scan_extra(void) { nr_pool_note_scan_extra(g_site); }

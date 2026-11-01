@@ -107,6 +107,7 @@ int nr_gpu_budget_rt_wait(int (*query)(void *),void *job,uint64_t start,
     elapsed=now-start;
     if(elapsed>=nr_gpu_rt_deadline_us()) {rc=600;break;}
   } while(rc==600);
+  nr_gpu_poll_end();
   nr_gpu_budget_rt_result(elapsed,rc!=0);
   if(rc && rc!=600)nr_gpu_budget_fault();
   return rc;
