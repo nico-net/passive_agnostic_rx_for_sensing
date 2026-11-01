@@ -85,7 +85,7 @@ int nr_pdsch_phase_tinterp(c16_t *const rows[], int nl, int nrx, int ofdm_size, 
 /* ZF output of RE i; 0 when the RE is ill-conditioned */
 static inline int cpe_re(int nl, int a0, int nb, uint32_t i, c16_t *const y[4], c16_t *const h[4][4], double *xr, double *xi)
 {
-  double yr[4], yi[4], hr[4][4], hi[4][4];
+  int yr[4], yi[4], hr[4][4], hi[4][4];
   for (int a = 0; a < nb; a++) {
     yr[a] = y[a0 + a][i].r;
     yi[a] = y[a0 + a][i].i;
@@ -100,13 +100,13 @@ static inline int cpe_re(int nl, int a0, int nb, uint32_t i, c16_t *const y[4], 
 void nr_pdsch_cpe_sums(int nl, int a0, int nb, uint32_t nre, c16_t *const y[4], c16_t *const h[4][4], nr_pt_cpe_sums_t *s)
 {
   memset(s, 0, sizeof(*s));
-  const uint32_t nch = (nre + NRPT_BLK - 1) / NRPT_BLK;
+  const uint32_t nch = (nre + NRPT_CPE_BLK - 1) / NRPT_CPE_BLK;
   /* pass 1: mean power of each layer's ZF output. Chunk partials added in chunk order (the GPU kernel's order). */
   for (uint32_t c = 0; c < nch; c++) {
     double pp[4] = {0, 0, 0, 0};
     uint32_t pn = 0;
-    const uint32_t i1 = (c + 1) * NRPT_BLK < nre ? (c + 1) * NRPT_BLK : nre;
-    for (uint32_t i = c * NRPT_BLK; i < i1; i++) {
+    const uint32_t i1 = (c + 1) * NRPT_CPE_BLK < nre ? (c + 1) * NRPT_CPE_BLK : nre;
+    for (uint32_t i = c * NRPT_CPE_BLK; i < i1; i++) {
       double xr[4], xi[4];
       if (!cpe_re(nl, a0, nb, i, y, h, xr, xi))
         continue;
@@ -127,8 +127,8 @@ void nr_pdsch_cpe_sums(int nl, int a0, int nb, uint32_t nre, c16_t *const y[4], 
   for (uint32_t c = 0; c < nch; c++) {
     double pr[4] = {0, 0, 0, 0}, pi[4] = {0, 0, 0, 0}, pq[4] = {0, 0, 0, 0};
     uint32_t pn[4] = {0, 0, 0, 0};
-    const uint32_t i1 = (c + 1) * NRPT_BLK < nre ? (c + 1) * NRPT_BLK : nre;
-    for (uint32_t i = c * NRPT_BLK; i < i1; i++) {
+    const uint32_t i1 = (c + 1) * NRPT_CPE_BLK < nre ? (c + 1) * NRPT_CPE_BLK : nre;
+    for (uint32_t i = c * NRPT_CPE_BLK; i < i1; i++) {
       double xr[4], xi[4];
       if (!cpe_re(nl, a0, nb, i, y, h, xr, xi))
         continue;
