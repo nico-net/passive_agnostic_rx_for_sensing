@@ -885,6 +885,14 @@ static bgp_t *bgp_find(nr_bgq_t *q)
   pthread_mutex_unlock(&g_bgp_mu);
   return r;
 }
+int nr_bgq_lane_cores(void)
+{
+  cpu_set_t cs;
+  char list[128];
+  bg_cores(&cs, list, sizeof(list));
+  const int n = CPU_COUNT(&cs);
+  return n > 0 ? n : 1; /* an empty mask = unpinned lane: one worker's worth */
+}
 int nr_bgq_prepare(nr_bgq_t *q, unsigned cap, const char *name, int cell)
 {
   if (bgp_find(q))

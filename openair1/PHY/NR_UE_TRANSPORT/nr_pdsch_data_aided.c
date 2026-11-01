@@ -58,6 +58,10 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
 static _Atomic uint64_t g_data_aided_g_refused = 0;
+/* tpool with no threads: pushTpool runs a task on the pushing thread. The re-encode on the daBg worker uses it so the LDPC segments are encoded by the worker itself, not
+ * queued on (and joined from) the shared decode Tpool. Read-only. */
+static tpool_t da_inline_pool;
+static __thread bool da_on_worker;
 /* Large per-thread scratch lives on the heap, not in static TLS: every thread's static TLS is carved out of its
  * 8 MB stack, and 5.6 MB of it left the SYNC actor too little stack for the fast re-sync (OTA SIGSEGV in
  * nr_pbch_detection, 2026-10-11). Allocated once per thread on first use, kept for the thread's lifetime. */
@@ -274,7 +278,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   nrLDPC_slot_encoding_parameters_t slot_parameters = {.frame = proc->frame_rx,
                                                        .slot = proc->nr_slot_rx,
                                                        .nb_TBs = 1,
-                                                       .threadPool = &get_nrUE_params()->Tpool,
+                                                       .threadPool = da_on_worker ? &da_inline_pool : &get_nrUE_params()->Tpool,
                                                        .tinput = NULL,
                                                        .tinput_memcpy = NULL,
                                                        .tprep = NULL,
@@ -584,12 +588,19 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
 }
 
 /* ---- the tap off the decode thread (nr_isac_pdsch_data_aided_submit_async) ---- */
-/* Sizing [MEASURED DGX 2026-11-01, PCI 415/923 day replays, sensing on]: 9.5-20.7k tap calls per 100 s (<= 210/s) at 170 us mean, ~90 % of the
- * decoded grants Nl > 1; the pool covers a 4-grant burst of 4-layer 273-PRB tails (the worst case is ~ms of LS) behind the one worker. NR_BGQ_MAX is the
- * queue's hard cap. */
-#define DA_POOL 8
+/* Sizing. [MEASURED DGX 2026-11-01, PCI 415/923 day replays, sensing on]: <= 210 tap calls/s (9.5-20.7k per 100 s), 166-175 us of worker CPU per call, ~90 % of the
+ * grants Nl > 1. The worker used to take ~2.9x that in wall time because the LDPC re-encode joined the shared decode Tpool (see da_inline_pool): with the encode on the
+ * worker the load is rate x cost. Design point = 2x the measured peak rate (DA_RATE_PEAK) at that cost, one worker per DA_UTIL of a core, workers capped by the
+ * background lane's cores; the queue holds the rate x DA_STALL_S jobs a descheduled nice-19 worker leaves behind. NR_BGQ_MAX is the queue's hard cap. */
+#define DA_RATE_PEAK 420.0 /* grants/s */
+#define DA_COST_S 200e-6   /* worker CPU per grant, measured mean 170 us plus margin */
+#define DA_UTIL 0.25       /* a worker is not planned beyond this share of a core (nice 19 on a shared lane) */
+#define DA_STALL_S 0.05    /* queued-work horizon of a worker stall */
+#define DA_NW_MAX 4
+#define DA_POOL 24 /* jobs per cell: >= DA_RATE_PEAK * DA_STALL_S = 21 */
 #define DA_TB_CAP (NR_MIMO_LS_MAX_NL * 65536) /* bytes: one layer, 273 PRB x 12 x 14 REs x 8 bits / 8 = 45.9 kB + CRC; Nl layers carry Nl times that */
-_Static_assert(DA_POOL <= NR_BGQ_MAX, "the daBg queue cannot hold the pool");
+_Static_assert(DA_POOL <= NR_BGQ_MAX && DA_POOL <= 32, "the daBg queue cannot hold the pool");
+_Static_assert(DA_RATE_PEAK * DA_STALL_S <= DA_POOL, "pool shorter than the stall horizon");
 typedef struct {
   PHY_VARS_NR_UE *ue;
   UE_nr_rxtx_proc_t proc;
@@ -612,26 +623,43 @@ typedef struct {
   int nant;
   _Atomic int ready;
   _Atomic uint64_t queued, dropped, done;
+  _Atomic uint32_t rr;
   _Atomic uint64_t drop_pool, drop_queue, drop_geom; /* why: no free job / queue full or busy / a grant the snapshot cannot hold (or no pool) */
   _Atomic uint64_t run_ns, snap_ns; /* worker time of the tap / consumer time of the snapshot of the queued grants: saved = run - snap */
 } da_pool_t;
 /* mpci: the pool, its queue and its worker are the cell's (the consumer calling _async is bound to it); the worker binds to the cell of each item (nr_gpu_bgq.h) */
 NR_CELL_STATIC(da_pool_t, g_da)
 #define g_da NR_CELL_REF(g_da)
-NR_CELL_STATIC(nr_bgq_t, g_da_q)
-#define g_da_q NR_CELL_REF(g_da_q)
+typedef struct {
+  nr_bgq_t q[DA_NW_MAX];
+  int n; /* workers of this cell (set in prepare, before the fence) */
+} da_qs_t;
+NR_CELL_STATIC(da_qs_t, g_da_qs)
+#define g_da_qs NR_CELL_REF(g_da_qs)
+static const char *const da_wname[DA_NW_MAX] = {"daBg0", "daBg1", "daBg2", "daBg3"};
 
 void nr_isac_pdsch_data_aided_async_prepare(int cell)
 {
   if (!nr_isac_source_configured(NR_ISAC_SRC_PDSCH_DATA)) /* configured, not enabled: the cell's session is not open before the RX fence */
     return;
-  (void)nr_bgq_prepare(&g_da_q_cells[cell], DA_POOL, "daBg", cell);
+  /* workers: the load at the design point over a planned share of a core, capped by the background lane's cores shared by every cell of the process */
+  int nw = (int)ceil(DA_RATE_PEAK * DA_COST_S / DA_UTIL);
+  const int per_cell = nr_bgq_lane_cores() / (nr_cell_count() > 0 ? nr_cell_count() : 1);
+  if (nw > per_cell)
+    nw = per_cell;
+  nw = nw < 1 ? 1 : nw > DA_NW_MAX ? DA_NW_MAX : nw;
+  da_qs_t *Q = &g_da_qs_cells[cell];
+  Q->n = 0;
+  for (int i = 0; i < nw; i++)
+    if (nr_bgq_prepare(&Q->q[i], DA_POOL, da_wname[i], cell) == 0)
+      Q->n++;
 }
 
 /* worker side, once, before RX start: build and prefault the worker's own scratch so the first grant allocates nothing */
 static void da_warm(void *arg)
 {
   da_pool_t *P = &g_da;
+  da_on_worker = true;
   (void)da_scratch_ensure((uint32_t)P->nant, true, true);
   __atomic_fetch_or(&P->free_mask, 1u << ((da_job_t *)arg)->idx, __ATOMIC_RELEASE);
 }
@@ -663,21 +691,34 @@ void nr_isac_pdsch_data_aided_async_init(const PHY_VARS_NR_UE *ue)
   }
   if (!P->free_mask)
     return;
-  if (nr_bgq_start(&g_da_q, DA_POOL, "daBg") != 0) {
-    P->free_mask = 0; /* no worker: every grant is shed (counted), none runs on the decode thread */
+  da_qs_t *Q = &g_da_qs;
+  int started = 0;
+  unsigned warm_bits = 0;
+  for (int w = 0; w < Q->n; w++) {
+    if (nr_bgq_start(&Q->q[w], DA_POOL, da_wname[w]) != 0)
+      break;
+    started++;
+  }
+  Q->n = started; /* no worker: every grant is shed (counted), none runs on the decode thread */
+  if (!started) {
+    P->free_mask = 0;
     return;
   }
-  /* the worker builds its scratch (one job's slot is borrowed for the hand-off, returned by da_warm), then the pool opens */
-  const unsigned warm_bit = P->free_mask & (0u - P->free_mask);
-  P->free_mask &= ~warm_bit;
-  if (nr_bgq_push(&g_da_q, da_warm, P->job[__builtin_ctz(warm_bit)]) == 0) {
-    for (int w = 0; w < 5000 && !(__atomic_load_n(&P->free_mask, __ATOMIC_ACQUIRE) & warm_bit); w++) /* <= 5 s, before RX start */
-      usleep(1000);
+  /* each worker builds its own scratch (a job's slot is borrowed for the hand-off, returned by da_warm), then the pool opens */
+  for (int w = 0; w < started; w++) {
+    const unsigned warm_bit = P->free_mask & (0u - P->free_mask);
+    P->free_mask &= ~warm_bit;
+    if (nr_bgq_push(&Q->q[w], da_warm, P->job[__builtin_ctz(warm_bit)]) == 0)
+      warm_bits |= warm_bit;
+    else
+      __atomic_fetch_or(&P->free_mask, warm_bit, __ATOMIC_RELEASE);
   }
-  if (!(__atomic_load_n(&P->free_mask, __ATOMIC_ACQUIRE) & warm_bit))
+  for (int t = 0; t < 5000 && (warm_bits & ~__atomic_load_n(&P->free_mask, __ATOMIC_ACQUIRE)); t++) /* <= 5 s, before RX start */
+    usleep(1000);
+  if (warm_bits & ~__atomic_load_n(&P->free_mask, __ATOMIC_ACQUIRE))
     LOG_W(NR_PHY, "SENSING: daBg scratch warm-up did not finish; the first grants allocate on the worker\n");
   atomic_store(&P->ready, 1);
-  LOG_A(NR_PHY, "SENSING: data-aided tap off the decode thread: %u jobs (Nl<=%d, TB<=%d B), worker daBg\n", (unsigned)__builtin_popcount(P->free_mask), NR_MIMO_LS_MAX_NL, DA_TB_CAP);
+  LOG_A(NR_PHY, "SENSING: data-aided tap off the decode thread: %u jobs (Nl<=%d, TB<=%d B), %d daBg workers\n", (unsigned)__builtin_popcount(P->free_mask | warm_bits), NR_MIMO_LS_MAX_NL, DA_TB_CAP, started);
 }
 
 void nr_isac_pdsch_data_aided_async_counts(uint64_t *queued, uint64_t *dropped, uint64_t *done, uint64_t *saved_us)
@@ -700,6 +741,7 @@ static void da_run(void *arg)
 {
   da_job_t *j = arg;
   da_pool_t *P = &g_da; /* the worker was bound to the item's cell by nr_bgq_run_one */
+  da_on_worker = true;
   const uint64_t t0 = da_now_ns();
   nr_isac_abs_slot_override = j->abs_slot;
   nr_isac_pdsch_data_aided_submit(j->ue, &j->proc, &j->cw, &j->dlsch, &j->fa, j->rnti, j->tb, j->harq_tag, (const c16_t(*)[P->stride])j->rx, j->nvar, j->G,
@@ -751,7 +793,13 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
   const size_t tb_n = ((size_t)A + (A > NR_MAX_PDSCH_TBS ? 24 : 16) + 7) / 8;
   if (!atomic_load_explicit(&P->ready, memory_order_acquire) || tb_n > DA_TB_CAP || (int)P->nant != fp->nb_antennas_rx || P->stride != (uint32_t)fp->samples_per_slot_wCP)
     return da_shed(&P->drop_geom);
-  if (!nr_bgq_room(&g_da_q))
+  da_qs_t *Q = &g_da_qs;
+  const int nq = Q->n;
+  int qi = -1;
+  for (int k = 0, r = (int)(atomic_fetch_add(&P->rr, 1) % (uint32_t)(nq > 0 ? nq : 1)); k < nq && qi < 0; k++) /* next worker with room */
+    if (nr_bgq_room(&Q->q[(r + k) % nq]))
+      qi = (r + k) % nq;
+  if (qi < 0)
     return da_shed(&P->drop_queue);
   da_job_t *j = NULL;
   unsigned m = __atomic_load_n(&P->free_mask, __ATOMIC_ACQUIRE);
@@ -785,7 +833,7 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
     j->dmrs_snr_db = dmrs_snr_db;
     j->abs_slot = nr_isac_abs_slot_override;
     memcpy(j->tb, tb_bytes, tb_n);
-    if (nr_bgq_push(&g_da_q, da_run, j) == 0) {
+    if (nr_bgq_push(&Q->q[qi], da_run, j) == 0) {
       atomic_fetch_add(&P->snap_ns, da_now_ns() - t_snap0);
       atomic_fetch_add(&P->queued, 1);
       nr_sense_async_note(NR_SENSE_SRC_PDSCH_DATA, 1);
