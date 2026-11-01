@@ -129,6 +129,26 @@ static void srs_lease_out(void)
   nr_pool_site_float_release();
   sr.leased=false;
 }
+/* Apply the observation events the PDCCH / PUSCH monitors posted. Run at the start of every job and on every idle poll of the worker (1 ms), so the 64-entry ring is drained at the
+ * event rate, not at the uplink-slot rate (a worker busy in a scan or waiting for the pool used to let the ring fill and the posts count as dropped). */
+static void srs_drain_events(bool reconf,uint64_t stamp)
+{
+  srs_event_t events[SRS_EVENTS];unsigned event_count;
+  pthread_mutex_lock(&srs_lock);
+  event_count=sr.event_count;memcpy(events,sr.events,event_count*sizeof(*events));sr.event_count=0;
+  pthread_mutex_unlock(&srs_lock);
+  for(unsigned i=0;i<event_count;i++) {
+    srs_event_t *e=&events[i];
+    if(reconf && e->stamp!=stamp) continue;
+    /* Bootstrap lookup takes a mutex: keep it on the consumer, never on an
+     * observation producer. Unconfirmed RNTIs cannot supply attribution. */
+    if(e->type<2 && !nr_pdcch_blind_monitor_rnti_confirmed(e->slot%(1024*sr.grid.slots_per_frame),e->rnti)) continue;
+    if(e->type==0) {nr_srs_note_trigger(sr.search,e->rnti,e->slot,e->request);nr_srs_idle_result(&sr.idle,true);}
+    else if(e->type==1) nr_srs_note_pusch(sr.search,e->rnti,e->slot,e->delay,e->h,e->k,e->n);
+    else if(e->type==2) {sr.hint=e->hint;sr.have_hint=true;nr_srs_idle_result(&sr.idle,true);}
+    else nr_srs_note_grant(sr.search,e->slot,e->request,e->hint.start_rb,e->hint.nb_rb);
+  }
+}
 static void process_srs(srs_job_t *job)
 {
   nr_sense_prod_scope_t prod __attribute__((cleanup(nr_sense_prod_scope_stop))) =
@@ -146,21 +166,7 @@ static void process_srs(srs_job_t *job)
     if(!refreshed) return;
     sr.have_hint=false;
   }
-  srs_event_t events[SRS_EVENTS];unsigned event_count;
-  pthread_mutex_lock(&srs_lock);
-  event_count=sr.event_count;memcpy(events,sr.events,event_count*sizeof(*events));sr.event_count=0;
-  pthread_mutex_unlock(&srs_lock);
-  for(unsigned i=0;i<event_count;i++) {
-    srs_event_t *e=&events[i];
-    if(job->meta.reconf && e->stamp!=stamp) continue;
-    /* Bootstrap lookup takes a mutex: keep it on the consumer, never on an
-     * observation producer. Unconfirmed RNTIs cannot supply attribution. */
-    if(e->type<2 && !nr_pdcch_blind_monitor_rnti_confirmed(e->slot%(1024*sr.grid.slots_per_frame),e->rnti)) continue;
-    if(e->type==0) {nr_srs_note_trigger(sr.search,e->rnti,e->slot,e->request);nr_srs_idle_result(&sr.idle,true);}
-    else if(e->type==1) nr_srs_note_pusch(sr.search,e->rnti,e->slot,e->delay,e->h,e->k,e->n);
-    else if(e->type==2) {sr.hint=e->hint;sr.have_hint=true;nr_srs_idle_result(&sr.idle,true);}
-    else nr_srs_note_grant(sr.search,e->slot,e->request,e->hint.start_rb,e->hint.nb_rb);
-  }
+  srs_drain_events(job->meta.reconf,stamp);
   nr_srs_candidate_t seen[NR_SRS_MAX_CANDIDATES];int nseen=0;
   nr_srs_candidate_t due[NR_SRS_MAX_TRACKS];
   bool scanned=true;
@@ -327,7 +333,10 @@ static void *srs_worker(void *arg)
     srs_job_t *job=sr.count?&sr.jobs[sr.tail]:NULL;
     pthread_mutex_unlock(&srs_lock);
     if(done) break;
-    if(!job) {struct timespec ts={.tv_nsec=1000000};nanosleep(&ts,NULL);continue;}
+    if(!job) {
+      if(sr.search && sr.stamp_valid) {const bool rc=nr_cfg_reconf_enabled();srs_drain_events(rc,rc?nr_cfg_epoch_cfr_stamp():0);}
+      struct timespec ts={.tv_nsec=1000000};nanosleep(&ts,NULL);continue;
+    }
     struct timespec begin,end;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&begin);
     process_srs(job);
     clock_gettime(CLOCK_THREAD_CPUTIME_ID,&end);
@@ -406,7 +415,7 @@ void nr_srs_passive_stop(void)
 void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_slot)
 {
   if(!nr_srs_passive_enabled()) return;
-  if(pthread_mutex_trylock(&srs_lock)) {atomic_fetch_add(&sr.dropped,1);return;}
+  pthread_mutex_lock(&srs_lock); /* held for microseconds only: the symbol copy below runs outside it */
   if(!atomic_load_explicit(&sr.active,memory_order_relaxed) || ue!=sr.owner) {pthread_mutex_unlock(&srs_lock);return;}
   const NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
   if(fp->ofdm_symbol_size!=sr.grid.fft_size
@@ -427,7 +436,10 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
   if(!mask) {pthread_mutex_unlock(&srs_lock);return;}
   /* Only slots that carry UL symbols are eligible, so only they can be lost to a full queue (before: the full-queue test ran first and counted every slot of the frame). */
   if(sr.count==SRS_DEPTH) {atomic_fetch_add(&sr.dropped,1);pthread_mutex_unlock(&srs_lock);return;}
+  /* The slot at `head` belongs to this thread until it is published (the worker only reads [tail, tail+count)); the 470 KB copy must not hold the lock: the event posters
+   * (PDCCH / PUSCH monitors) use a try-lock and every post that met the held lock was counted as a dropped job. */
   srs_job_t *job=&sr.jobs[sr.head];job->mask=mask;
+  pthread_mutex_unlock(&srs_lock);
   job->n_rb=fp->N_RB_UL;job->first_carrier_offset=fp->first_carrier_offset;
   memcpy(job->rot,fp->symbol_rotation[link_type_ul],sizeof(job->rot));
   memcpy(job->shift,fp->timeshift_symbol_rotation,sr.grid.fft_size*sizeof(c16_t));
@@ -454,13 +466,15 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
       if(n<win) memcpy(dst+n,ue->common_vars.rxdata[a],(win-n)*sizeof(c16_t));
     }
   }
-  sr.head=(sr.head+1)%SRS_DEPTH;sr.count++;pthread_mutex_unlock(&srs_lock);
+  pthread_mutex_lock(&srs_lock);
+  if(atomic_load_explicit(&sr.active,memory_order_relaxed)) {sr.head=(sr.head+1)%SRS_DEPTH;sr.count++;}
+  pthread_mutex_unlock(&srs_lock);
 }
 
 static void post_event(const srs_event_t *event)
 {
   if(!nr_srs_passive_enabled()) return;
-  if(pthread_mutex_trylock(&srs_lock)) {atomic_fetch_add(&sr.dropped,1);return;}
+  pthread_mutex_lock(&srs_lock); /* every holder keeps it for microseconds (the capture copies outside it), so a post never waits noticeably and is never lost to the lock */
   if(atomic_load_explicit(&sr.active,memory_order_relaxed)) {
     if(sr.event_count<SRS_EVENTS) {
       sr.events[sr.event_count]=*event;

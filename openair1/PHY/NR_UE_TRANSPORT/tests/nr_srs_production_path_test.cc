@@ -170,6 +170,8 @@ Result run(int comb, int comb_off, int period, int slot_off, int periods, int st
     std::this_thread::sleep_until(t0 + std::chrono::microseconds(500 * s));
   }
   g_stall_us = 0;
+  uint64_t dr_loop, x1, x2, x3, x4, x5; /* drops while slots were being captured (after the last capture nothing drains the event ring any more) */
+  nr_srs_passive_metrics(&x1, &dr_loop, &x2, &x3, &x4, &x5);
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
   Result r{};
   uint64_t audits;
@@ -178,7 +180,8 @@ Result run(int comb, int comb_off, int period, int slot_off, int periods, int st
   nr_srs_passive_gate_metrics(&r.gate_unexplained, &r.gate_pusch);
   nr_srs_passive_metrics(&us1, &dr, &r.pregate, &r.backoff, &r.budget, &r.resets);
   r.us = us1;
-  r.dropped = dr - b_dropped;
+  (void)dr;
+  r.dropped = dr_loop - b_dropped;
   r.backoff -= b_backoff;
   r.leases = g_leases;
   r.cpu_us_per_job = (double)us1 / (r.leases ? r.leases : 1);
@@ -270,4 +273,33 @@ TEST_F(SrsProduction, SrsWithConcurrentPuschDmrsStillOpensAndConfirms)
   EXPECT_GT(r.gate_pusch, 0u);
   EXPECT_GE(r.records, 20u);
   EXPECT_GE(r.pc.confirmed, 1u);
+}
+
+/* Live drop path: other threads (PDCCH / PUSCH monitors) post grant and PUSCH-CFR events all the time while the slot thread captures. The capture used to hold the SRS lock during its
+ * 470 KB sample copy, so every event posted meanwhile failed its try-lock and counted as a dropped job; events were also only drained when a job ran. */
+TEST_F(SrsProduction, EventTrafficDoesNotCountAsDroppedJobs)
+{
+  std::atomic<bool> stop{false};
+  std::atomic<long> posted{0};
+  auto poster = [&]() {
+    nr_cell_bind(0);
+    float cfr[2 * 48] = {0};
+    uint32_t k[48];
+    for (int i = 0; i < 48; i++) k[i] = i;
+    uint64_t slot = 0;
+    while (!stop) {
+      nr_srs_passive_grant(slot, 1u << 9, 12, 8);
+      nr_srs_passive_pusch(100 + (slot & 7), slot, 0, cfr, k, 48);
+      slot++;
+      posted += 2;
+      std::this_thread::sleep_for(std::chrono::microseconds(500)); // ~4k events/s in all: the busy captures post ~1-2k/s
+    }
+  };
+  std::thread t1(poster), t2(poster);
+  Result r = run(2, 0, 20, 99999, 150, 0);
+  stop = true;
+  t1.join();
+  t2.join();
+  printf("events posted %ld, dropped %lu\n", (long)posted, (unsigned long)r.dropped);
+  EXPECT_LE(r.dropped, (uint64_t)(posted / 100)) << "event posts must not fail on the lock the capture copy used to hold";
 }
