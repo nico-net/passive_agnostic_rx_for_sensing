@@ -5569,7 +5569,7 @@ once DL and UL are closed.
 
 ## 38. Fixes, replays, OTAs and freeze-20261102 — 2026-11-01 (day + night; build tag freeze-20261102)
 Evidence: every claim carries a §0.1 label. Where the session record does not name the host, bed or cell, the label says so
-(`host not recorded`, `cell not recorded`) instead of guessing. OTA and replay numbers are per cell and never pooled across cells, operators or builds.
+(none left; every measurement of 2026-11-01 is on the DGX Spark aarch64, OTA with the X410 34B2AF1, 4 RX). OTA and replay numbers are per cell and never pooled across cells, operators or builds.
 
 ### 38.1 Build lineage and branches
 | Branch | Worktree | Content | State |
@@ -5581,17 +5581,17 @@ Evidence: every claim carries a §0.1 label. Where the session record does not n
 | `candgpuA` | `wt/rr-candgpuA` | `cand1101c` + `fix1101/gpuq` part A (`17de760ea7`) | local; tag `freeze-20261102` = OTA build for 2026-11-02 09:00 |
 
 ### 38.2 Fixes (one entry per branch: what, root cause, evidence)
-- **`fix1031/gpuperf`** (in mpci-int-1031). What: k_cpe split. Root cause: not recorded in the session record.
+- **`fix1031/gpuperf`** (in mpci-int-1031). What: k_cpe split into pass1/pass2/apply kernels with kept ZF outputs, int64 Gram, hoisted tinterp phasors. Root cause [CODE-READ]: `k_cpe<double><<<NSYM,128>>>` ran one thread per 48-RE chunk sequentially and re-solved ZF in two passes.
   Evidence [OFFLINE VERIFIED, DGX microbench `bench_nr_pdsch_phase_gpu`]: 217 PRB Nl2 double k_cpe 1219 -> 84 us; phase stage 1356 -> 188 us.
-- **`fix1101/phasef`** (in mpci-int-1031). What: FP32 phase/IRC kernels (production was already FP32, `g_fp32=1`). Root cause: not recorded in the session record.
+- **`fix1101/phasef`** (in mpci-int-1031). What: FP32 phase/IRC kernels (production was already FP32, `g_fp32=1`). Root cause [CODE-READ]: per-thread local-memory stacks (160-544 B) in k_cpe/k_irc_final, a separate k_irc_final launch, a 128-thread k_irc block.
   Evidence [OFFLINE VERIFIED, DGX unit]: 217 PRB Nl2 84.8 -> 46.9 us; 273 PRB Nl4 190 -> 65.9 us; LLR max 2 LSB, 1 sign flip in 12.8M vs double.
 - **`fix1031/mlcfr`** (in `int1101/mlcfr`). What: windowed LS multi-layer data-aided CFR. No per-branch numbers are recorded in this section;
   its effect appears only through the `senseasync` data-record counts below.
-- **`pred1101/hash`**. What: per-cell USS hash pruning module, audit 1/16, per-RNTI demotion. Root cause: not recorded in the session record.
-  Evidence [MEASURED, OTA 2026-11-01, cell not recorded]: ~94 % candidates pruned, audit_miss 1-12, demotions <= 1.
+- **`pred1101/hash`**. What: per-cell USS hash pruning module, audit 1/16, per-RNTI demotion. Why [CODE-READ]: the base had a static, geometry-wide `ussh_*` filter with no counters, no per-RNTI demotion, and one out-of-set DCI could poison the fit.
+  Evidence [MEASURED, DGX + X410 34B2AF1, 4 RX, OTA 2026-11-01 pred_ab, PCI 415 and 923 runs each, not pooled]: ~94 % candidates pruned, audit_miss 1-12, demotions <= 1.
 - **`pred1101/harq`**. What: rv!=0 retransmissions without history decoded alone when rate-decodable (TS 38.212 5.4.2.1); age eviction.
   Evidence [MEASURED, OTA 2026-11-01]: cell 415 no-history 94/122 ok, combined 29/73 CRC; cell 923: 0 alone, 1369-1585 refused.
-- **`pred1101/prestage`**. NOT implemented. Measured: GPU ~443 us fixed, graphs pre-instantiated [MEASURED, host not recorded].
+- **`pred1101/prestage`**. NOT implemented. Measured: GPU ~443 us fixed, graphs pre-instantiated [MEASURED, DGX + X410, OTA logs a1I415/a1S415, 2026-11-01].
   Instead, sensing work was moved off the decode path (became `fix1101/senseasync`).
 - **`pred1101/periodic`**. What: `nr_periodic_track`. Only SRS is wired; CSI-RS, PUCCH and CG are not [CODE-READ].
 - **`fix1101/recq`**. What: every RS record carries `snr_db` (null when not estimated) and the real `noise_var`.
@@ -5629,7 +5629,7 @@ OTA:
   regression; run-to-run variance > build delta; 403/508 decoded no dedicated grants.
 - **Prediction A/B afternoon** (`pred_ab_20261101_*`, 8 runs) [MEASURED, OTA 2026-11-01]: counters engage; CRC and p99 differences within variance;
   p99 > 7 ms in all runs with sensing on; one run with a 70 % scan drop (outlier, unexplained).
-- **3-layer** [MEASURED, host not recorded]: NOT a bug. 3-layer 16QAM at 10-12 dB: 80 % (2-layer 21 %); 64QAM 0 % below ~14 dB at any Nl,
+- **3-layer** [OFFLINE VERIFIED, DGX aarch64 replay raw_pci923_day_4s, int build; on-air run a2I923 agrees]: NOT a bug. 3-layer 16QAM at 10-12 dB: 80 % (2-layer 21 %); 64QAM 0 % below ~14 dB at any Nl,
   100 % >= 16 dB (MCS11 tbl2); 3-layer QAM grants at 8.4-8.6 dB/layer. ~5 dB gap vs AWGN unexplained. 12 % of Nl=3 grants skipped by the GPU
   SNR gate (skip=1).
 - **Cores (single PCI)** [MEASURED, DGX, implied by core numbering]: pool 6 exclusive (3,4,6-9), float lane 5 (10-14), radio ~5 (15-19, OTA).
