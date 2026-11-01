@@ -829,7 +829,10 @@ static void bg_lease_out(void) { nr_pool_site_float_release(); }
 static void *bg_main(void *a)
 {
   bg_arg_t *arg = a;
-  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+  /* nice 19 (CFS weight 15 against 1024) for the verifiers and discovery. The data-aided tap workers (daBg*) carry sensing records the receiver exports, at ~2 % of a core: on the
+   * float lane 10-14 they shared cores with csirsDisc / pdcchUssHash leases held 20-230 ms and were descheduled for up to 0.5 s [MEASURED DGX 2026-11-01 async4: qwait p99 262-524 ms
+   * at nice 19, 85 us CPU per job]. nice 5 (weight 335) still yields to everything on the RT/pool cores (the lane has none of them) and gets its share of a contended lane core. */
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), strncmp(arg->name, "daBg", 4) ? 19 : 5);
   pthread_setname_np(pthread_self(), arg->name);
   if (arg->aff) {
     cpu_set_t cs;
@@ -937,7 +940,7 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
     char list0[128];
     bg_cores(&cs0, list0, sizeof(list0));
     pthread_detach(nr_cell_parked_thread(&bp->p));
-    LOG_A(PHY, "SENSING: background worker %s started: queue %u, cores %s, SCHED_OTHER nice 19\n", name, q->cap, list0);
+    LOG_A(PHY, "SENSING: background worker %s started: queue %u, cores %s, SCHED_OTHER nice %d\n", name, q->cap, list0, strncmp(name, "daBg", 4) ? 19 : 5);
     return 0;
   }
   nr_bgq_init(q, cap);
@@ -969,7 +972,7 @@ int nr_bgq_start(nr_bgq_t *q, unsigned cap, const char *name)
     free(arg);
     LOG_E(PHY, "SENSING: background worker %s: step=pthread_create errno=%d (%s)\n", name, rc, strerror(rc));
   }
-  LOG_A(PHY, "SENSING: background worker %s %s: queue %u, cores %s, SCHED_OTHER nice 19\n", name, rc ? "FAILED" : "started", q->cap, list);
+  LOG_A(PHY, "SENSING: background worker %s %s: queue %u, cores %s, SCHED_OTHER nice %d\n", name, rc ? "FAILED" : "started", q->cap, list, strncmp(name, "daBg", 4) ? 19 : 5);
   return rc ? -1 : 0;
 }
 
