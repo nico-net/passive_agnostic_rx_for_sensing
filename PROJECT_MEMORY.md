@@ -5566,3 +5566,107 @@ once DL and UL are closed.
   100.00/100.00 % over 51900/51628 grants, overall CRC 96.95/96.06 %, drop_full 0.0069/0.0047 %, resets after SOLVED 0. Upper bound, not OTA.
 - Next: replay A/B (base 4986799f18 vs int) on the frozen captures; rfsim with the sensing cfg (records produced, CPU/drop budget); then daytime
   SOLO OTA 415/923/403(targeted)/508 interleaved, per-cell, sensing on; UL via UL_DMRS_DIAG on air + sens6 OCUDU bed for UL truth.
+
+## 38. Fixes, replays, OTAs and freeze-20261102 — 2026-11-01 (day + night; build tag freeze-20261102)
+Evidence: every claim carries a §0.1 label. Where the session record does not name the host, bed or cell, the label says so
+(`host not recorded`, `cell not recorded`) instead of guessing. OTA and replay numbers are per cell and never pooled across cells, operators or builds.
+
+### 38.1 Build lineage and branches
+| Branch | Worktree | Content | State |
+|---|---|---|---|
+| `mpci-int-1031` | `wt/rr-int-1031` | §37 + `fix1031/gpuperf` + `fix1101/phasef` | local; nothing pushed, nothing merged to mpci-main or adaptive-rx-UL-DL |
+| `int1101/mlcfr` | | `int1101` + `fix1031/mlcfr` (windowed LS multi-layer data-aided CFR) | local |
+| `cand1101` | | `int1101/mlcfr` + `pred1101/{prestage,harq,hash,periodic}` + `fix1101/recq` | local |
+| `cand1101c` | | `cand1101` + `fix1101/senseasync` (final `0e25b3f0ec`: NR_POOL_SENSE class) + `fix1101/srsq` (final `1c98569931`) + `fix1101/prach` (final `8d1faa4282`) | local |
+| `candgpuA` | `wt/rr-candgpuA` | `cand1101c` + `fix1101/gpuq` part A (`17de760ea7`) | local; tag `freeze-20261102` = OTA build for 2026-11-02 09:00 |
+
+### 38.2 Fixes (one entry per branch: what, root cause, evidence)
+- **`fix1031/gpuperf`** (in mpci-int-1031). What: k_cpe split. Root cause: not recorded in the session record.
+  Evidence [OFFLINE VERIFIED, DGX microbench `bench_nr_pdsch_phase_gpu`]: 217 PRB Nl2 double k_cpe 1219 -> 84 us; phase stage 1356 -> 188 us.
+- **`fix1101/phasef`** (in mpci-int-1031). What: FP32 phase/IRC kernels (production was already FP32, `g_fp32=1`). Root cause: not recorded in the session record.
+  Evidence [OFFLINE VERIFIED, DGX unit]: 217 PRB Nl2 84.8 -> 46.9 us; 273 PRB Nl4 190 -> 65.9 us; LLR max 2 LSB, 1 sign flip in 12.8M vs double.
+- **`fix1031/mlcfr`** (in `int1101/mlcfr`). What: windowed LS multi-layer data-aided CFR. No per-branch numbers are recorded in this section;
+  its effect appears only through the `senseasync` data-record counts below.
+- **`pred1101/hash`**. What: per-cell USS hash pruning module, audit 1/16, per-RNTI demotion. Root cause: not recorded in the session record.
+  Evidence [MEASURED, OTA 2026-11-01, cell not recorded]: ~94 % candidates pruned, audit_miss 1-12, demotions <= 1.
+- **`pred1101/harq`**. What: rv!=0 retransmissions without history decoded alone when rate-decodable (TS 38.212 5.4.2.1); age eviction.
+  Evidence [MEASURED, OTA 2026-11-01]: cell 415 no-history 94/122 ok, combined 29/73 CRC; cell 923: 0 alone, 1369-1585 refused.
+- **`pred1101/prestage`**. NOT implemented. Measured: GPU ~443 us fixed, graphs pre-instantiated [MEASURED, host not recorded].
+  Instead, sensing work was moved off the decode path (became `fix1101/senseasync`).
+- **`pred1101/periodic`**. What: `nr_periodic_track`. Only SRS is wired; CSI-RS, PUCCH and CG are not [CODE-READ].
+- **`fix1101/recq`**. What: every RS record carries `snr_db` (null when not estimated) and the real `noise_var`.
+  Evidence [MEASURED, OTA 2026-11-01, cell 923]: 97 % of PUSCH DM-RS UL grants < 0 dB, 0 % >= 5 dB, 22 % no estimate.
+- **`fix1101/senseasync`**. What: data-aided tap async for Nl 1-4. Bugs found and fixed in sequence:
+  (1) init gated on source_enabled before session open -> pool never built; (2) re-encode used the shared decode Tpool;
+  (3) init before prepare -> 0 workers; (4) workers at nice 19 starved by DISC float leases (qwait p99 262-524 ms).
+  FINAL (`0e25b3f0ec`): NR_POOL_SENSE pool class (SCAN, DECODE, RETRY, SENSE, DISC, HOUSE; 20 ms promotion), csirsDisc/USS hash yield
+  between steps, >= 2 daBg workers at nice 5, 32-job pool.
+  Evidence [OFFLINE VERIFIED, DGX replay, sensing on]: drops 415 12s_b 51/22 % -> 3.0/5.8 %; 415 day 1.7/0.2 %; 923 day 0.6/0.3 %;
+  PDSCH data records 24-46k per 100 s (was 1.1-2.5k before mlcfr; 0 unexported).
+- **`fix1101/srsq`** (final `1c98569931`). Root causes: HOUSE lease taken before deciding (53-100 ms waits, queue 4 full); drop counter
+  incremented before the UL check; 1/64 backoff aliasing (SRS periods 5*2^k); white-noise gate opened on 24-30 % of slots (coloured noise,
+  PUCCH/PUSCH); strict comb detector needed ~+8 dB/RE; fixed 0.65 score floor; lag-1 slope ramp.
+  Fixes: TD comb gate self-normalised; statistical comb detector over legal m_SRS widths; Beta threshold; multi-lag slope; capture copies
+  outside the lock; SENSE lease.
+  Evidence: [OFFLINE VERIFIED, physics check on captures 10-24]: UL of raw_pci415_day_4s is at the noise floor (in-band over empty -0.1 dB median),
+  no comb-2/4 structure, steady PUCCH-like blocks -> no detectable SRS in these captures.
+  [LABEL NOT RECORDED, injection test]: TS 38.211 SRS injected into real slots through the live chain, exported and confirmed from 0 dB/RE
+  (comb 2, 96/216 RB) and +5 dB (48 RB, comb 4). Not covered: multi-port, hopping, 24 RB comb 4.
+  [OFFLINE VERIFIED, replay]: srs_jobs_dropped 0/108/0 on day captures (was 0.6-35k); 12s_b ~120k drops with 0 gate opens (the capture
+  likely lacks the decoded TDD/SIB config).
+- **`fix1101/prach`** (final `8d1faa4282`). Bugs: carrier offset not de-rotated (-4827 Hz -> wrong index/delay); root sequence index truncated
+  to uint8 (700->188, 286->30); fixed-point correlator energy 0 at weak input (lifted). Also a RAR look-back (2-occasion ring).
+  Evidence [OFFLINE VERIFIED, replay]: peaks now real (max -0.6..+0.9 dB, floor -3.0..-4.3 dB), 0 detections, look-back 0/5.
+  Cost ~5 ms per occasion on its own background thread. Operator statement: PRACH is expected to be 0 on DEIB NSA cells (RACH config via LTE RRC).
+- **`fix1101/gpuq` part A** (`17de760ea7`). What: DECODE token given away during the GPU pass wait (wait_done never used
+  nr_gpu_poll_relax; give scope never opened); resume-priority re-acquire. Part B (multi-grant launch) NOT implemented.
+  Evidence [OFFLINE VERIFIED, replay, n=2/arm]: gpu_gives 0 -> 11-25k; 923 qwait p99 4.2 -> 3.6/2.9 ms; DL p99 7.2/7.3 -> 7.1/6.4 ms;
+  dec p50 +30-75 us; CRC unchanged; inflight 2+ in 25-35 % of passes.
+
+### 38.3 Measurements (OTA and replay, per cell)
+OTA:
+- **A/B morning** (`int1031_ab_20261101_*`, 14 runs, all PCI OK) [MEASURED, DGX+X410, 4 RX, 300 s]: base vs int: no consistent big-grant
+  regression; run-to-run variance > build delta; 403/508 decoded no dedicated grants.
+- **Prediction A/B afternoon** (`pred_ab_20261101_*`, 8 runs) [MEASURED, OTA 2026-11-01]: counters engage; CRC and p99 differences within variance;
+  p99 > 7 ms in all runs with sensing on; one run with a 70 % scan drop (outlier, unexplained).
+- **3-layer** [MEASURED, host not recorded]: NOT a bug. 3-layer 16QAM at 10-12 dB: 80 % (2-layer 21 %); 64QAM 0 % below ~14 dB at any Nl,
+  100 % >= 16 dB (MCS11 tbl2); 3-layer QAM grants at 8.4-8.6 dB/layer. ~5 dB gap vs AWGN unexplained. 12 % of Nl=3 grants skipped by the GPU
+  SNR gate (skip=1).
+- **Cores (single PCI)** [MEASURED, DGX, implied by core numbering]: pool 6 exclusive (3,4,6-9), float lane 5 (10-14), radio ~5 (15-19, OTA).
+  Last measured average busy ~2.4 cores (rfsim gate, older build). sens6 core count unknown.
+
+Replay (OFFLINE VERIFIED, host and cell as labelled):
+- **Paired replay n=3, dlcand vs int** [OFFLINE VERIFIED, replay]: int CRC +5..+12 pts on > 128 PRB, +3..+15 on all grants; p99 +2-3 ms
+  (GPU phase/IRC kernels +72 us -> qwait tail).
+- **Ablation, cand1101c** [OFFLINE VERIFIED, replay]: cell 415 p99 with all sensing 6.5/6.7, no PRACH+SRS 6.1/17.1, sensing off 5.5/5.8 ms.
+  Cell 923 all 9.2/6.8, off 7.8/8.2 ms. So 923 p99 > 7 ms is the decode itself, not sensing.
+- **p99 breakdown, int+phasef, sensing off** [OFFLINE VERIFIED, replay]: qwait p99 cell 415 1.7-1.9 ms, cell 923 4.5-5.8 ms;
+  dec p99 1.6-1.8 / 2.7-2.8 ms; arrival-to-enqueue p99 2.5-2.9 ms.
+- **Intermittent bad runs** [OFFLINE VERIFIED, replay, cell 415 day]: ~1/3 of 415 day replays at 50-74 % CRC (5 reruns: 51.6/74.0/86.5/89.3/69.7),
+  on every build including the DL candidate. OPEN.
+
+### 38.4 Corrections
+- **prod_count = jobs.** `sense_prod_count_*` counts JOBS. Exported records are `sense_cfr_exported_*`. The earlier "116k SRS / 13k PRACH"
+  figures were jobs; the real export was 0.
+- **SRS.** The earlier SRS drop figures (0.6-35k) belonged to the build before `fix1101/srsq`. No SRS is detectable in the day captures
+  (38.2); the chain exports injected SRS only.
+- **PRACH.** The correlator output before `fix1101/prach` was not valid (three bugs in 38.2). The "peaks" read from it are void. Post-fix
+  replay shows 0 detections, which is the expected result for DEIB NSA cells (operator statement).
+- **3-layer.** Not a receiver bug (38.3). The residual ~5 dB gap to AWGN is still unexplained.
+
+### 38.5 Open items and the 2026-11-02 09:00 OTA plan
+Plan (Monday 2026-11-02 09:00): OTA with script `rr-orchestration/ota/run_ota_20261102.sh`, BUILD = `wt/rr-candgpuA` build (tag `freeze-20261102`).
+Runs: raw IQ 415/923; solos 415/923 x2; 403; 508; 2-PCI 415+923.
+
+Open:
+- p99 parked until the multi-PCI results (operator).
+- `fix1101/gpuq` part B: multi-grant launch (needs a launch/collect split and consumer rework; risk to CRC).
+- 923 decode tail (k_mmse3_prep, k_rdm).
+- Intermittent bad replays (38.3).
+- UL PUSCH: needs UE power (crowded office or sens6 OCUDU).
+- `UlAlias` and `test_nr_pusch_ul_disc` failing.
+- `test_nr_gpu_pass_cells` (HarqSlabsAreSeparate) fails on base too; `gpu_pass_geo` flaky under load.
+
+### 38.6 Process rules learned (lock usage for builds vs replays)
+- Builds take `/tmp/td_measure.lock` SHARED (`flock -s`). Replays and benches take it EXCLUSIVE.
+- Agents' builds contaminated replays twice on 2026-11-01. This is the reason for the rule above.
