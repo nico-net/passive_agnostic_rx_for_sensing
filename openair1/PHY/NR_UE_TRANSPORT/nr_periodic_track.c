@@ -65,6 +65,10 @@ static void demote(nr_ptrack_t *t,nr_ptrack_counters_t *c)
 void nr_ptrack_hit(nr_ptrack_t *t,nr_ptrack_type_t type,uint64_t slot,nr_ptrack_counters_t *c)
 {
   if(t->n && slot==t->hits[t->n-1]) return;
+  /* A TRS burst is two consecutive slots (TS 38.211 7.4.1.5): the second detection belongs to the burst whose first slot is the
+   * occasion. No CSI-RS period of the set is below 4 slots, so a detection one slot after the previous one is never a new occasion;
+   * recording it would split the residues 50/50 and nothing would ever be confirmed. */
+  if(type==NR_PTRACK_CSIRS && t->n && slot==t->hits[t->n-1]+1) return;
   if(t->n && (slot<t->hits[t->n-1] || slot-t->hits[t->n-1]>NR_PTRACK_EXPIRY)) demote(t,c);
   const bool due=nr_ptrack_due(t,slot);
   if(due && c) {c->predicted++;c->hit++;}
