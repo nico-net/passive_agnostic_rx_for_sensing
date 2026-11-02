@@ -5723,8 +5723,68 @@ OTA numbers are per cell and never pooled across cells, operators or builds.
 - Campaign script bug: `cap()` did not create the output directory. `capture_raw` failed with "output directory must exist", and the
   rc was logged as 1 from a chown. Fixed with `mkdir -p`. The captures were re-taken manually after the campaign.
 
-### 39.6 Open items (next, from the facts)
-- Multi-PCI: the second-cell late lock, GPU contention (dec p99 ~25 ms), and scan queue drops.
-- Batching (Part B) is a candidate. The inflight-2+ share in the 2-PCI run is not yet measured `[HYPOTHESIS]`.
-- CSI-RS/TRS periodic tracker wiring in progress (`fix1102/csirsptrack`).
-- Then: PUCCH blind detector, SPS/CG activation-DCI counting.
+### 39.6 UL per cell (same runs; PUSCH = UL grants from DCI 0_x, data decode tried on every grant)
+`[MEASURED, DGX+X410 OTA 2026-11-02]` from the last ISAC_METRICS of each run and `sense_records_last.jsonl`
+(source `pusch_dmrs`, `snr_db` per record; records without an estimate excluded from the SNR quantiles).
+
+| Run | pusch_try | pusch_crc_ok | PUSCH DM-RS records | no SNR | DM-RS SNR p10/p50/p90/p99 (dB) | >= 5 dB | transform precoding |
+|---|---|---|---|---|---|---|---|
+| o1S415 | 164016 | 2 | 147523 | 10 % | -13.9 / -8.6 / -5.2 / -2.1 | 0.12 % | 26 % |
+| o2S415 | 191851 | 5 | 169522 | 9 % | -13.8 / -8.6 / -5.8 / -2.0 | 0.37 % | 55 % |
+| o1S923 | 152902 | 10 | 136753 | 4 % | -13.2 / -8.4 / -5.1 / -2.0 | 0.0 % | 52 % |
+| o2S923 | 157313 | 5 | 136597 | 6 % | -13.2 / -8.2 / -4.5 / -1.4 | 0.01 % | 28 % |
+| o1S403 (51 PRB) | 23049 | 1 | 11815 | 52 % | -16.8 / -8.1 / +0.1 / +15.1 | 7.3 % | 28 % |
+| o1S508r | 0 | 0 | 0 | - | - | - | - |
+| o1B c0 (415) | 98197 | 3 | 87933 (with SNR) | - | -12.0 / -8.1 / -4.0 / - | 3.2 % | - |
+| o1B c1 (923) | 11974 | 0 | 0 in the export file | - | - | - | - |
+
+- Reading: UL grant discovery works (150-190k tries per 300 s solo; the crowded office brought UL traffic), but the UL signal at the DEIB antenna
+  is below the noise: median DM-RS SNR about -8 dB on every cell, 90 % of grants below -4 dB. PUSCH data does not decode (0-10 CRC ok per run).
+  Consistent with §38 (923 on 11-01: 97 % < 0 dB). 26-55 % of UL grants use transform precoding (DFT-s-OFDM), which networks enable for
+  power-limited UEs `[CODE-READ of the DCI/config fields; inference]`.
+- Open check `[HYPOTHESIS]`: the few CRC-ok PUSCH data records also show snr_db about -10 dB, so the estimator may be biased low (combined vs per-antenna
+  SNR not checked). Even a bias of a few dB leaves the UL far below decodable. UL decode needs a stronger UL (antenna placement, or sens6 OCUDU GT).
+- UL sensing still produces records: PUSCH DM-RS 88-170k per run, SRS (39.4).
+
+### 39.7 Multi-PCI diagnosis of o1B (replays of the 2-PCI symptoms, 2026-11-02 afternoon)
+Report and recipe: `docs/superpowers/reports/fix1102/mpci2/` (MPCI2.md, wide.sh, solo1.sh, an.py, parse.py). Build candgpuA e4729721b0,
+`MPCI_20261025.env` + `ISAC_SIB1_CACHE=0`, sensing cfg, speed 1.0, 100 s, exclusive measure lock. `[OFFLINE VERIFIED, DGX replay]` unless stated.
+- New capture: `ota_runs/raw_v415t923_245_2s_1102_1147`, 2 s, 245.76 Msps, centre 3720 MHz, both cells (capture_raw limit 8 GiB).
+- Arms: solo (direct 09:51 captures, one cell), control (the two direct captures as two cell rings of one process, no channelizer),
+  wideband (11:47 capture through the in-process channelizer, as in o1B). A solo run cannot be fed from the wideband capture (1-cell inventory takes
+  the direct path; shm_iq.c:247 asserts on the 245.76 Msps ring).
+- Decode tail (415, warm runs): dec p99 solo 3.8-3.9 ms; control 3.9 / 4.6 / 5.6 ms; wideband 11.8 / 14.9 (CPU channelizer) / 50.4 ms.
+  Small grants (TBS < 20 kB) dec p99: solo 2.3, control 2.2-3.2, wideband 7.7 / 14.6 / 21 ms. Grant mix equal across arms.
+  In the OTA log, c0 dec p99 was already 28 ms before c1 locked `[OFFLINE VERIFIED, OTA log split]`.
+  -> the tail is a property of the wideband path, not of two cells, the data mix, cell-1 decode load or the channelizer backend.
+  Channelizer (GPU): ~16 % duty, mean 44 us per block, but chan_work_max 24.6 ms (OTA) / 32.6-36.1 ms (replays); overruns 0.
+  Mechanism open: degraded channelized samples (fidelity) vs live channelizer runtime (load).
+- Second-cell lock: every failed search fails at PBCH (PSS peak/avg 25-33 dB). 923 fails also solo (OTA solo fails before lock 0-7, once 91).
+  Locks / failed searches per 100 s: solo 19-23 / 0-4; control 923: 11/8, 17/9, 0/15 with 0 / 10 / 0 grants decoded; wideband 0-2 / 10-26.
+  -> two cells in ONE process break 923's PBCH acquisition even without the channelizer. First scans show fo_pss ~ -fo_seed (+4.4..5.5 kHz);
+  the CFO ladder step that locks solo does not lock in the 2-cell arms.
+- Cell-0 bad lock (wideband only): 415 locks an SSB whose tracking PBCH then fails 50/50 (OTA SSB index 5; replays index 2 or 5) -> RFSTALL ->
+  "full device re-init" x3 in the first 30 s of o1B, each restarting BOTH cells (cell-1 search restarts). In replay: exit rc=3 in 7 of 10 wideband runs, 0 of 12 direct.
+  SYNC_SCAN 475 ms per failed search (6 s with the ladder): ~28 failed searches = the observed half run before c1 locked.
+- Cold first replay runs show dec p99 24-30 ms even direct solo: compare warm runs, n >= 3.
+
+### 39.8 Branch state after the OTA (2026-11-02 afternoon)
+- Operator: "from now on we focus on the multi-PCI case"; merge everything OTA-proven to mpci-main.
+- `mpci-main` fast-forwarded 4986799f18 -> 09487d5e82 (= freeze-20261102 code + §38/§39), then 5e726f2143 `test(cell-dash)` (expects the
+  NR_POOL_SENSE `sense[]` class); pushed to origin. Then merge of `fix1102/csirsptrack` (CSI-RS/TRS periodic tracker; replay-verified only,
+  operator asked for it on mpci-main). Worktree `wt/rr-mpci-main2`.
+- CSI-RS tracker `[OFFLINE VERIFIED, DGX replay, today-415 capture, n=3/arm]`: tot p99 frozen 15.4/11.0/14.3 vs merged 13.6/12.2/11.8 ms, drops
+  18.7/5.1/20.0 vs 5.4/10.9/9.0 % -> no regression. The 545 demotions in replay are gap > 10240 slots from the 4 s capture loop (replay artifact).
+- ctest on mpci-main + csirsptrack (fresh build dir `wt/rr-mpci-main2`, -j4): 368/378 pass. Failing, all pre-existing (also on mpci-int2 or listed
+  before): test_nr_ssb_rate_match_prod, test_ldpc_cuda_pool_cpu (segfault), test_nr_gpu_pass_cells, test_nr_pusch_ul_disc, nr_td_sim_test, dft_test,
+  test_nr_modulation, test_nr_pusch_ra0_qam64/256; test_nr_gpu_pass failed under -j4 and passed 2/2 alone (flaky under load).
+  CSI-RS/ptrack/periodic/passive_metrics/static tests 20/20. The simulators nr_ulsim, nr_ulsim_mu_mimo, nr_pbchsim, nr_psbchsim, nr_srssim do
+  not link (undefined nr_pdcch_* hooks from the blind monitor); they were not linked in the earlier build dirs either. The robustness gap found while replaying: if the GPU PDCCH modules
+  (libpdcch_gpu, pdcch_nid_gpu, td_cb0_gpu, csirs_disc_gpu, shm_iq_chan_gpu) are missing, the receiver silently decodes no dedicated grants.
+
+### 39.9 Open items (next, from the facts; multi-PCI first)
+- Multi-PCI: (1) 923 PBCH acquisition with two cells in one process (control arm, no channelizer); (2) cell-0 bad SSB lock -> full device re-init
+  restarting both cells; (3) wideband-path decode tail (fidelity vs load experiment, MPCI2.md plan); scan queue drops follow from (3).
+- Batching (Part B) only after (3) is understood. The inflight-2+ share in the 2-PCI run is not measured `[HYPOTHESIS]`.
+- Loud failure when GPU modules are missing.
+- Later: PUCCH blind detector, SPS/CG activation-DCI counting, UL SNR estimator check.
