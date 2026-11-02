@@ -2,7 +2,7 @@
 // MPCI G5: GPU backend of the in-process channelizer (see shm_iq_chan_gpu.h, iq_chan.h). Same algorithm as iq_ddc.c per (cell, channel): mixer with a
 // per-4096-sample phasor computed on the host in double (iq_ddc's recurrence), Kaiser halfband stages on [history | block] float buffers, round to
 // nearest even with clipping. Kernels are the T0 import (MPCIFIX ABI 2: fused mixer + stage 0, grid.y = channels); the host driver is new: it serves
-// iq_chan_backend_t (synchronous run() on one top-priority stream of the receiver's own context), reads the input in place on a SHARED tier and stages
+// iq_chan_backend_t (synchronous run() on one plain top-priority stream of the receiver's own context, outside the real-time green context: FIX1102 C, inside it the channelizer broke the tracking PBCH of the cells it feeds, cause not established, samples bit-identical), reads the input in place on a SHARED tier and stages
 // it on a DISCRETE one. Expected difference to the CPU backend: float FMA contraction only, <= 1 LSB on isolated samples (compare()).
 // Changes against the import: the history kernels (k_hist, k_hist_mix) read before they write inside one block, so any block length works (the import
 // needed n >= the filter history); partial 4096-sample phasor blocks follow iq_ddc (phase advanced by the chunk length); per-channel pointers instead of
@@ -462,8 +462,7 @@ static bool make_stream(GCtx *x)
 {
   int lo = 0, hi = 0;
   cudaDeviceGetStreamPriorityRange(&lo, &hi);
-  const int idx = x->place == IQ_CHAN_GPU_PLACE_GROUP ? NR_GREEN_PROBE_IDX : NR_GREEN_UL_IDX; // UL index = the context over all real-time SMs
-  if (nr_gpu_green_stream(&x->st, hi, true, idx)) return true;
+  // placement no longer selects a green context (it only labels the bench); the plain stream is the measured-good one (FIX1102 C)
   return cudaStreamCreateWithPriority(&x->st, cudaStreamNonBlocking, hi) == cudaSuccess;
 }
 
