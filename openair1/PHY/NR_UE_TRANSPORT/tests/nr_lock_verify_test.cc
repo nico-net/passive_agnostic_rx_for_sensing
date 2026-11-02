@@ -9,11 +9,11 @@ TEST(LockVerify, NeverTrackedLockIsRejectedAfterTheWindows)
 {
   nr_lock_verify_t v = {};
   v.lock_ssb = v.lock_pci = -1;
-  EXPECT_EQ(nr_lock_verify_window(&v, false, 0, 0, 0, -1, 2), NR_LOCK_KEEP); /* searching: never judged */
-  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 2, 415, 2), NR_LOCK_KEEP);
+  EXPECT_EQ(nr_lock_verify_window(&v, false, 0, 0, 0, -1, 1, 2), NR_LOCK_KEEP); /* searching: never judged */
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 2, 415, 1, 2), NR_LOCK_KEEP);
   EXPECT_EQ(v.lock_ssb, 2);
   EXPECT_EQ(v.lock_pci, 415);
-  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 4, 415, 2), NR_LOCK_REJECT); /* RSRP may have moved the index: the lock's is kept */
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 4, 415, 1, 2), NR_LOCK_REJECT); /* RSRP may have moved the index: the lock's is kept */
   EXPECT_EQ(v.lock_ssb, 2);
 }
 
@@ -21,29 +21,29 @@ TEST(LockVerify, OneDecodedPbchVerifiesForTheWholeLock)
 {
   nr_lock_verify_t v = {};
   v.lock_ssb = v.lock_pci = -1;
-  EXPECT_EQ(nr_lock_verify_window(&v, true, 1, 49, 4, 415, 2), NR_LOCK_VERIFIED);
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 1, 49, 4, 415, 1, 2), NR_LOCK_VERIFIED);
   /* a verified lock that later loses PBCH is the RFSTALL watchdog's case, never a rejection */
   for (int w = 0; w < 10; w++)
-    EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 4, 415, 2), NR_LOCK_KEEP);
+    EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 4, 415, 1, 2), NR_LOCK_KEEP);
 }
 
 TEST(LockVerify, AWindowWithoutSsbOccasionsDoesNotCount)
 {
   nr_lock_verify_t v = {};
   v.lock_ssb = v.lock_pci = -1;
-  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 0, 0, 923, 2), NR_LOCK_KEEP); /* lock at the window's end: no PBCH tried yet */
-  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 0, 923, 2), NR_LOCK_KEEP);
-  EXPECT_EQ(nr_lock_verify_window(&v, true, 3, 47, 0, 923, 2), NR_LOCK_VERIFIED);
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 0, 0, 923, 1, 2), NR_LOCK_KEEP); /* lock at the window's end: no PBCH tried yet */
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 0, 923, 1, 2), NR_LOCK_KEEP);
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 3, 47, 0, 923, 1, 2), NR_LOCK_VERIFIED);
 }
 
 TEST(LockVerify, ANewLockStartsOver)
 {
   nr_lock_verify_t v = {};
   v.lock_ssb = v.lock_pci = -1;
-  EXPECT_EQ(nr_lock_verify_window(&v, true, 2, 48, 4, 415, 2), NR_LOCK_VERIFIED);
-  EXPECT_EQ(nr_lock_verify_window(&v, false, 0, 0, 4, 415, 2), NR_LOCK_KEEP); /* lost */
-  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 5, 415, 2), NR_LOCK_KEEP); /* relocked, other beam */
-  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 5, 415, 2), NR_LOCK_REJECT);
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 2, 48, 4, 415, 1, 2), NR_LOCK_VERIFIED);
+  EXPECT_EQ(nr_lock_verify_window(&v, false, 0, 0, 4, 415, 1, 2), NR_LOCK_KEEP); /* lost */
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 5, 415, 1, 2), NR_LOCK_KEEP); /* relocked, other beam */
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 5, 415, 1, 2), NR_LOCK_REJECT);
   EXPECT_EQ(v.lock_ssb, 5);
 }
 
@@ -90,4 +90,17 @@ TEST(SsbRedo, SameNid2OtherPositionMustRedo)
   EXPECT_FALSE(nr_ssb_redo_best(1, 1000, 1, 1000)); /* the best is the last tried: symbols already in place */
   EXPECT_TRUE(nr_ssb_redo_best(2, 1000, 1, 1000));
   EXPECT_TRUE(nr_ssb_redo_best(1, 5000, 1, 1000)); /* pinned search: same N_ID_2, another beam's peak */
+}
+
+TEST(LockVerify, RelockToAnotherBeamBetweenWindowsRestartsVerification)
+{
+  nr_lock_verify_t v = {};
+  v.lock_ssb = v.lock_pci = -1;
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 5, 415, 1, 2), NR_LOCK_KEEP);
+  EXPECT_EQ(v.lock_ssb, 5);
+  /* LOCK_REJECT-style relock: synced never seen false, lock counter moved, beam 2 now */
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 2, 415, 2, 2), NR_LOCK_KEEP); /* not judged as beam 5's second window */
+  EXPECT_EQ(v.lock_ssb, 2);
+  EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 2, 415, 2, 2), NR_LOCK_REJECT);
+  EXPECT_EQ(v.lock_ssb, 2); /* the beam actually locked is the one recorded for rejection */
 }

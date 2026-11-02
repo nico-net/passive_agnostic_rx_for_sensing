@@ -35,6 +35,7 @@ void nr_ssb_reject_search_done(nr_ssb_reject_t *r, bool locked, int max_misses);
 
 typedef struct {
   bool was_sync;     /* synchronised at the previous window */
+  uint64_t lock_gen; /* lock generation (per-cell count of PBCH locks) at the lock */
   bool verified;     /* a tracking PBCH decoded since the lock */
   int unverified;    /* consecutive windows synchronised, never verified, no PBCH decoded */
   int lock_ssb;      /* SSB index and PCI at the lock */
@@ -43,11 +44,13 @@ typedef struct {
 
 typedef enum { NR_LOCK_KEEP = 0, NR_LOCK_VERIFIED = 1, NR_LOCK_REJECT = 2 } nr_lock_verdict_t;
 
-/* One census window: synced = UE synchronised now; ssb_index / pci = the cell's current values (taken at a new lock).
+/* One census window: synced = UE synchronised now; ssb_index / pci = the cell's current values (taken at a new lock);
+ * lock_gen = per-cell count of PBCH locks: a change while synced is a relock between two windows (the cell lost sync and
+ * reacquired, maybe on another beam) and restarts the verification like a new lock.
  * NR_LOCK_VERIFIED is returned once per lock, on its first decoded tracking PBCH; NR_LOCK_REJECT after `windows`
  * windows without any. Returns NR_LOCK_KEEP otherwise (including every window of a lock that has been verified). */
 nr_lock_verdict_t nr_lock_verify_window(nr_lock_verify_t *v, bool synced, unsigned long pbch_ok, unsigned long pbch_fail,
-                                        int ssb_index, int pci, int windows);
+                                        int ssb_index, int pci, uint64_t lock_gen, int windows);
 
 /* nr_search_ssb_common(): ssb_try_candidate() leaves the SSB symbols and the CFO compensation of the LAST tried candidate in place. After the
  * candidates are sorted by SSS metric the best one must be redone unless it IS that last candidate (same N_ID_2 and same position: a pinned

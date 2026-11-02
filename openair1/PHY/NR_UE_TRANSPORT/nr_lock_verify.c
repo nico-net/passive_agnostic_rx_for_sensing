@@ -36,7 +36,7 @@ void nr_ssb_reject_search_done(nr_ssb_reject_t *r, bool locked, int max_misses)
 }
 
 nr_lock_verdict_t nr_lock_verify_window(nr_lock_verify_t *v, bool synced, unsigned long pbch_ok, unsigned long pbch_fail,
-                                        int ssb_index, int pci, int windows)
+                                        int ssb_index, int pci, uint64_t lock_gen, int windows)
 {
   if (!synced) {
     v->was_sync = false;
@@ -44,8 +44,9 @@ nr_lock_verdict_t nr_lock_verify_window(nr_lock_verify_t *v, bool synced, unsign
     v->unverified = 0;
     return NR_LOCK_KEEP;
   }
-  if (!v->was_sync) { /* a new lock */
+  if (!v->was_sync || v->lock_gen != lock_gen) { /* a new lock, or a relock between two windows */
     v->was_sync = true;
+    v->lock_gen = lock_gen;
     v->verified = false;
     v->unverified = 0;
     v->lock_ssb = ssb_index;

@@ -2120,7 +2120,8 @@ void *UE_thread(void *arg)
         NR_CELL_STATIC(nr_lock_verify_t, s_lockv);
 #define s_lockv NR_CELL_REF(s_lockv)
         const nr_lock_verdict_t lock_verdict = nr_lock_verify_window(&s_lockv, UE->is_synchronized, pbch_ok, pbch_fail,
-                                                                     UE->frame_parms.ssb_index, UE->frame_parms.Nid_cell, 2);
+                                                                     UE->frame_parms.ssb_index, UE->frame_parms.Nid_cell,
+                                                                     nr_passive_acq_snapshot().pbch_locks, 2);
         if (lock_verdict == NR_LOCK_VERIFIED)
           nr_initial_sync_ssb_verified();
         bool rf_collapsed = false, pbch_dead = false;
