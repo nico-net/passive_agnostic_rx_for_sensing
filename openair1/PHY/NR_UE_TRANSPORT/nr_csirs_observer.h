@@ -19,10 +19,12 @@ typedef struct {
   uint64_t first_slot;
   uint32_t last_due;
   uint8_t misses, active, seen, disappeared;
-  nr_ptrack_t pt; /* periodicity learned from the scored occasions (advisory: never gates a detection) */
 } nr_csirs_observer_entry_t;
 typedef struct {
   nr_csirs_observer_entry_t entry[NR_CSIRS_OBSERVER_MAX];
+  /* periodicity learned from the scored occasions of entry[i] (advisory: never gates a detection); kept apart from entry[] so the
+   * linear find() over entries stays as dense as before */
+  nr_ptrack_t pt[NR_CSIRS_OBSERVER_MAX];
   uint64_t csirs_candidates, csirs_confirmed, csirs_revoked, zp_exported, zp_revoked;
   uint64_t csirs_search_us, csirs_idsweep_us, csirs_confirm_us, csirs_cfr_us;
   uint64_t csirs_time_to_confirm_slots_last, csirs_time_to_confirm_slots_sum;

@@ -1097,21 +1097,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * The search bank remains intact; four scored misses produce one SOFT signal. */
   if (g_reconf && nr_cfg_epoch_note_csirs_map_change) {
     int due[NR_CSIRS_BLIND_DISC_MAX_CONF];
-    int nn = nr_csirs_blind_occurring(&g_st, absolute_slot, due, NR_CSIRS_BLIND_DISC_MAX_CONF);
-    /* Occasions the periodic tracker predicted (nr_csirs_observer_predicted_due) are scored first; the others follow, none is skipped:
-     * the prediction orders the work, it never decides whether a detection is attempted. */
-    int front = 0;
-    for (int k = 0; k < nn; ++k)
-      for (int c = 0; c < g_st.n_conf; ++c)
-        if (g_st.conf_idx[c] == due[k]) {
-          const nr_csirs_resource_t key = resource_key(&g_st, c, false);
-          if (nr_csirs_observer_predicted_due(&g_csirs_obs, &key, absolute_slot)) {
-            const int d = due[k];
-            memmove(&due[front + 1], &due[front], (size_t)(k - front) * sizeof(due[0]));
-            due[front++] = d;
-          }
-          break;
-        }
+    const int nn = nr_csirs_blind_occurring(&g_st, absolute_slot, due, NR_CSIRS_BLIND_DISC_MAX_CONF);
     for (int k = 0; k < nn; ++k)
       if (due[k] != idx) score_candidate(ue, slot, absolute_slot, rxdataF, due[k], false, true);
   }

@@ -25,3 +25,12 @@ SRS adjacent not collapsed) and `test_nr_csirs_observer` (CsirsObserverPtrack.*)
 - Only NZP resources; ZP resources are not tracked.
 - The ordering gain (predicted first) is not measured; no CPU saving is claimed. `[HYPOTHESIS]` negligible effect, the change is for observability.
 - No on-air or replay run (rules). Expected on air: `periodic_csirs_confirmed` ~ number of confirmed resources, `miss` ~ fades.
+
+## Follow-up 2026-11-02 (controller)
+- Removed the "predicted occasions scored first" reordering in nr_csirs_blind_rt.c: it added observer lookups per slot and no benefit was measured.
+- The per-entry nr_ptrack_t moved out of nr_csirs_observer_entry_t into a parallel array (nr_csirs_observer_t.pt[]), so the linear find()
+  over entries keeps its pre-change density.
+- Demotion churn explained [OFFLINE VERIFIED, DGX replay, temporary counters]: on raw_pci415_4s_1102_0951, all 545 demotions were gap > NR_PTRACK_EXPIRY
+  (0 reorder, misses 3): the 4 s capture loops 25x and the receiver re-syncs each loop. Expected to be rare on air.
+- A/B on raw_pci415_4s_1102_0951, 100 s, sensing on, n=3 each [OFFLINE VERIFIED, DGX replay]: frozen tot p99 15.4/11.0/14.3 ms, async drop 18.7/5.1/20.0 %;
+  this branch 13.6/12.2/11.8 ms, 5.4/10.9/9.0 %. No regression; the high drops on this busy capture exist on the frozen build too.
