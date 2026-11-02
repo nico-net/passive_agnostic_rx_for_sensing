@@ -33,7 +33,8 @@ unsigned nr_ptrack_period_set(nr_ptrack_type_t type, const unsigned **periods);
  * the detections share one offset and at least 75 % of the occasions between the first and last matching detection were detected. */
 bool nr_ptrack_estimate(nr_ptrack_type_t type, const uint64_t *hits, unsigned n, unsigned *period, unsigned *offset);
 void nr_ptrack_init(nr_ptrack_t *t);
-/* A detection at `slot`. It counts as a predicted hit when the resource was due, otherwise as an audit/blind hit. */
+/* A detection at `slot`. It counts as a predicted hit when the resource was due, otherwise as an audit/blind hit.
+ * NR_PTRACK_CSIRS: a detection one slot after the previous one is the trailing slot of a TRS burst and is ignored. */
 void nr_ptrack_hit(nr_ptrack_t *t, nr_ptrack_type_t type, uint64_t slot, nr_ptrack_counters_t *c);
 /* The resource was due at `slot` and was not detected (correlation/CRC evidence below its threshold). May demote. */
 void nr_ptrack_miss(nr_ptrack_t *t, nr_ptrack_type_t type, uint64_t slot, nr_ptrack_counters_t *c);

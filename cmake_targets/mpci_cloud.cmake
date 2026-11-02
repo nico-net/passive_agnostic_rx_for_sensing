@@ -403,6 +403,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_csirs_cell_iso
     ${DBG2_TR}/tests/nr_csirs_cell_iso_test.c
     ${DBG2_TR}/nr_csirs_observer.c
+    ${DBG2_TR}/nr_periodic_track.c
     ${DBG2_TR}/nr_csirs_monitor.c
     ${DBG2_TR}/nr_csirs_blind_search.c
     ${DBG2_TR}/nr_csirs_disc_sweep.c

@@ -63,6 +63,7 @@ bool nr_csirs_observer_confirm(nr_csirs_observer_t *o, const nr_csirs_resource_t
   }
   if (!e) return false;
   e->active = 1; e->misses = 0; e->last_due = (uint32_t)slot;
+  nr_ptrack_init(&e->pt);
   e->disappeared = 0;
   __atomic_fetch_add(&o->csirs_confirmed, 1, __ATOMIC_RELAXED);
   const uint64_t elapsed = slot >= e->first_slot ? slot - e->first_slot : 0;
@@ -86,6 +87,10 @@ bool nr_csirs_observer_due(nr_csirs_observer_t *o, const nr_csirs_resource_t *r,
   nr_csirs_observer_entry_t *e = find(o, r);
   if (!e || !e->active || e->last_due == slot) return false;
   e->last_due = slot;
+  /* hit: a clear detection (rho >= 2) of this resource; miss: a clear non-detection at an occasion of the lattice discovery confirmed.
+   * Periodic tracker accounting only; the four-miss revocation below is unchanged. */
+  if (hit) nr_ptrack_hit(&e->pt, NR_PTRACK_CSIRS, slot, &o->periodic);
+  else nr_ptrack_miss(&e->pt, NR_PTRACK_CSIRS, slot, &o->periodic);
   if (hit) { e->misses = 0; return false; }
   if (++e->misses < NR_CSIRS_MISSING_PERIODS) return false;
   e->active = 0;
@@ -93,6 +98,17 @@ bool nr_csirs_observer_due(nr_csirs_observer_t *o, const nr_csirs_resource_t *r,
   __atomic_fetch_add(&o->csirs_revoked, 1, __ATOMIC_RELAXED);
   if (r->zp) __atomic_fetch_add(&o->zp_revoked, 1, __ATOMIC_RELAXED);
   return true;
+}
+
+uint32_t nr_csirs_observer_predicted_next(const nr_csirs_observer_t *o, const nr_csirs_resource_t *r, uint32_t slot)
+{
+  const nr_csirs_observer_entry_t *e = find((nr_csirs_observer_t *)o, r);
+  return e && e->active ? (uint32_t)nr_ptrack_next(&e->pt, slot) : 0;
+}
+bool nr_csirs_observer_predicted_due(const nr_csirs_observer_t *o, const nr_csirs_resource_t *r, uint32_t slot)
+{
+  const nr_csirs_observer_entry_t *e = find((nr_csirs_observer_t *)o, r);
+  return e && e->active && nr_ptrack_due(&e->pt, slot);
 }
 
 /* nr_csirs_observer_refine: replaces the tracked resource geometry of an observed CSI-RS entry (old -> updated), so that a refined extent keeps its observation history.
@@ -131,5 +147,10 @@ void nr_csirs_observer_metrics(const nr_csirs_observer_t *o, nr_passive_metrics_
     m->csirs_confirm_resource_key[i] = __atomic_load_n(&o->csirs_confirm_resource_key[i], __ATOMIC_RELAXED);
     m->csirs_confirm_resource_slots[i] = __atomic_load_n(&o->csirs_confirm_resource_slots[i], __ATOMIC_RELAXED);
   }
+  m->periodic[NR_PTRACK_CSIRS] = (nr_ptrack_counters_t){.predicted = __atomic_load_n(&o->periodic.predicted, __ATOMIC_RELAXED),
+      .hit = __atomic_load_n(&o->periodic.hit, __ATOMIC_RELAXED), .miss = __atomic_load_n(&o->periodic.miss, __ATOMIC_RELAXED),
+      .demoted = __atomic_load_n(&o->periodic.demoted, __ATOMIC_RELAXED),
+      .confirmed = __atomic_load_n(&o->periodic.confirmed, __ATOMIC_RELAXED),
+      .audit_hit = __atomic_load_n(&o->periodic.audit_hit, __ATOMIC_RELAXED)};
 #undef COPY
 }

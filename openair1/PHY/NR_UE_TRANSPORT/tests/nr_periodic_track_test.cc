@@ -114,3 +114,58 @@ TEST(Ptrack,RandomDetectionsNeverConfirm) {
   }
   EXPECT_EQ(confirmed,0u);
 }
+/* CSI-RS periods: TS 38.331 CSI-ResourcePeriodicityAndOffset slots4..slots640 */
+TEST(PtrackCsirs,PeriodSetIsTs38331) {
+  const unsigned *set;unsigned n=nr_ptrack_period_set(NR_PTRACK_CSIRS,&set);
+  const unsigned ref[]={4,5,8,10,16,20,32,40,64,80,160,320,640};
+  ASSERT_EQ(n,sizeof(ref)/sizeof(*ref));
+  for(unsigned i=0;i<n;i++) EXPECT_EQ(set[i],ref[i]);
+}
+/* TRS: a burst of two consecutive slots every 10/20/40/80 ms (SCS 15 kHz: 10..80 slots, SCS 30 kHz: 20..160 slots). */
+static void feed_trs(nr_ptrack_t &t,nr_ptrack_counters_t &c,unsigned P,unsigned off,unsigned bursts,unsigned first=0) {
+  for(unsigned k=first;k<first+bursts;k++) {
+    nr_ptrack_hit(&t,NR_PTRACK_CSIRS,(uint64_t)k*P+off,&c);
+    nr_ptrack_hit(&t,NR_PTRACK_CSIRS,(uint64_t)k*P+off+1,&c);
+  }
+}
+TEST(PtrackCsirs,TrsTwoSlotBurstDoesNotBreakEstimator) {
+  for(unsigned P:{10u,20u,40u,80u,160u}) {
+    nr_ptrack_t t;nr_ptrack_init(&t);nr_ptrack_counters_t c{};
+    feed_trs(t,c,P,3,8);
+    ASSERT_TRUE(t.confirmed) << P;
+    EXPECT_EQ(t.period,P);EXPECT_EQ(t.offset,3u);   // the lead slot of the burst, not the trailing one
+    EXPECT_EQ(c.confirmed,1u);EXPECT_EQ(c.demoted,0u);
+    EXPECT_EQ(c.predicted,4u);EXPECT_EQ(c.hit,4u);EXPECT_EQ(c.miss,0u); // bursts 5..8 follow the 4 that confirmed; trailing slots count nothing
+    EXPECT_EQ(c.audit_hit,0u);
+    EXPECT_EQ(nr_ptrack_next(&t,7ull*P+3+1),8ull*P+3);
+  }
+}
+TEST(PtrackCsirs,TrsBurstWithMissedOccasionsAndLostLead) {
+  nr_ptrack_t t;nr_ptrack_init(&t);nr_ptrack_counters_t c{};
+  feed_trs(t,c,40,5,5);
+  ASSERT_TRUE(t.confirmed);
+  nr_ptrack_miss(&t,NR_PTRACK_CSIRS,5+40*5,&c);                 // burst 5 missed (lead)
+  nr_ptrack_miss(&t,NR_PTRACK_CSIRS,5+40*5+1,&c);               // the trailing slot is not an occasion: no count
+  EXPECT_EQ(c.miss,1u);EXPECT_TRUE(t.confirmed);
+  nr_ptrack_hit(&t,NR_PTRACK_CSIRS,5+40*6+1,&c);                // burst 6: only the trailing slot detected
+  feed_trs(t,c,40,5,3,7);
+  EXPECT_TRUE(t.confirmed);EXPECT_EQ(t.period,40u);EXPECT_EQ(t.offset,5u);EXPECT_EQ(c.demoted,0u);
+}
+TEST(PtrackCsirs,TrsStrayAndPeriodChange) {
+  nr_ptrack_t t;nr_ptrack_init(&t);nr_ptrack_counters_t c{};
+  feed_trs(t,c,20,2,8);
+  ASSERT_TRUE(t.confirmed);
+  nr_ptrack_hit(&t,NR_PTRACK_CSIRS,20*8+11,&c);                 // stray, not on the grid
+  EXPECT_TRUE(t.confirmed);EXPECT_EQ(t.period,20u);
+  // the resource is reconfigured away: its occasions are missed until demoted
+  for(unsigned k=9;k<14;k++) nr_ptrack_miss(&t,NR_PTRACK_CSIRS,20*k+2,&c);
+  EXPECT_FALSE(t.confirmed);EXPECT_EQ(c.demoted,1u);EXPECT_EQ(c.miss,4u);
+  // relearned at the new period 40
+  feed_trs(t,c,40,2,6,10);
+  ASSERT_TRUE(t.confirmed);EXPECT_EQ(t.period,40u);EXPECT_EQ(c.confirmed,2u);
+}
+TEST(PtrackCsirs,AdjacentDetectionsOfNonCsirsTypesAreNotCollapsed) {
+  nr_ptrack_t t;nr_ptrack_init(&t);nr_ptrack_counters_t c{};
+  for(uint64_t s=10;s<20;s++) nr_ptrack_hit(&t,NR_PTRACK_SRS,s,&c);   // SRS period 1 stays valid
+  ASSERT_TRUE(t.confirmed);EXPECT_EQ(t.period,1u);
+}
