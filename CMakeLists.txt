@@ -968,6 +968,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/MODULATION/nr_sfo_state.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pss_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pss_decim.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_lock_verify.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/sss_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/cic_filter_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
@@ -2740,6 +2741,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pss_decim PRIVATE GTest::gtest GTest::gtest_main m)
   add_dependencies(tests test_nr_pss_decim)
   add_test(NAME test_nr_pss_decim COMMAND ./test_nr_pss_decim)
+
+  add_executable(test_nr_lock_verify ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_lock_verify_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_lock_verify.c)
+  target_include_directories(test_nr_lock_verify PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_lock_verify PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_lock_verify)
+  add_test(NAME test_nr_lock_verify COMMAND ./test_nr_lock_verify)
 
   add_executable(test_nr_initial_sync_budget ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_initial_sync_budget_test.cc
                                               ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.c)

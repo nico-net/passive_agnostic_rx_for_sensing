@@ -55,6 +55,7 @@ int nr_ue_rx_synced_g = 0;
 /// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage. Per cell (A8): nr_ue_cell_clock.h.
 #include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h"
 #include "common/utils/nr_cell.h"
+#include "PHY/NR_UE_TRANSPORT/nr_lock_verify.h"
 #include "common/utils/nr_cell_dash.h" /* MPCI-DASH P6 CELL_TIMING / P8 SLOT_CELL formatters (lines only when nr_cell_count() > 1) */
 
 // TEMPORARY DIAGNOSTIC (2026-08-05): receive-buffer producer/consumer lag measurement. See
@@ -2114,6 +2115,14 @@ void *UE_thread(void *arg)
         extern void nr_pbch_diag_counts(unsigned long *ok, unsigned long *fail);
         unsigned long pbch_ok = 0, pbch_fail = 0;
         nr_pbch_diag_counts(&pbch_ok, &pbch_fail);
+        /* FIX1102 B: a lock that never decodes a tracking PBCH is rejected after 2 windows (measured OTA 2026-11-02: 34 of 34 such
+         * locks never decoded one, a working lock decodes from its first window); its beam is skipped by this cell's next searches */
+        NR_CELL_STATIC(nr_lock_verify_t, s_lockv);
+#define s_lockv NR_CELL_REF(s_lockv)
+        const nr_lock_verdict_t lock_verdict = nr_lock_verify_window(&s_lockv, UE->is_synchronized, pbch_ok, pbch_fail,
+                                                                     UE->frame_parms.ssb_index, UE->frame_parms.Nid_cell, 2);
+        if (lock_verdict == NR_LOCK_VERIFIED)
+          nr_initial_sync_ssb_verified();
         bool rf_collapsed = false, pbch_dead = false;
         if (w >= 0.0) {
           /* Running max with a hard-bounded fall. The previous form ("EMA, but only from windows
@@ -2319,7 +2328,13 @@ void *UE_thread(void *arg)
          * windows; a genuine runaway still trips after 8 (16 s), one reacquisition later than
          * before, while a beam that decodes even one SSB per window resets the count and survives. */
         const int bad_needed = 8;
-        if (s_bad >= bad_needed && UE->is_synchronized) {
+        const bool lock_rejected = lock_verdict == NR_LOCK_REJECT;
+        if ((s_bad >= bad_needed || lock_rejected) && UE->is_synchronized) {
+          if (lock_rejected) {
+            LOG_W(PHY, "SENSING: LOCK_REJECT pci=%d ssb_index=%d: no tracking PBCH decoded since the lock (pbch_fail=%lu) -> re-acquiring this cell, beam skipped\n",
+                  s_lockv.lock_pci, s_lockv.lock_ssb, pbch_fail);
+            nr_initial_sync_reject_ssb(s_lockv.lock_pci, s_lockv.lock_ssb);
+          } else {
           s_fires++;
           LOG_E(PHY,
                 "SENSING: RFSTALL %s (rf_pow=%.2f ref=%.2f pbch_ok=%lu pbch_fail=%lu "
@@ -2331,7 +2346,11 @@ void *UE_thread(void *arg)
            * 52 consecutive failed initial-sync attempts, because there is no signal to acquire --
            * the stream itself is stalled, not merely mis-aligned. The RX stream must be torn down
            * and restarted at the device before any re-sync can succeed. */
-          if (1) { /* stream-level restart never succeeded in any observed case; go straight to re-init */
+          /* FIX1102 B: signal present = the stream is fine, only this cell's timing is lost: re-acquire this cell alone. A device
+           * re-init restarts every cell (OTA 2026-11-02: one cell's losses restarted the other 5 times per run, exit 3 at ~90 s). */
+          if (!rf_collapsed)
+            LOG_W(PHY, "SENSING: RFSTALL signal present: re-acquiring this cell only (no device re-init)\n");
+          else { /* stream-level restart never succeeded in any observed case; go straight to re-init */
             /* A stream-level restart is not enough when the MPM claim itself is gone: every RPC
              * to the device throws (measured: set_gpio_src, then get_timekeeper_time at a 2000 ms
              * timeout). Escalate to a full teardown + re-open, which releases the stale claim and
@@ -2354,6 +2373,7 @@ void *UE_thread(void *arg)
               nr_shutdown_request(3);
               break;
             }
+          }
           }
           UE->is_synchronized = 0;
           stream_status = STREAM_STATUS_UNSYNC;

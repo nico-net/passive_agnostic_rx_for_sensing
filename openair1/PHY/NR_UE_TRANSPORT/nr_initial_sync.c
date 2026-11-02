@@ -25,6 +25,20 @@
 #include "PHY/TOOLS/tools_defs.h"
 #include "nr-uesoftmodem.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
+#include "nr_lock_verify.h"
+
+/* FIX1102 B: per cell, the beams (PCI, SSB index) whose last lock never decoded a tracking PBCH (nr-ue.c census). The scan
+ * workers run bound to the cell, so they read the cell's own memory; forgotten after 4 searches that lock nothing else. */
+NR_CELL_STATIC_INIT(nr_ssb_reject_t, s_ssb_reject, {.mask = 0, .pci = -1, .misses = 0});
+#define s_ssb_reject NR_CELL_REF(s_ssb_reject)
+void nr_initial_sync_reject_ssb(int pci, int ssb_index)
+{
+  nr_ssb_reject_add(&s_ssb_reject, pci, ssb_index);
+}
+void nr_initial_sync_ssb_verified(void)
+{
+  nr_ssb_reject_init(&s_ssb_reject);
+}
 
 //#define DEBUG_INITIAL_SYNCH
 #define DUMP_PBCH_CH_ESTIMATES 0
@@ -604,6 +618,11 @@ static void nr_scan_ssb(void *arg)
           LOG_I(NR_PHY, "SENSING: SSB_MULTI_PCI gscn=%d frame=%d cand(pci:sss:pbch)=[%s] chosen=%d\n", ssbInfo->gscnInfo.gscn,
                 frame_id, cb, ssbInfo->syncRes.cell_detected ? ssbInfo->nidCell : -1);
         }
+        if (ssbInfo->syncRes.cell_detected && nr_ssb_reject_skip(&s_ssb_reject, ssbInfo->nidCell, ssbInfo->ssbIndex)) {
+          LOG_I(NR_PHY, "SENSING: SSB_LOCK_SKIP pci=%d ssb_index=%d: the last lock on this beam decoded no tracking PBCH; next candidate\n",
+                ssbInfo->nidCell, ssbInfo->ssbIndex);
+          ssbInfo->syncRes.cell_detected = false;
+        }
         if (!ssbInfo->syncRes.cell_detected)
           LOG_I(NR_PHY,
                 "SENSING: SCAN_PBCH_FAIL gscn=%d ssb_sc=%d ssb_ref=%.0f frame=%d pci=%d pss_peak=%d pss_avg=%d "
@@ -951,6 +970,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     }
   }
 #undef s_pinned_fail
+  nr_ssb_reject_search_done(&s_ssb_reject, res != NULL, 4);
   clock_gettime(CLOCK_MONOTONIC, &scan_t1);
   LOG_I(NR_PHY, "SENSING: SYNC_SCAN ms=%.1f gscn=%d ant=%d frames=%d decim=%s detected=%d\n",
         (scan_t1.tv_sec - scan_t0.tv_sec) * 1e3 + (scan_t1.tv_nsec - scan_t0.tv_nsec) / 1e6, numGscn, scan_fp.nb_antennas_rx,
