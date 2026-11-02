@@ -5670,3 +5670,61 @@ Open:
 ### 38.6 Process rules learned (lock usage for builds vs replays)
 - Builds take `/tmp/td_measure.lock` SHARED (`flock -s`). Replays and benches take it EXCLUSIVE.
 - Agents' builds contaminated replays twice on 2026-11-01. This is the reason for the rule above.
+
+## 39. OTA 2026-11-02 (freeze-20261102) — Monday, crowded office, build tag freeze-20261102
+Evidence: every claim carries a §0.1 label. Unless a line says otherwise, every number is `[MEASURED, DGX+X410 OTA 2026-11-02]`:
+DGX Spark aarch64, X410 34B2AF1, DPDK, 4 RX, gain 38, sensing on (`ue.passive.ota.sense.dgx.cfg`), 300 s runs.
+OTA numbers are per cell and never pooled across cells, operators or builds.
+
+### 39.1 Build and campaign
+- Build: tag `freeze-20261102`, branch `candgpuA` (`wt/rr-candgpuA`), the build planned in §38.5.
+- Campaign: `/home/nicola/NICOLA/ota_runs/ota_20261102_090000` (09:00-09:49), script `rr-orchestration/ota/run_ota_20261102.sh`.
+
+### 39.2 Solo cells (CRC on rv=0 non-SI grants)
+"tot" = EVMGRANT end-to-end total, p50/p99 in us. "dec" = dec_us p50/p99 in us.
+
+| Run | CRC all grants | CRC >128 PRB grants | >128 PRB CRC by layers | TBS >= 100k | tot | dec |
+|---|---|---|---|---|---|---|
+| o1S415 | 79.9 % (72171) | 57.3 % (10284) | Nl1 56.7, Nl2 54.3, Nl3+ 71.4 | 40.4 % | 2179/11143 | 768/6013 |
+| o2S415 | 70.6 % (50831) | 65.4 % (10545) | Nl1 63.9, Nl2 68.6, Nl3+ 42.2 | 33.6 % | 2226/11627 | 858/6782 |
+| o1S923 | 78.6 % (25741) | 49.8 % (2558) | Nl1 27.3, Nl2 73.6, Nl3+ 8.9 | 50.2 % | 1691/7287 | 736/3853 |
+| o2S923 | 73.0 % (37396) | 31.1 % (1824) | Nl1 19.4, Nl2 39.6, Nl3+ 9.6 | 27.5 % | 1506/8606 | 749/3726 |
+| o1S403 (51 PRB) | 19.1 % (9724) | not recorded | not recorded | not recorded | 3356/16566 | 2000/10013 |
+
+- o1S508: first attempt PCI MISMATCH. Retry o1S508r: PCI OK, but 0 dedicated rv=0 grants parsed (exported pdsch_data 7612).
+- Comparison [MEASURED, DGX+X410 OTA 2026-11-01, `pred_ab_20261101`, 300 s, sensing on, not the same day]: 415 (p2P415) >128 PRB 64.2 %, tot 1933/12006;
+  923 (p1P923 / p2P923) >128 PRB 28.0-28.4 %, tot 1533-1745/8466-9320.
+  Today there was more traffic (415 up to 72k grants vs 32k on 11-01). The differences are within run-to-run variance.
+  No CRC or latency gain attributable to the freeze build is claimed.
+
+### 39.3 Two-PCI run o1B (415 + 923, one process, `mpci_cells/v415_t923.json`)
+- c0, PCI 415: all 58.8 % (37276), >128 PRB 56.5 %, tot 3232/28548, dec 1040/25668, scanq_drop_full 20490.
+- c1, PCI 923: locked only about halfway through the run (first "got=923 locked" at log line 447675 of 821153). all 80.3 % (3515), >128 PRB 1.4 % (216),
+  tot 6036/37526, dec 1426/25634, async drop 18.3 %.
+- sync=16, syncfail_attempts=29.
+- Reading of this run (the campaign's conclusion, not a separate measurement): multi-PCI is the bottleneck now. The dec p99 is ~25 ms against
+  3.7-6.8 ms solo, and the second cell locks late.
+
+### 39.4 Sensing (exported records, `sense_cfr_exported_*`; `sense_prod_count_*` counts jobs, see §38.4)
+- PDSCH data async drop: 415 6.7 % / 2.9 %, 923 1.2 / 1.0 %, 403 2.6 %, 2-PCI c0 1.1 %, c1 18.3 %.
+- SRS exported on air for the first time: 415 39 / 18, 923 0 / 3, 508 4545 (periodic tracker: 146 predicted, 137 hit, 9 miss, 2 confirmed, 2 demoted),
+  2-PCI c0 394 (111 predicted / 111 hit, 1 confirmed).
+- SRS physics check `[OFFLINE VERIFIED]` (`tools/srs/srs_physics_check.py`, `wt/rr-fix-srsq`) on raw captures taken 09:51:
+  415 has 27 comb-like UL slots in 1 s, periodic (25/27 in one phase at 40 slots); 923 has 0.
+  raw_pci508 was captured but not checked (the tool assumes 217 RB).
+- PUSCH: CRC still ~0 (pusch_crc_ok 2-10 of 150-190k tries). PUSCH DM-RS records exported 132-169k per run.
+- PRACH: 0 exported on all cells (expected on NSA, operator statement).
+- CSI-RS exported 25-146k per run; 0 on 508.
+- gpu_gives 31-39k per run (GPU-wait core give-back active).
+- Raw IQ captures (4 s, 122.88 Msps, 4 ch), status COMPLETE_CONTIGUOUS_RAW_IQ: `ota_runs/raw_pci415_4s_1102_0951`,
+  `ota_runs/raw_pci923_4s_1102_0951`, `ota_runs/raw_pci508_4s_1102_0952`.
+
+### 39.5 Process notes
+- Campaign script bug: `cap()` did not create the output directory. `capture_raw` failed with "output directory must exist", and the
+  rc was logged as 1 from a chown. Fixed with `mkdir -p`. The captures were re-taken manually after the campaign.
+
+### 39.6 Open items (next, from the facts)
+- Multi-PCI: the second-cell late lock, GPU contention (dec p99 ~25 ms), and scan queue drops.
+- Batching (Part B) is a candidate. The inflight-2+ share in the 2-PCI run is not yet measured `[HYPOTHESIS]`.
+- CSI-RS/TRS periodic tracker wiring in progress (`fix1102/csirsptrack`).
+- Then: PUCCH blind detector, SPS/CG activation-DCI counting.
