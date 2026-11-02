@@ -2516,6 +2516,9 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_pdcch_nid_worker_duty COMMAND test_nr_pdcch_nid_worker --duty)
   set_tests_properties(test_nr_pdcch_nid_worker_duty PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
+  add_test(NAME test_nr_pdcch_nid_worker_shed COMMAND test_nr_pdcch_nid_worker --shed)
+  set_tests_properties(test_nr_pdcch_nid_worker_shed PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
   foreach(fixture RANGE 1 6)
     add_test(NAME test_nr_pdcch_nid_reference${fixture} COMMAND test_nr_pdcch_nid_algorithm ${fixture})
   endforeach()

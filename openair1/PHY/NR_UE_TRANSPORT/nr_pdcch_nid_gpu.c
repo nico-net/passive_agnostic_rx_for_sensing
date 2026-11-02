@@ -134,7 +134,9 @@ static void *worker(void *unused)
    }
    if(!due) {g.state[b]=0;pthread_mutex_unlock(&g.mu);elastic_tick(g.el.base);continue;} /* paused / maintaining: no extra evidence span needed */
   }
-  if(nr_admit_on()) { /* ISAC_BG_LANE: a skipped batch is freed; the next one carries newer samples */
+  /* A cell with no published CORESET decodes no dedicated grant until this sweep finds one: decode-gating, never shed (FIX1102 A: the later-locking
+   * cell of two starved for the whole run under the first cell's decode load). The duty (ACQUIRE -> PAUSED) still bounds it; MAINTAIN rechecks are shed. */
+  if(nr_admit_on() && g.result.count>0) { /* ISAC_BG_LANE: a skipped batch is freed; the next one carries newer samples */
    const uint64_t t=nr_admit_now_ns();
    if(!nr_admit_try(NR_ADMIT_NID,t,0,false)) {g.state[b]=0;pthread_mutex_unlock(&g.mu);continue;}
    admit_t0=t;
