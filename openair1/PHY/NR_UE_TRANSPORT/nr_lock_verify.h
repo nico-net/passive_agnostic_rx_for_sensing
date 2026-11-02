@@ -49,6 +49,14 @@ typedef enum { NR_LOCK_KEEP = 0, NR_LOCK_VERIFIED = 1, NR_LOCK_REJECT = 2 } nr_l
 nr_lock_verdict_t nr_lock_verify_window(nr_lock_verify_t *v, bool synced, unsigned long pbch_ok, unsigned long pbch_fail,
                                         int ssb_index, int pci, int windows);
 
+/* nr_search_ssb_common(): ssb_try_candidate() leaves the SSB symbols and the CFO compensation of the LAST tried candidate in place. After the
+ * candidates are sorted by SSS metric the best one must be redone unless it IS that last candidate (same N_ID_2 and same position: a pinned
+ * search returns several peaks with one N_ID_2, so N_ID_2 alone is not enough). */
+static inline bool nr_ssb_redo_best(int best_nid2, int best_pos, int last_nid2, int last_pos)
+{
+  return best_nid2 != last_nid2 || best_pos != last_pos;
+}
+
 /* The cell's memory, implemented in nr_initial_sync.c (called bound to the cell): add the beam of a rejected lock / forget
  * all after a verified lock. */
 void nr_initial_sync_reject_ssb(int pci, int ssb_index);

@@ -410,13 +410,15 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
   if (n_cand == 0)
     return false;
   /* strongest SSS metric first (stable) */
-  const int last_nid2 = cand_pss[n_cand - 1].nid2;
+  const int last_nid2 = cand_pss[n_cand - 1].nid2, last_pos = cand_pss[n_cand - 1].pos;
   for (int a = 1; a < n_cand; a++)
     for (int b = a; b > 0 && cand_sss[b].metric > cand_sss[b - 1].metric; b--) {
       const pss_detection_result_t tp = cand_pss[b]; cand_pss[b] = cand_pss[b - 1]; cand_pss[b - 1] = tp;
       const sss_detection_result_t ts = cand_sss[b]; cand_sss[b] = cand_sss[b - 1]; cand_sss[b - 1] = ts;
     }
-  if (cand_pss[0].nid2 != last_nid2) /* the frequency-domain symbols and the compensation in force belong to the last accepted candidate: redo the best one */
+  /* the frequency-domain symbols and the compensation in force belong to the last accepted candidate: redo the best one. A pinned search's
+   * candidates share one N_ID_2 (A10: peaks of other beams), so the position decides too, else the PBCH is decoded off another beam's SSB */
+  if (nr_ssb_redo_best(cand_pss[0].nid2, cand_pss[0].pos, last_nid2, last_pos))
     if (ssb_try_candidate(params, &cand_pss[0], &f_off_to_comp) <= 0)
       return false;
   params->comp_state = f_off_to_comp;

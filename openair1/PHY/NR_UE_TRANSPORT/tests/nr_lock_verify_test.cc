@@ -84,3 +84,10 @@ TEST(SsbReject, ForgottenAfterMissedSearchesSoACellCannotLockItselfOut)
     nr_ssb_reject_search_done(&r, false, 4);
   EXPECT_TRUE(nr_ssb_reject_skip(&r, 415, 2));
 }
+
+TEST(SsbRedo, SameNid2OtherPositionMustRedo)
+{
+  EXPECT_FALSE(nr_ssb_redo_best(1, 1000, 1, 1000)); /* the best is the last tried: symbols already in place */
+  EXPECT_TRUE(nr_ssb_redo_best(2, 1000, 1, 1000));
+  EXPECT_TRUE(nr_ssb_redo_best(1, 5000, 1, 1000)); /* pinned search: same N_ID_2, another beam's peak */
+}
