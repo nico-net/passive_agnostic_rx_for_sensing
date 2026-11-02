@@ -4712,7 +4712,7 @@ static void occasion_reconf_prologue(PHY_VARS_NR_UE *ue, long source_absolute_sl
       const uint64_t old_c0 = atomic_exchange_explicit(&last_c0_unique, c0, memory_order_relaxed);
       const uint32_t slots_per_second = ue->frame_parms.slots_per_frame * 100;
       const bool outside = nr_pdcch_blind_monitor_take_outside_occupancy();
-      if(outside)nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),0,false,true);
+      if(outside)nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_dedicated_current(),0,false,true);
       nr_pdcch_coreset_bank_tick(slot, c0 > old_c0 || outside, 5 * slots_per_second, 30 * slots_per_second);
     }
     nr_pdcch_coreset_bank_dispatch_enter();

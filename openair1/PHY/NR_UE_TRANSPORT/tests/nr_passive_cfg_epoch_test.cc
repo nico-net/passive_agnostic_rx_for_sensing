@@ -149,6 +149,13 @@ TEST_F(CfgEpoch, RxRecoveryHasOwnCauseAndShortGapDoesNot) {
   EXPECT_EQ(last.last_class, NR_EPOCH_SOFT);
   EXPECT_EQ(last.last_cause, NR_CAUSE_RX_RECOVERY);
 }
+TEST_F(CfgEpoch, RxRecoveryMovesCellEpochNotDedicated) {
+  /* The nID sweep feeds back the dedicated epoch: a SOFT recovery every few seconds must not restart its evidence window (FIX1102). */
+  const uint32_t e = nr_cfg_epoch_current(), d = nr_cfg_epoch_dedicated_current();
+  for (int i = 0; i < 3; ++i) { nr_cfg_epoch_note_rx_recovery(); nr_cfg_epoch_drain(); }
+  EXPECT_EQ(nr_cfg_epoch_current(), e + 3);
+  EXPECT_EQ(nr_cfg_epoch_dedicated_current(), d);
+}
 TEST_F(CfgEpoch, LongGapIsHardReverify) {
   for (uint64_t ms : {10u, 50u}) {
     nr_cfg_epoch_note_continuity_loss_samples(ms * 1000, 1000);

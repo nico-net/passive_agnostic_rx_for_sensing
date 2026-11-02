@@ -41,7 +41,7 @@ typedef struct {
  uint64_t wake, last_outside_us;
  unsigned acquire_ms, maintain_ms, recheck_ms;
  bool stop;
- uint64_t runs; /* sweep GPU passes run */
+ uint64_t runs,stale; /* sweep GPU passes run; runs discarded because the epoch moved */
  double kernel_ms;
  _Atomic bool running;
  nr_gpu_elastic_t el; /* on-demand window: base = what the memory budget share holds (T6b), full = the requested window */
@@ -174,7 +174,10 @@ static void *worker(void *unused)
   if(result.shortlist_overflow)LOG_W(PHY,"SENSING: PDCCH_NID_GPU shortlist overflow; no truncated evidence published\n");
   if(result.budget_exceeded)LOG_W(PHY,"SENSING: PDCCH_NID_GPU soft pass budget exceeded; completed records published\n");
   pthread_mutex_lock(&g.mu);
-  if(epoch!=g.epoch) {pthread_mutex_unlock(&g.mu);continue;}
+  if(epoch!=g.epoch) {
+   if((++g.stale&7)==1)LOG_A(PHY,"SENSING: PDCCH_NID_GPU run discarded, epoch moved %u -> %u during the run (discards=%llu)\n",epoch,g.epoch,(unsigned long long)g.stale);
+   pthread_mutex_unlock(&g.mu);continue;
+  }
   bool same=g.result.count==result.count;
   for(int i=0;i<result.count && same;++i) {
    bool found=false;
