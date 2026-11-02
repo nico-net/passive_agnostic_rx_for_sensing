@@ -193,7 +193,7 @@ TEST(CellDashPool, TwoCellsSplitAndCellCpu)
   EXPECT_NE(l.find("fair_pct=50.0"), std::string::npos) << l;
   EXPECT_NE(l.find(" n=3 "), std::string::npos) << l; // 3 leases of the cell in the window (2 UL + 1 DL decode)
   EXPECT_NE(l.find(" scan[hold_ms="), std::string::npos);
-  EXPECT_NE(l.find(" scan[hold_ms=0 n=0] decode[hold_ms=0 n=1] retry[hold_ms=0 n=0] disc[hold_ms=0 n=0] house[hold_ms=0 n=0] ul[hold_ms=0 n=2]"), std::string::npos) << l;
+  EXPECT_NE(l.find(" scan[hold_ms=0 n=0] decode[hold_ms=0 n=1] retry[hold_ms=0 n=0] disc[hold_ms=0 n=0] house[hold_ms=0 n=0] sense[hold_ms=0 n=0] ul[hold_ms=0 n=2]"), std::string::npos) << l;
 
   // F1: the process part has no cell block, each cell has its own
   nr_pool_stats_line_proc(p, b, sizeof(b));
