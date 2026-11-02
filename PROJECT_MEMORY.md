@@ -5689,7 +5689,7 @@ OTA numbers are per cell and never pooled across cells, operators or builds.
 | o2S415 | 70.6 % (50831) | 65.4 % (10545) | Nl1 63.9, Nl2 68.6, Nl3+ 42.2 | 33.6 % | 2226/11627 | 858/6782 |
 | o1S923 | 78.6 % (25741) | 49.8 % (2558) | Nl1 27.3, Nl2 73.6, Nl3+ 8.9 | 50.2 % | 1691/7287 | 736/3853 |
 | o2S923 | 73.0 % (37396) | 31.1 % (1824) | Nl1 19.4, Nl2 39.6, Nl3+ 9.6 | 27.5 % | 1506/8606 | 749/3726 |
-| o1S403 (51 PRB) | 19.1 % (9724) | not recorded | not recorded | not recorded | 3356/16566 | 2000/10013 |
+| o1S403 (51 PRB) | 19.1 % (9724) | n/a (51 PRB) | n/a | 0.0 % (2) | 3356/16566 | 2000/10013 |
 
 - o1S508: first attempt PCI MISMATCH. Retry o1S508r: PCI OK, but 0 dedicated rv=0 grants parsed (exported pdsch_data 7612).
 - Comparison [MEASURED, DGX+X410 OTA 2026-11-01, `pred_ab_20261101`, 300 s, sensing on, not the same day]: 415 (p2P415) >128 PRB 64.2 %, tot 1933/12006;
