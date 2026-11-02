@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* FIX1102 C: the receiver's CPU channelizer applied offline to a wideband raw capture directory (rx<N>.sc16 + capture_info.json), written as a per-cell raw capture
- * directory of the same format. It drives iq_chan_backend_cpu exactly as iq_chan does for one entry (shift = cell centre - ring centre, design
+ * directory of the same format. It drives the CPU backend (or ico_backend) exactly as iq_chan does for one entry (shift = cell centre - ring centre, design
  * iq_ddc_cell_passband(n_rb, scs, cell rate, 0), atten IQ_CHAN_DEFAULT_ATTEN_DB, block IQ_CHAN_DEFAULT_BLOCK), so the output equals the live cell ring. Header-only so
  * the test can include the core. */
 #ifndef IQ_CHAN_OFFLINE_CORE_H
@@ -11,6 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* backend used by ico_channelize: the CPU one unless the caller sets this (FIX1102 C: --backend gpu) */
+static const iq_chan_backend_t *ico_backend;
 
 typedef struct { double rms[SHM_IQ_MAX_CH]; uint64_t clipped[SHM_IQ_MAX_CH]; uint64_t out_samples; } ico_stats_t;
 
@@ -38,14 +41,15 @@ static int ico_channelize(const char *in_dir, const char *out_dir, double cell_c
   const uint64_t spc = (uint64_t)spc_d, first_tick = (uint64_t)tick; /* exact below 2^53 */
   if (nch < 1 || nch > SHM_IQ_MAX_CH || decim < 1 || (int64_t)first_tick % decim) { fprintf(stderr, "bad channels/decim/first_tick\n"); return -3; }
   const double cell_rate = rate / decim;
+  const iq_chan_backend_t *be = ico_backend ? ico_backend : &iq_chan_backend_cpu;
   const int block = IQ_CHAN_DEFAULT_BLOCK;
   const iq_chan_geom_t g = {.in_rate = rate, .nch = nch, .block = block};
   const iq_chan_entry_t e = {.centre_hz = cell_centre, .decim = decim, .passband_hz = iq_ddc_cell_passband(n_rb, scs_hz, cell_rate, 0)};
-  void *ctx = iq_chan_backend_cpu.create(&g);
-  void *cell = ctx ? iq_chan_backend_cpu.prepare(ctx, &e) : NULL;
+  void *ctx = be->create(&g);
+  void *cell = ctx ? be->prepare(ctx, &e) : NULL;
   if (!cell) { fprintf(stderr, "channelizer design failed\n"); return -4; }
-  iq_chan_backend_cpu.install(ctx, 0, cell);
-  iq_chan_backend_cpu.set_shift(ctx, 0, cell_centre - ring_centre);
+  be->install(ctx, 0, cell);
+  be->set_shift(ctx, 0, cell_centre - ring_centre);
   FILE *in[SHM_IQ_MAX_CH], *out[SHM_IQ_MAX_CH];
   int16_t *ib[SHM_IQ_MAX_CH], *ob[SHM_IQ_MAX_CH];
   const int16_t *inp[SHM_IQ_MAX_CH];
@@ -76,7 +80,7 @@ static int ico_channelize(const char *in_dir, const char *out_dir, double cell_c
     for (unsigned a = 0; a < nch; ++a)
       if (fread(ib[a], 4, n, in[a]) != n) { fprintf(stderr, "short read rx%u at %" PRIu64 "\n", a, done); rc = -6; }
     if (rc) break;
-    if (iq_chan_backend_cpu.run(ctx, inp, (int)n, outp) < 0) { fprintf(stderr, "run failed\n"); rc = -7; break; }
+    if (be->run(ctx, inp, (int)n, outp) < 0) { fprintf(stderr, "run failed\n"); rc = -7; break; }
     const uint64_t m = n / (uint64_t)decim;
     for (unsigned a = 0; a < nch; ++a) {
       if (fwrite(ob[a], 4, m, out[a]) != m) { perror("write"); rc = -8; }
@@ -91,8 +95,8 @@ static int ico_channelize(const char *in_dir, const char *out_dir, double cell_c
   if (st) { st->out_samples = outn; for (unsigned a = 0; a < nch; ++a) st->rms[a] = outn ? sqrt(acc[a] / (2.0 * (double)outn)) : 0; }
   fclose(ts);
   for (unsigned a = 0; a < nch; ++a) { fclose(in[a]); if (fclose(out[a])) rc = -8; free(ib[a]); free(ob[a]); }
-  iq_chan_backend_cpu.release(ctx, iq_chan_backend_cpu.retire(ctx, 0));
-  iq_chan_backend_cpu.destroy(ctx);
+  be->release(ctx, be->retire(ctx, 0));
+  be->destroy(ctx);
   if (rc) return rc;
   snprintf(path, sizeof(path), "%s/capture_info.json", out_dir);
   f = fopen(path, "w");
