@@ -137,8 +137,8 @@ past its operator checkpoint. From it this plan uses:
     - residual <= `NR_SENSE_PRB_RESID_MAX` (0.25);
     - REs in the PRB >= 3;
     - `noise_var > 0`.
-  - These constants are provisional. They are calibrated on sens6 (spec §9.1), and the calibration is recorded in
-    the report, not tuned per cell.
+  - These constants are provisional. They may be set only from general principles or from the sens6 lab with known
+    references (spec §9.1), never from the DEIB/OTA cells (operator 2026-11-03).
 - `sym_consist`: the normalised correlation between the estimates of the two most populated symbols over the k they
   share.
 - `allocated_prbs` = the distinct PRBs touched by `k_abs`. `estimated_usable_prbs` = `allocated_prbs` here; producers
@@ -433,9 +433,9 @@ past its operator checkpoint. From it this plan uses:
   - the binding resources;
   - every VERIFY outcome.
   There are no "beats legacy" criteria (spec §9.3).
-- [ ] **Step 4: Calibrate the headroom.** Only if there are 0 violations and no PDCCH-loss increase at 0.40: repeat
-  at 0.30 and keep the lowest value that holds both, as a constant change plus a report line. If violations appear
-  at 0.40, raise it to 0.50 and report.
+- [ ] **Step 4: Headroom stays at 0.40 (operator 2026-11-03).** No parameter is calibrated on the DEIB/OTA cells.
+  Report the measured violations and PDCCH loss at 0.40 only. Any change to a constant comes from general reasoning
+  or from the sens6 lab with known references, and needs a ledger ruling.
 - [ ] **Step 5: Frozen check** (the traffic plan's command) exits 0.
 - [ ] **Step 6: Commit** the cfgs, the script and the report.
 - [ ] **Step 7: Operator checkpoint.** Stop. The next steps are spec §9.1 (sens6 lab, where the validity thresholds
