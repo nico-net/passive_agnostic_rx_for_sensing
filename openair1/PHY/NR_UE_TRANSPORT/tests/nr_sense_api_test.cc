@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include "nr_sense_api.h"
+#include "nr_traffic_record.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -19,6 +21,8 @@
 extern "C" {
 void *uniqCfg = nullptr;
 void exit_function(const char *, const char *, int, const char *, int) { abort(); }
+// strong test formatter overriding the weak reference in nr_sense_api.c
+int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n) { return snprintf(buf, n, "{\"type\":\"dci\",\"rnti\":%u}", r->o.rnti); }
 }
 
 namespace {
@@ -236,4 +240,31 @@ TEST_F(SenseApi, ZmqMirrorOptional) {
   nr_sense_close(); auto file=bytes(cfr); ASSERT_GE(file.size(),size_t(n));
   EXPECT_TRUE(std::equal(payload.begin(),payload.begin()+n,file.begin()));
 #endif
+}
+
+static void push_dci(int n, int *queued) {
+  nr_sense_dci_rec_t r; memset(&r,0,sizeof(r));
+  for (int i=0;i<n;i++) { r.o.rnti=100+i; if (nr_sense_push_dci(&r)==1) (*queued)++; }
+}
+static int lines(const std::string &p) { auto b=bytes(p); return (int)std::count(b.begin(),b.end(),'\n'); }
+
+TEST_F(SenseApi, DciQueuedAndPersisted) {
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  int q=0; push_dci(10,&q); EXPECT_EQ(q,10);
+  nr_sense_close(); nr_sense_stats_t s{}; nr_sense_stats(&s);
+  EXPECT_EQ(lines(rec),10); EXPECT_EQ(s.dci_generated,10u); EXPECT_EQ(s.dci_persisted,10u); EXPECT_EQ(s.dci_lost,0u);
+}
+TEST_F(SenseApi, DciRingFullCountsLost) {
+  cfg.rec_ring_slots=4; nr_sense_test_pause_writer(true); ASSERT_EQ(nr_sense_open(&cfg),0);
+  int q=0; push_dci(10,&q); EXPECT_EQ(q,4);
+  nr_sense_stats_t s{}; nr_sense_stats(&s); EXPECT_EQ(s.dci_generated,10u); EXPECT_EQ(s.dci_lost,6u);
+  nr_sense_test_pause_writer(false); nr_sense_close(); nr_sense_stats(&s);
+  EXPECT_EQ(s.dci_persisted,4u); EXPECT_EQ(s.dci_lost,6u);
+}
+TEST_F(SenseApi, DciWriteErrorCountsLost) {
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  nr_sense_test_fail_writes(true);
+  int q=0; push_dci(3,&q);
+  nr_sense_close(); nr_sense_stats_t s{}; nr_sense_stats(&s);
+  EXPECT_EQ(s.dci_lost,3u); EXPECT_EQ(s.dci_persisted,0u);
 }

@@ -4,9 +4,11 @@
 #include "common/utils/nr_cell.h"
 #include "nr_sense_api.h"
 #include "nr_sense_records.h"
+#include "nr_traffic_record.h"
 /* The standalone core test links without the receiver record module. The receiver
  * links that module through its emitters and supplies the formatter. */
 __attribute__((weak)) int nr_sense_rs_to_json(nr_sense_src_t, const nr_sense_rs_meta_t *, uint64_t, char *, size_t);
+__attribute__((weak)) int nr_sense_dci_to_json(const nr_sense_dci_rec_t *, char *, size_t);
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -96,6 +98,8 @@ typedef struct {
 } rs_job_t;
 NR_CELL_STATIC(rs_job_t *, rs_jobs)
 #define rs_jobs NR_CELL_REF(rs_jobs)
+NR_CELL_STATIC(nr_sense_dci_rec_t *, dci_jobs)
+#define dci_jobs NR_CELL_REF(dci_jobs)
 NR_CELL_STATIC(uint8_t *, record_binary)
 #define record_binary NR_CELL_REF(record_binary)
 NR_CELL_STATIC_INIT(int, cfr_fd, -1)
@@ -205,18 +209,28 @@ static void *run_writer(void *arg)
     if (limit && !stopping && count>limit-atomic_load(&written_items)) count=limit-atomic_load(&written_items);
     pthread_mutex_unlock(&mu);
     struct iovec vec[16];
-    uint32_t format_drops=0;
+    uint32_t format_drops=0, dci_ok=0, dci_fmt_lost=0;
     for (uint32_t i=0;i<count;i++) {
       uint32_t at=frame ? (frame_head+i)%frame_cap : (record_head+i)%record_cap;
       if (!frame && record_binary[at]) {
         const uint64_t t_rec=nr_sense_now_ns();
+        int length;
+        if (record_binary[at]==2) {
+          char *line=records+(size_t)at*RECORD_BYTES;
+          length=nr_sense_dci_to_json ? nr_sense_dci_to_json(&dci_jobs[at],line,RECORD_BYTES-1) : -1;
+          if (length>0) { line[length]='\n'; record_lengths[at]=(uint32_t)length+1; dci_ok++; }
+          else { record_lengths[at]=0; format_drops++; dci_fmt_lost++; }
+          nr_sense_cost_add(NR_SENSE_COST_REC,NR_SENSE_SRC_SSB,nr_sense_now_ns()-t_rec);
+          record_binary[at]=0;
+        } else {
         rs_job_t *job=&rs_jobs[at];
         char *line=records+(size_t)at*RECORD_BYTES;
-        int length=nr_sense_rs_to_json(job->src,&job->meta,job->frame_id,line,RECORD_BYTES-1);
+        length=nr_sense_rs_to_json(job->src,&job->meta,job->frame_id,line,RECORD_BYTES-1);
         if (length>0) { line[length]='\n'; record_lengths[at]=(uint32_t)length+1; }
         else { record_lengths[at]=0; format_drops++; }
         nr_sense_cost_add(NR_SENSE_COST_REC,job->src,nr_sense_now_ns()-t_rec);
         record_binary[at]=0;
+        }
       }
       vec[i].iov_base=frame ? (void *)(frames+(size_t)at*frame_stride)
                             : (void *)(records+(size_t)at*RECORD_BYTES);
@@ -239,6 +253,8 @@ static void *run_writer(void *arg)
     if (t_write) nr_sense_cost_add(NR_SENSE_COST_WRITE,NR_SENSE_SRC_SSB,write_ns);
     pthread_mutex_lock(&mu);
     stats.rec_dropped+=format_drops;
+    stats.dci_lost+=dci_fmt_lost;
+    if (ok) stats.dci_persisted+=dci_ok; else stats.dci_lost+=dci_ok;
     if (!ok) stats.io_errors++;
 #ifdef NR_SENSE_HAVE_ZMQ
     if (zmq_failed) stats.zmq_drops++;
@@ -264,7 +280,7 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
       max_ant > MAX_ANT ||
       cfg->cfr_max_re > (SIZE_MAX - FRAME_HEADER - 3) / (3 + 8 * max_ant) ||
       cfg->cfr_ring_frames > SIZE_MAX / sizeof(uint32_t) ||
-      cfg->rec_ring_slots > SIZE_MAX / RECORD_BYTES || cfg->rec_ring_slots > SIZE_MAX / sizeof(rs_job_t)) {
+      cfg->rec_ring_slots > SIZE_MAX / RECORD_BYTES || cfg->rec_ring_slots > SIZE_MAX / sizeof(rs_job_t) || cfg->rec_ring_slots > SIZE_MAX / sizeof(nr_sense_dci_rec_t)) {
     pthread_mutex_unlock(&mu); return -1;
   }
   no_sink=!cfg->cfr_path && !cfg->records_path && !cfg->endpoint;
@@ -286,6 +302,7 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
   records=malloc((size_t)cfg->rec_ring_slots*RECORD_BYTES);
   record_lengths=malloc((size_t)cfg->rec_ring_slots*sizeof(*record_lengths));
   rs_jobs=calloc(cfg->rec_ring_slots,sizeof(*rs_jobs));
+  dci_jobs=calloc(cfg->rec_ring_slots,sizeof(*dci_jobs));
   record_binary=calloc(cfg->rec_ring_slots,sizeof(*record_binary));
   if (cfg->cfr_path) cfr_fd=open(cfg->cfr_path,O_CREAT|O_WRONLY|O_TRUNC|O_CLOEXEC,0644);
   if (cfg->records_path) record_fd=open(cfg->records_path,O_CREAT|O_WRONLY|O_TRUNC|O_CLOEXEC,0644);
@@ -304,7 +321,7 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
     if (!zmq_pub || zmq_bind(zmq_pub,cfg->endpoint) != 0) goto fail;
   }
 #endif
-  if (!frames || !frame_lengths || !records || !record_lengths || !rs_jobs || !record_binary ||
+  if (!frames || !frame_lengths || !records || !record_lengths || !rs_jobs || !dci_jobs || !record_binary ||
       (cfg->cfr_path && cfr_fd < 0) || (cfg->records_path && record_fd < 0)) goto fail;
   frame_cap=cfg->cfr_ring_frames; frame_re=cfg->cfr_max_re; record_cap=cfg->rec_ring_slots;
   frame_head=frame_count=record_head=record_count=0;
@@ -325,8 +342,8 @@ fail:
   if (cfr_fd>=0) close(cfr_fd);
   if (record_fd>=0) close(record_fd);
   cfr_fd=record_fd=-1;
-  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(record_binary);
-  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; record_binary=NULL;
+  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary);
+  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL;
   pthread_mutex_unlock(&mu);
   return -1;
 }
@@ -349,8 +366,8 @@ void nr_sense_close(void)
   if (zmq_context) zmq_ctx_term(zmq_context);
   zmq_pub=zmq_context=NULL;
 #endif
-  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(record_binary);
-  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; record_binary=NULL;
+  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary);
+  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL;
   pthread_mutex_unlock(&mu);
 }
 bool nr_sense_enabled(void) { return atomic_load_explicit(&active,memory_order_acquire) && !atomic_load_explicit(&paused,memory_order_acquire); }
@@ -480,6 +497,20 @@ int nr_sense_push_rs_binary(nr_sense_src_t src, const nr_sense_rs_meta_t *meta, 
     job->meta.srs_attribution=job->srs_attribution;
   }
   record_binary[at]=1;
+  record_lengths[at]=0;
+  record_count++; stats.rec_pushed++; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
+  return 1;
+}
+int nr_sense_push_dci(const nr_sense_dci_rec_t *r)
+{
+  if (!nr_sense_enabled() || !r) return -1;
+  pthread_mutex_lock(&mu);
+  if (!opened) { pthread_mutex_unlock(&mu); return -1; }
+  stats.dci_generated++;
+  if (no_sink || record_count==record_cap) { stats.dci_lost++; stats.rec_dropped++; pthread_mutex_unlock(&mu); return 0; }
+  const uint32_t at=(record_head+record_count)%record_cap;
+  dci_jobs[at]=*r;
+  record_binary[at]=2;
   record_lengths[at]=0;
   record_count++; stats.rec_pushed++; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return 1;

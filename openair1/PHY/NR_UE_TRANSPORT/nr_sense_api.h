@@ -62,6 +62,7 @@ typedef struct {
   uint64_t prod_ns[NR_SENSE_SRC_COUNT], pack_ns[NR_SENSE_SRC_COUNT];
   uint64_t rec_ns, write_ns, prod_count[NR_SENSE_SRC_COUNT], pack_count[NR_SENSE_SRC_COUNT];
   uint64_t rec_count, write_count;
+  uint64_t dci_generated, dci_persisted, dci_lost; /* traffic-mode DCI records: reached the ring / written / dropped (ring full, no sink, format or write failure) */
   uint64_t async_queued[NR_SENSE_SRC_COUNT], async_dropped[NR_SENSE_SRC_COUNT]; /* producer work handed to its background worker / shed because the worker was saturated (never run on the decode thread) */
 } nr_sense_stats_t;
 /* A producer that moves its work off the decode-critical thread reports each hand-off: queued = 1 taken by the worker, 0 = dropped (counted per source, no lock, any thread of the cell). */
