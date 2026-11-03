@@ -419,12 +419,15 @@ TEST(DiscTicket, ContendedWaitParksThePoolLeaseUncontendedDoesNot) {
   t_parks=t_unparks=0;
   nr_gpu_disc_ticket_acquire(0);
   EXPECT_EQ(t_parks,0) << "a free ticket must not cost a pool round trip";
-  int w_parks=-1,w_unparks=-1;bool w_parked_at_grant=false;
-  std::thread w([&] {nr_gpu_disc_ticket_acquire(1);w_parked_at_grant=t_parked;w_parks=t_parks;w_unparks=t_unparks;nr_gpu_disc_ticket_release();});
+  int w_parks=-1,w_unparks_at_grant=-1,w_unparks=-1;bool w_parked_at_grant=false;
+  std::thread w([&] {nr_gpu_disc_ticket_acquire(1);w_parked_at_grant=t_parked;w_parks=t_parks;w_unparks_at_grant=t_unparks;nr_gpu_disc_ticket_release();w_unparks=t_unparks;});
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
   nr_gpu_disc_ticket_release();
   w.join();
   EXPECT_EQ(w_parks,1);
+  /* K1 2026-11-03: taking the lease back right after the grant held the ticket through a pool wait (discovery is a low class): nID passes 50-100 -> 5-6.
+   * The lease comes back when the ticket is released. */
+  EXPECT_TRUE(w_parked_at_grant) << "the ticket's GPU slice runs without the pool token";
+  EXPECT_EQ(w_unparks_at_grant,0);
   EXPECT_EQ(w_unparks,1);
-  EXPECT_FALSE(w_parked_at_grant) << "the lease is back when acquire returns";
 }
