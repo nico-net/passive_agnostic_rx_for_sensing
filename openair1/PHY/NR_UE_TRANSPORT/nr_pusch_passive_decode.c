@@ -3343,6 +3343,25 @@ static void ul_en_maybe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, const nr_pdcc
              " rise_db=%.1f dmrs_corr=%.3f dmrs_corr_null=%.3f best_off=%d ta=%d\n",
         g->rnti, (unsigned long)abs_slot, (unsigned)g->mcs, rb0, g->num_rb, g->start_symbol, g->num_symbols, e_dm, e_da, e_un, rise,
         corr, corr_null, best_off, out->ta_applied_samples);
+  /* ULPROF: where the slot's energy actually is (antenna 0): per symbol over the whole UL carrier, and per eighth of the carrier over
+   * the 14 symbols (dB). Tells a quiet UL slot (all ~floor), a DL/special slot (symbols high), and energy at other PRBs than the grant
+   * (one eighth high, grant's eighth at the floor = PRB mapping, else = no UE heard). Same 1/32 sampling as ULEN. */
+  double es[14] = {0}, eo[8] = {0};
+  uint64_t co[8] = {0};
+  const int nrb = fp->N_RB_UL;
+  for (int m = 0; m < sps && m < 14; m++) {
+    if (!passive_snapshot_fep_s(&sn, fp, 0, scratch, (unsigned char)m, slot, out->ta_applied_samples, fo_hz)) return;
+    double ss = 0;
+    uint64_t cs = 0;
+    nr_ulen_energy_acc(scratch, N, fp->first_carrier_offset, 0, nrb, 0, 0, NULL, 12, &ss, &cs);
+    es[m] = nr_ulen_db(ss, cs);
+    for (int o = 0; o < 8; o++) nr_ulen_energy_acc(scratch, N, fp->first_carrier_offset, nrb * o / 8, nrb * (o + 1) / 8, 0, 0, NULL, 12, &eo[o], &co[o]);
+  }
+  char buf[128], bo[64];
+  int n = 0, k = 0;
+  for (int m = 0; m < sps && m < 14; m++) n += snprintf(buf + n, sizeof(buf) - n, "%.0f,", es[m]);
+  for (int o = 0; o < 8; o++) k += snprintf(bo + k, sizeof(bo) - k, "%.0f,", nr_ulen_db(eo[o], co[o]));
+  LOG_A(PHY, "SENSING: ULPROF rnti=0x%04x slot=%lu rb=%d+%d nrb=%d sym_db=%s oct_db=%s\n", g->rnti, (unsigned long)abs_slot, rb0, g->num_rb, nrb, buf, bo);
 }
 
 /* The per-grant probe lives HERE, wrapping the decode, rather than in a caller: there are two
