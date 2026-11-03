@@ -112,6 +112,6 @@ TEST(AcqBackoff, FullRateFirstThenAboutOncePerSecond)
   for (int n = 0; n <= NR_ACQ_BACKOFF_AFTER; n++) EXPECT_EQ(0, nr_acq_backoff_captures(n)) << n; /* recovery and a fresh start: no delay */
   EXPECT_EQ(1, nr_acq_backoff_captures(NR_ACQ_BACKOFF_AFTER + 1));
   EXPECT_EQ(2, nr_acq_backoff_captures(NR_ACQ_BACKOFF_AFTER + 2));
-  EXPECT_EQ(NR_ACQ_BACKOFF_MAX, nr_acq_backoff_captures(NR_ACQ_BACKOFF_AFTER + 40)); /* capped: 50 x 20 ms */
+  EXPECT_EQ(NR_ACQ_BACKOFF_MAX, nr_acq_backoff_captures(NR_ACQ_BACKOFF_AFTER + 40)); /* capped: 250 x 20 ms */ 
   EXPECT_EQ(NR_ACQ_BACKOFF_MAX, nr_acq_backoff_captures(1 << 30));
 }
