@@ -72,5 +72,5 @@ Tried and reverted (no measured effect): ticket priority for the acquiring sweep
   test_ldpc_cuda_pool_cpu); nr_td_sim_test timed out (not compared); test_nr_gpu_pass_geo* and test_iq_chan flaky under -j4, pass alone.
 
 ## OTA test for the operator (daytime)
-HEAD dda0cfcddb, 300 s, pairs 415+923, 415+403, 403+508 x2 each + solos. Look at: LOCK_REJECT = 0, device re-init = 0, per cell "CORESET_DISC state=LOCKED" and its
+HEAD 08f5839939 (code f47cf4925b), 300 s, pairs 415+923, 415+403, 403+508 x2 each + solos; plus the A/B of dda0cfcddb vs eff313dcea on overruns and decode p99. Look at: LOCK_REJECT = 0, device re-init = 0, per cell "CORESET_DISC state=LOCKED" and its
 armed_for_s, nid_passes, per cell >128 PRB CRC and decoded PRB vs solo.
