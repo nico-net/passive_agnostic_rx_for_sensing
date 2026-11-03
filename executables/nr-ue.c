@@ -2546,6 +2546,8 @@ void init_NR_UE_threads(PHY_VARS_NR_UE *UE) {
   if (UE->Mod_id > 0) {
     const nr_core_layout_t *L = nr_core_layout();
     rt_core = (L && UE->Mod_id < NR_CL_MAX_CELLS) ? L->rt_cell[UE->Mod_id] : -1;
+    if (rt_core < 0 && L) /* a spare slot (the plan has RT readers for the running cells only): the home anchor, never floating at RT priority over the pool */
+      rt_core = L->anchor;
     LOG_I(PHY, "SENSING: MPCI_RT cell=%d slot thread core=%d (core plan rt_cell)\n", UE->Mod_id, rt_core);
   }
   threadCreate(&UE->main_thread, UE_thread, (void *)UE, thread_name, rt_core, OAI_PRIORITY_RT_MAX);
