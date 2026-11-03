@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_gpu_budget.h"
+extern "C" {
+#include "nr_core_pool.h"
+}
 #include "../../NR_UE_TRANSPORT/nr_pdcch_nid_chunks.h"
 #include <gtest/gtest.h>
 #include <atomic>
@@ -284,6 +287,61 @@ TEST(DiscTicketG4B, CapFollowsMeasuredIdleTimeAndFloorOnlyRaises) {
   }
   nr_gpu_disc_ticket_test_reset(30,nullptr);
 }
+/* OTA 2026-11-03 (415+923): the process-wide discovery budget (pct of a rolling second, pacing us*100/pct) was the single-cell one, so two cells' CSI-RS discovery and nID
+ * sweeps shared ONE cell's 30 %: the nID stage1 took 1.2-8 s per pass instead of 0.56 s solo and a cell banked no CORESET in 150 s. With k cells discovering (the ticket's
+ * 2 s activity, as its cap) the budget is min(100, k*pct); one cell is unchanged. */
+static uint64_t budget_used_in_one_second(int cells) {
+  nr_gpu_budget_test_reset(30);
+  nr_gpu_disc_ticket_test_reset(30,fake_clock);
+  g_fake_us=20000000;
+  for(int c=0;c<cells;++c) {nr_gpu_disc_ticket_acquire(c);nr_gpu_disc_ticket_release();}
+  uint64_t used=0;
+  for(uint64_t now=g_fake_us;now<20000000+1000000;now+=100) {
+    g_fake_us=now;
+    if(nr_gpu_budget_discovery_begin(now)==1) {nr_gpu_budget_discovery_end(now+1000,1000);used+=1000;now+=1000;}
+  }
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+  return used;
+}
+/* OTA 2026-11-03 (415+923, diagnostic build): with two cells the RT jobs of both are in flight so often that a discovery slice, which needed the device free of RT work,
+ * started 4x less often than solo (27466 vs 122653 slices per 150 s, 9 vs 28 s of GPU work; nID passes 14-30 vs 125). Discovery has its own SMs (green context) and the
+ * ticket and budget bound it to k*pct: with two or more discovering cells a slice may start while RT work is in flight; never while another discovery slice is. One cell: as before. */
+static int begin_with_rt_in_flight(int cells) {
+  nr_gpu_budget_test_reset(30);
+  nr_gpu_disc_ticket_test_reset(30,fake_clock);
+  g_fake_us=30000000;
+  for(int c=0;c<cells;++c) {nr_gpu_disc_ticket_acquire(c);nr_gpu_disc_ticket_release();}
+  EXPECT_EQ(nr_gpu_budget_rt_begin(),1);
+  const int r=nr_gpu_budget_discovery_begin(g_fake_us);
+  int second=-1;
+  if(r==1) {second=nr_gpu_budget_discovery_begin(g_fake_us);nr_gpu_budget_discovery_end(g_fake_us+100,100);}
+  nr_gpu_budget_rt_end();
+  if(r==1 && second==1)nr_gpu_budget_discovery_end(g_fake_us+200,100);
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+  return r==1?(second==1?2:1):0;
+}
+/* ... and two discovering cells do not serialise twice: the process-wide ticket is their single flight (sleeping waiters, fair order); the budget admission no longer
+ * holds an exclusive owner across the ticket wait (pair diagnostic: 48 s admission spin + 57 s ticket wait per 150 s for 9 s of GPU work). One cell: as before. */
+TEST(DiscTicketG4B, MultiCellDiscoveryStartsBesideRtSingleCellDoesNot) {
+  EXPECT_EQ(begin_with_rt_in_flight(1),0); /* RT in flight: one cell waits */
+  EXPECT_EQ(begin_with_rt_in_flight(2),2); /* two cells: admitted beside RT, and a second slice may be admitted (the ticket serialises them) */
+}
+TEST(DiscTicketG4B, SingleCellAdmissionStaysExclusive) {
+  nr_gpu_budget_test_reset(30);
+  nr_gpu_disc_ticket_test_reset(30,fake_clock);
+  g_fake_us=40000000;
+  nr_gpu_disc_ticket_acquire(0);nr_gpu_disc_ticket_release();
+  EXPECT_EQ(nr_gpu_budget_discovery_begin(g_fake_us),1);
+  EXPECT_EQ(nr_gpu_budget_discovery_begin(g_fake_us),0);
+  nr_gpu_budget_discovery_end(g_fake_us+100,100);
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+}
+TEST(DiscTicketG4B, BudgetShareScalesWithDiscoveringCells) {
+  EXPECT_LE(budget_used_in_one_second(1),305000u); /* one cell: pct as before */
+  EXPECT_GE(budget_used_in_one_second(1),280000u);
+  EXPECT_GE(budget_used_in_one_second(2),560000u); /* two cells: 2 x pct */
+  EXPECT_LE(budget_used_in_one_second(2),605000u);
+}
 /* fair order between cells in the same state: with both cells waiting behind a holder, the one that used the device less is served first whatever the arrival order */
 TEST(DiscTicketG4B, SameStateCellsAlternateByLeastUse) {
   nr_gpu_disc_ticket_test_reset(100,nullptr);
@@ -317,6 +375,21 @@ TEST(DiscTicket, PreferringCellFirstThenLeastUsedThenArrival) {
   EXPECT_EQ(nr_gpu_budget_discovery_preferred(),1);
   nr_gpu_budget_discovery_prefer_cell(2,0);EXPECT_EQ(nr_gpu_budget_discovery_preferred(),0);
 }
+/* OTA 2026-11-03 (415+923, gdb on the stalled receiver): the ticket was FREE (tk_held=0, no RT in flight, pacing expired) and 4 bulk waiters of both cells slept in an untimed
+ * condvar wait for 107 s: a lost wakeup stopped the nID sweep and the CSI-RS discovery of both cells. Whatever loses a wakeup, a waiter rechecks at least every ms.
+ * Simulated: the holder frees the ticket without the broadcast; the waiter must still get it. */
+TEST(DiscTicket, WaiterRecoversFromALostWakeup) {
+  nr_gpu_disc_ticket_test_reset(100,nullptr);
+  nr_gpu_disc_ticket_acquire_bulk(0);
+  std::atomic<bool> got{false};
+  std::thread w([&] {nr_gpu_disc_ticket_acquire_bulk(1);got=true;nr_gpu_disc_ticket_release();});
+  std::this_thread::sleep_for(std::chrono::milliseconds(20)); /* the waiter is asleep */
+  nr_gpu_disc_ticket_test_release_silently();
+  const auto t0=std::chrono::steady_clock::now();
+  while(!got.load() && std::chrono::steady_clock::now()-t0<std::chrono::milliseconds(500))std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  EXPECT_TRUE(got.load()) << "the waiter slept through a free ticket";
+  if(got.load())w.join(); else {nr_gpu_disc_ticket_acquire(2);nr_gpu_disc_ticket_release();w.join();} /* a real release wakes it */
+}
 /* the cap leaves the idle device free: paced only while the RT work is keeping it busy */
 static uint64_t pace_after_two_cells(bool rt_busy) {
   nr_gpu_budget_test_reset(30);
@@ -333,4 +406,28 @@ static uint64_t pace_after_two_cells(bool rt_busy) {
 TEST(DiscTicket, PacedOnlyWhileRtKeepsTheDeviceBusy) {
   EXPECT_EQ(pace_after_two_cells(false),0u);
   EXPECT_GT(pace_after_two_cells(true),0u);
+}
+/* core-pool stubs (the real ones live in the executable's utils; weak in nr_gpu_budget.c): count the parks of the calling thread */
+static thread_local int t_parks, t_unparks;
+static thread_local bool t_parked;
+extern "C" void nr_pool_site_park(nr_pool_park_t *pk) {pk->held=true;t_parks++;t_parked=true;}
+extern "C" void nr_pool_site_unpark(const nr_pool_park_t *pk) {if(pk->held){t_unparks++;t_parked=false;}}
+/* OTA 2026-11-03 (415+923, DGX): the CSI-RS discovery workers slept in the ticket wait 71 % of the time they held a core-pool token (a pool token that decode
+ * waited for on 55-90 % of its leases). A contended ticket wait now parks the caller's pool lease; an uncontended acquire never touches the pool. */
+TEST(DiscTicket, ContendedWaitParksThePoolLeaseUncontendedDoesNot) {
+  nr_gpu_disc_ticket_test_reset(100,nullptr);
+  t_parks=t_unparks=0;
+  nr_gpu_disc_ticket_acquire(0);
+  EXPECT_EQ(t_parks,0) << "a free ticket must not cost a pool round trip";
+  int w_parks=-1,w_unparks_at_grant=-1,w_unparks=-1;bool w_parked_at_grant=false;
+  std::thread w([&] {nr_gpu_disc_ticket_acquire(1);w_parked_at_grant=t_parked;w_parks=t_parks;w_unparks_at_grant=t_unparks;nr_gpu_disc_ticket_release();w_unparks=t_unparks;});
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  nr_gpu_disc_ticket_release();
+  w.join();
+  EXPECT_EQ(w_parks,1);
+  /* K1 2026-11-03: taking the lease back right after the grant held the ticket through a pool wait (discovery is a low class): nID passes 50-100 -> 5-6.
+   * The lease comes back when the ticket is released. */
+  EXPECT_TRUE(w_parked_at_grant) << "the ticket's GPU slice runs without the pool token";
+  EXPECT_EQ(w_unparks_at_grant,0);
+  EXPECT_EQ(w_unparks,1);
 }

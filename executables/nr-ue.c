@@ -55,6 +55,7 @@ int nr_ue_rx_synced_g = 0;
 /// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage. Per cell (A8): nr_ue_cell_clock.h.
 #include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h"
 #include "common/utils/nr_cell.h"
+#include "PHY/NR_UE_TRANSPORT/nr_lock_verify.h"
 #include "common/utils/nr_cell_dash.h" /* MPCI-DASH P6 CELL_TIMING / P8 SLOT_CELL formatters (lines only when nr_cell_count() > 1) */
 
 // TEMPORARY DIAGNOSTIC (2026-08-05): receive-buffer producer/consumer lag measurement. See
@@ -856,6 +857,18 @@ void dummyWrite(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, int writeBlo
   AssertFatal(writeBlockSize == tmp, "write to reorder function failed %d", tmp);
 }
 
+/* nrue_trash_samples: reads and drops n samples (n <= one slot) of every antenna, moving the stream position without a capture. Caller: UE_thread() acquisition. */
+static void nrue_trash_samples(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int n)
+{
+  c16_t *rxp[UE->frame_parms.nb_antennas_rx];
+  rxp[0] = malloc16(n * sizeof(c16_t));
+  for (int i = 1; i < UE->frame_parms.nb_antennas_rx; i++)
+    rxp[i] = rxp[0];
+  if (nrue_ru_read(UE, timestamp, (void **)rxp, n, UE->frame_parms.nb_antennas_rx) != n && !oai_exit)
+    LOG_W(PHY, "SENSING: acquisition step read short of %d samples\n", n);
+  free(rxp[0]);
+}
+
 /* readFrame: reads the two frames of capture needed for acquisition (or a discard read when toTrash is set) slot by slot from the radio into the UE's rxdata, and emulates the TX side in RFsim.
  *   Returns false (and requests shutdown) on a short read. With ISAC_RX_RECOVER it also reports whether the capture was contiguous (no timestamp jump and no ring epoch change); a non-contiguous capture is discarded by the caller. Callers: UE_thread() (acquisition and the trash reads after a lock change).
  */
@@ -1230,6 +1243,7 @@ void *UE_thread(void *arg)
   long long rx_recover_gap = 0;
   struct timespec rx_recover_start = {0};
   int rx_recover_fast_tries = 0;
+  int acq_captures = 0; /* acquisition captures since the last lock (see the one-slot step before readFrame) */
   int rx_recover_old_target = -1;
   openair0_timestamp_t rx_recover_last_pss_tick = 0;
   const int nb_slot_frame = fp->slots_per_frame;
@@ -1518,6 +1532,14 @@ void *UE_thread(void *arg)
         if (nrue_band_scan_active() && s_band_scan_attempts++ > 0)
           nrue_band_scan_next(UE);
       }
+      /* Captures are whole frames, so after a stream jump the capture phase stays fixed until the next jump: a 20 ms SSB whose last symbols
+       * fall past the end of the 2-frame capture was rejected ("SSB extends beyond buffer") on every attempt, and the cell never relocked
+       * (OTA 2026-11-03 E1, qB1: PCI 923 lost at its first lock, predicted PSS 1214180 / 1221564 of 1228800, ~230 s without a lock).
+       * A failed acquisition moves the next capture by one slot, more than the 4 SSB symbols. */
+      if (acq_captures++ > 0 && !IS_SOFTMODEM_RFSIM) /* shortcut: RFsim keeps its sample clock by the TX writes of readFrame; it has no stream jumps */
+        nrue_trash_samples(UE, &sync_timestamp, get_samples_per_slot(0, fp));
+      for (int k = nr_acq_backoff_captures(acq_captures - 1); k > 0 && !oai_exit; k--) /* a cell that keeps failing: bounded search rate (nr_lock_verify.h) */
+        readFrame(UE, &sync_timestamp, duration_rx_to_tx, true);
       const bool capture_contiguous = readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
       if (oai_exit)
         break;
@@ -1580,6 +1602,7 @@ void *UE_thread(void *arg)
 
     if (stream_status == STREAM_STATUS_UNSYNC) {
       stream_status = STREAM_STATUS_SYNCING;
+      acq_captures = 0;
       const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
       /* Projecting the integrator across the acquisition gap is only meaningful if the integrator
        * is still describing the SAME timing origin. After a fault it is not: a runaway leaves
@@ -2114,6 +2137,15 @@ void *UE_thread(void *arg)
         extern void nr_pbch_diag_counts(unsigned long *ok, unsigned long *fail);
         unsigned long pbch_ok = 0, pbch_fail = 0;
         nr_pbch_diag_counts(&pbch_ok, &pbch_fail);
+        /* FIX1102 B: a lock that never decodes a tracking PBCH is rejected after 2 windows (measured OTA 2026-11-02: 34 of 34 such
+         * locks never decoded one, a working lock decodes from its first window); its beam is skipped by this cell's next searches */
+        NR_CELL_STATIC(nr_lock_verify_t, s_lockv);
+#define s_lockv NR_CELL_REF(s_lockv)
+        const nr_lock_verdict_t lock_verdict = nr_lock_verify_window(&s_lockv, UE->is_synchronized, pbch_ok, pbch_fail,
+                                                                     UE->frame_parms.ssb_index, UE->frame_parms.Nid_cell,
+                                                                     nr_passive_acq_snapshot().pbch_locks, 2);
+        if (lock_verdict == NR_LOCK_VERIFIED)
+          nr_initial_sync_ssb_verified();
         bool rf_collapsed = false, pbch_dead = false;
         if (w >= 0.0) {
           /* Running max with a hard-bounded fall. The previous form ("EMA, but only from windows
@@ -2319,7 +2351,13 @@ void *UE_thread(void *arg)
          * windows; a genuine runaway still trips after 8 (16 s), one reacquisition later than
          * before, while a beam that decodes even one SSB per window resets the count and survives. */
         const int bad_needed = 8;
-        if (s_bad >= bad_needed && UE->is_synchronized) {
+        const bool lock_rejected = lock_verdict == NR_LOCK_REJECT;
+        if ((s_bad >= bad_needed || lock_rejected) && UE->is_synchronized) {
+          if (lock_rejected) {
+            LOG_W(PHY, "SENSING: LOCK_REJECT pci=%d ssb_index=%d: no tracking PBCH decoded since the lock (pbch_fail=%lu) -> re-acquiring this cell, beam skipped\n",
+                  s_lockv.lock_pci, s_lockv.lock_ssb, pbch_fail);
+            nr_initial_sync_reject_ssb(s_lockv.lock_pci, s_lockv.lock_ssb);
+          } else {
           s_fires++;
           LOG_E(PHY,
                 "SENSING: RFSTALL %s (rf_pow=%.2f ref=%.2f pbch_ok=%lu pbch_fail=%lu "
@@ -2331,7 +2369,11 @@ void *UE_thread(void *arg)
            * 52 consecutive failed initial-sync attempts, because there is no signal to acquire --
            * the stream itself is stalled, not merely mis-aligned. The RX stream must be torn down
            * and restarted at the device before any re-sync can succeed. */
-          if (1) { /* stream-level restart never succeeded in any observed case; go straight to re-init */
+          /* FIX1102 B: signal present = the stream is fine, only this cell's timing is lost: re-acquire this cell alone. A device
+           * re-init restarts every cell (OTA 2026-11-02: one cell's losses restarted the other 5 times per run, exit 3 at ~90 s). */
+          if (!rf_collapsed)
+            LOG_W(PHY, "SENSING: RFSTALL signal present: re-acquiring this cell only (no device re-init)\n");
+          else { /* stream-level restart never succeeded in any observed case; go straight to re-init */
             /* A stream-level restart is not enough when the MPM claim itself is gone: every RPC
              * to the device throws (measured: set_gpio_src, then get_timekeeper_time at a 2000 ms
              * timeout). Escalate to a full teardown + re-open, which releases the stale claim and
@@ -2354,6 +2396,7 @@ void *UE_thread(void *arg)
               nr_shutdown_request(3);
               break;
             }
+          }
           }
           UE->is_synchronized = 0;
           stream_status = STREAM_STATUS_UNSYNC;
@@ -2503,6 +2546,8 @@ void init_NR_UE_threads(PHY_VARS_NR_UE *UE) {
   if (UE->Mod_id > 0) {
     const nr_core_layout_t *L = nr_core_layout();
     rt_core = (L && UE->Mod_id < NR_CL_MAX_CELLS) ? L->rt_cell[UE->Mod_id] : -1;
+    if (rt_core < 0 && L) /* a spare slot (the plan has RT readers for the running cells only): the home anchor, never floating at RT priority over the pool */
+      rt_core = L->anchor;
     LOG_I(PHY, "SENSING: MPCI_RT cell=%d slot thread core=%d (core plan rt_cell)\n", UE->Mod_id, rt_core);
   }
   threadCreate(&UE->main_thread, UE_thread, (void *)UE, thread_name, rt_core, OAI_PRIORITY_RT_MAX);

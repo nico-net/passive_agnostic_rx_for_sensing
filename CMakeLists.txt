@@ -968,6 +968,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/MODULATION/nr_sfo_state.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pss_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pss_decim.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_lock_verify.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/sss_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/cic_filter_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
@@ -2516,6 +2517,9 @@ if(ENABLE_TESTS)
   add_test(NAME test_nr_pdcch_nid_worker_duty COMMAND test_nr_pdcch_nid_worker --duty)
   set_tests_properties(test_nr_pdcch_nid_worker_duty PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
+  add_test(NAME test_nr_pdcch_nid_worker_shed COMMAND test_nr_pdcch_nid_worker --shed)
+  set_tests_properties(test_nr_pdcch_nid_worker_shed PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/nid_test_double" TIMEOUT 30)
   foreach(fixture RANGE 1 6)
     add_test(NAME test_nr_pdcch_nid_reference${fixture} COMMAND test_nr_pdcch_nid_algorithm ${fixture})
   endforeach()
@@ -2738,6 +2742,13 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pss_decim)
   add_test(NAME test_nr_pss_decim COMMAND ./test_nr_pss_decim)
 
+  add_executable(test_nr_lock_verify ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_lock_verify_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_lock_verify.c)
+  target_include_directories(test_nr_lock_verify PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_lock_verify PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_lock_verify)
+  add_test(NAME test_nr_lock_verify COMMAND ./test_nr_lock_verify)
+
   add_executable(test_nr_initial_sync_budget ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_initial_sync_budget_test.cc
                                               ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.c)
   target_include_directories(test_nr_initial_sync_budget PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
@@ -2782,6 +2793,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_ul_dmrs_diag PRIVATE GTest::gtest GTest::gtest_main m)
   add_dependencies(tests test_nr_ul_dmrs_diag)
   add_test(NAME test_nr_ul_dmrs_diag COMMAND ./test_nr_ul_dmrs_diag)
+
+  add_executable(test_nr_ul_energy_probe ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_energy_probe_test.cc)
+  target_include_directories(test_nr_ul_energy_probe PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR})
+  target_link_libraries(test_nr_ul_energy_probe PRIVATE GTest::gtest GTest::gtest_main m)
+  add_dependencies(tests test_nr_ul_energy_probe)
+  add_test(NAME test_nr_ul_energy_probe COMMAND ./test_nr_ul_energy_probe)
 
   add_executable(test_nr_ul_rules
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_rules_test.cc)

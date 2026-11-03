@@ -11,6 +11,11 @@ extern "C" {
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
 configmodule_interface_t *uniqCfg=nullptr;
+/* core pool hooks of nr_admit.c (weak there): 1 cell and nothing shed unless --shed overloads a 2-cell pool */
+static int g_cells=1,g_shed_tiers=0,g_shed_notes=0;
+int nr_pool_site_active_cells(void) {return g_cells;}
+int nr_pool_site_shed_tiers(void) {return g_shed_tiers;}
+void nr_pool_site_shed_note(int tier) {(void)tier;g_shed_notes++;}
 void exit_function(const char *,const char *,int,const char *,int) {abort();}
 }
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1;}} while(0)
@@ -27,6 +32,7 @@ int main(int argc,char **argv) {
  bool elastic=argc>1 && !strcmp(argv[1],"--elastic");
  bool device=argc>1 && !strcmp(argv[1],"--device");
  bool duty=argc>1 && !strcmp(argv[1],"--duty");
+ bool shed=argc>1 && !strcmp(argv[1],"--shed");
  setenv("ISAC_GPU_BUDGET","0",1);
  const int batch_size=device?336:64;
  const int dur=device?1:3;
@@ -38,7 +44,7 @@ int main(int argc,char **argv) {
  if(device) {nid_reference_make(7,&b);nid_reference_run(1,&expected);}
  else b.cfg={432,0,0,6,2,14,dur};
  if(elastic) {nr_pdcch_nid_gpu_test_policy(dur,6,batch_size,false,5000,500,10000);nr_pdcch_nid_gpu_test_elastic(3,2);}
- else if(duty)nr_pdcch_nid_gpu_test_policy(dur,2,batch_size,true,5000,100,120);
+ else if(duty || shed)nr_pdcch_nid_gpu_test_policy(dur,2,batch_size,true,5000,100,120);
  else nr_pdcch_nid_gpu_test_policy(dur,device?1:2,batch_size,false,5000,500,10000);
  CHECK(nr_pdcch_nid_gpu_start(36)==0 && nr_pdcch_nid_gpu_running());
  void *lib=dlopen("libpdcch_nid_gpu.so",RTLD_NOW|RTLD_LOCAL);CHECK(lib);
@@ -92,6 +98,18 @@ int main(int argc,char **argv) {
   CHECK(w==2 && window()==2 && shrinks==1 && errors()==0);
   nr_pdcch_nid_gpu_stop();dlclose(lib);
   puts("PASS worker elastic window: grow on a full empty window, partial/refused grow counted, shrink when records exist");return 0;
+ }
+ if(shed) {
+  /* 2 cells, saturated pool, tiers 0-2 shed: a cell without a published CORESET (ACQUIRE) still runs its sweep, it gates every grant of the cell */
+  g_cells=2;g_shed_tiers=3;
+  CHECK(push_batch(true));
+  int n=-1;for(int i=0;i<2000 && n<0;++i) {wait_ms(1);n=nr_pdcch_nid_gpu_records(records,16,&generation);}
+  CHECK(n==1 && runs()==1 && g_shed_notes==0);
+  /* after publication the MAINTAIN recheck is background work again: shed */
+  wait_ms(130);CHECK(push_batch(true));wait_ms(20);
+  CHECK(runs()==1 && g_shed_notes>0 && errors()==0);
+  nr_pdcch_nid_gpu_stop();dlclose(lib);
+  puts("PASS worker shed: ACQUIRE runs under 2-cell overload, MAINTAIN recheck is shed");return 0;
  }
  if(duty) {
   CHECK(push_batch(true));

@@ -2489,11 +2489,12 @@ NR_CELL_STATIC(g_enq_class_cell_t, g_enq_class);
 #define BTIM_ULSWEEP 14  /* UL per-RNTI dci_length sweep, same shape, under ul_length_lock */
 #define BTIM_P2WAIT  15  /* SCANCOST: wait for the Phase-2 lock at the start of post (inside post) */
 #define BTIM_ULWAIT  16  /* SCANCOST: wait for ul_length_lock at the start of ulsweep (inside ulsweep) */
-#define BTIM_N       17
+#define BTIM_DLWAIT  17  /* SCANCOST: wait for g_dl_length_lock at the start of dlsweep (inside dlsweep) */
+#define BTIM_N       18
 static const char *const kBtimName[BTIM_N] = {"fep_llr", "demap", "prepass", "decode",
                                               "chest",   "pdsch", "submit",  "TOTAL",
                                               "pre",     "pbwp",  "csirs",   "post", "rt",
-                                              "dlsweep", "ulsweep", "p2wait", "ulwait"};
+                                              "dlsweep", "ulsweep", "p2wait", "ulwait", "dlwait"};
 typedef _Atomic uint64_t g_btim_ns_cell_t[BTIM_N];
 NR_CELL_STATIC(g_btim_ns_cell_t, g_btim_ns);
 #define g_btim_ns NR_CELL_REF(g_btim_ns)
@@ -2545,7 +2546,7 @@ static inline void btim_add(int k, uint64_t t0)
   }
   const uint64_t d = btim_now() - t0;
   if (nr_a2e_trace()) { /* the current pass's split, copied into its grants (a2p=) */
-    static const int8_t stg[BTIM_N] = {0, 1, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 3, -1, -1};
+    static const int8_t stg[BTIM_N] = {0, 1, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 3, -1, -1, -1};
     if (stg[k] >= 0) nr_a2e_stg[stg[k]] += (uint32_t)d;
   }
   NR_BLIND_CTR_ADD(g_btim_ns[k], d);
@@ -4712,7 +4713,7 @@ static void occasion_reconf_prologue(PHY_VARS_NR_UE *ue, long source_absolute_sl
       const uint64_t old_c0 = atomic_exchange_explicit(&last_c0_unique, c0, memory_order_relaxed);
       const uint32_t slots_per_second = ue->frame_parms.slots_per_frame * 100;
       const bool outside = nr_pdcch_blind_monitor_take_outside_occupancy();
-      if(outside)nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),0,false,true);
+      if(outside)nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_dedicated_current(),0,false,true);
       nr_pdcch_coreset_bank_tick(slot, c0 > old_c0 || outside, 5 * slots_per_second, 30 * slots_per_second);
     }
     nr_pdcch_coreset_bank_dispatch_enter();
@@ -6321,6 +6322,7 @@ NR_CELL_STATIC(uint16_t, s_pbwp_own_size);
   const uint64_t btim_t_dlsw = btim_on ? btim_now() : 0;
   if (dl_uss_auto && dl_geometry_ready) {
     pthread_mutex_lock(&g_dl_length_lock);
+    if (btim_on) btim_add(BTIM_DLWAIT, btim_t_dlsw);
     nr_pdcch_dci_length_bank_t *dl_bank =
         nr_pdcch_dci_length_store_get(&g_dl_length_store, dl_geom, NULL);
 

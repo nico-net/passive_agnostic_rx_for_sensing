@@ -29,4 +29,26 @@ static inline int nr_fep_selfcheck_confirm(int (*cpu)(void *, void *), int (*gpu
     return NR_FEP_SELFCHECK_VOID;
   return memcmp(a, g, bytes) != 0 ? NR_FEP_SELFCHECK_CONFIRMED : NR_FEP_SELFCHECK_VOID;
 }
+
+/* A confirmed mismatch is a GPU fault only when it repeats: OTA 2026-11-03 (415+923, 4 of 8 pair runs) one confirmed mismatch switched the exact
+ * FEP / chest / graph pass off for every cell of the process (decode p50 5 us -> 5 ms, ring overruns). A defective kernel fails every check, so
+ * the path goes off after NR_FEP_SELFCHECK_FAULT_RUN confirmed checks in a row (a matching check restarts the count); the slot of each confirmed
+ * mismatch takes the CPU FEP. */
+enum { NR_FEP_SELFCHECK_FAULT_RUN = 3 };
+static inline int nr_fep_selfcheck_fault(int confirmed_in_a_row) { return confirmed_in_a_row >= NR_FEP_SELFCHECK_FAULT_RUN; }
+
+/* int16 samples of a and b that differ (*n) and the largest |a - b| (*maxabs): what a confirmed mismatch looks like, for its log line. */
+static inline void nr_fep_selfcheck_diff(const void *a, const void *b, size_t bytes, int *n, int *maxabs)
+{
+  const short *x = (const short *)a, *y = (const short *)b;
+  *n = 0;
+  *maxabs = 0;
+  for (size_t i = 0; i < bytes / sizeof(short); i++) {
+    const int d = x[i] > y[i] ? x[i] - y[i] : y[i] - x[i];
+    if (d) {
+      ++*n;
+      if (d > *maxabs) *maxabs = d;
+    }
+  }
+}
 #endif

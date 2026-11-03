@@ -25,6 +25,20 @@
 #include "PHY/TOOLS/tools_defs.h"
 #include "nr-uesoftmodem.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
+#include "nr_lock_verify.h"
+
+/* FIX1102 B: per cell, the beams (PCI, SSB index) whose last lock never decoded a tracking PBCH (nr-ue.c census). The scan
+ * workers run bound to the cell, so they read the cell's own memory; forgotten after 4 searches that lock nothing else. */
+NR_CELL_STATIC_INIT(nr_ssb_reject_t, s_ssb_reject, {.mask = 0, .pci = -1, .misses = 0});
+#define s_ssb_reject NR_CELL_REF(s_ssb_reject)
+void nr_initial_sync_reject_ssb(int pci, int ssb_index)
+{
+  nr_ssb_reject_add(&s_ssb_reject, pci, ssb_index);
+}
+void nr_initial_sync_ssb_verified(void)
+{
+  nr_ssb_reject_init(&s_ssb_reject);
+}
 
 //#define DEBUG_INITIAL_SYNCH
 #define DUMP_PBCH_CH_ESTIMATES 0
@@ -396,13 +410,15 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
   if (n_cand == 0)
     return false;
   /* strongest SSS metric first (stable) */
-  const int last_nid2 = cand_pss[n_cand - 1].nid2;
+  const int last_nid2 = cand_pss[n_cand - 1].nid2, last_pos = cand_pss[n_cand - 1].pos;
   for (int a = 1; a < n_cand; a++)
     for (int b = a; b > 0 && cand_sss[b].metric > cand_sss[b - 1].metric; b--) {
       const pss_detection_result_t tp = cand_pss[b]; cand_pss[b] = cand_pss[b - 1]; cand_pss[b - 1] = tp;
       const sss_detection_result_t ts = cand_sss[b]; cand_sss[b] = cand_sss[b - 1]; cand_sss[b - 1] = ts;
     }
-  if (cand_pss[0].nid2 != last_nid2) /* the frequency-domain symbols and the compensation in force belong to the last accepted candidate: redo the best one */
+  /* the frequency-domain symbols and the compensation in force belong to the last accepted candidate: redo the best one. A pinned search's
+   * candidates share one N_ID_2 (A10: peaks of other beams), so the position decides too, else the PBCH is decoded off another beam's SSB */
+  if (nr_ssb_redo_best(cand_pss[0].nid2, cand_pss[0].pos, last_nid2, last_pos))
     if (ssb_try_candidate(params, &cand_pss[0], &f_off_to_comp) <= 0)
       return false;
   params->comp_state = f_off_to_comp;
@@ -603,6 +619,11 @@ static void nr_scan_ssb(void *arg)
           }
           LOG_I(NR_PHY, "SENSING: SSB_MULTI_PCI gscn=%d frame=%d cand(pci:sss:pbch)=[%s] chosen=%d\n", ssbInfo->gscnInfo.gscn,
                 frame_id, cb, ssbInfo->syncRes.cell_detected ? ssbInfo->nidCell : -1);
+        }
+        if (ssbInfo->syncRes.cell_detected && nr_ssb_reject_skip(&s_ssb_reject, ssbInfo->nidCell, ssbInfo->ssbIndex)) {
+          LOG_I(NR_PHY, "SENSING: SSB_LOCK_SKIP pci=%d ssb_index=%d: the last lock on this beam decoded no tracking PBCH; next candidate\n",
+                ssbInfo->nidCell, ssbInfo->ssbIndex);
+          ssbInfo->syncRes.cell_detected = false;
         }
         if (!ssbInfo->syncRes.cell_detected)
           LOG_I(NR_PHY,
@@ -951,6 +972,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
     }
   }
 #undef s_pinned_fail
+  nr_ssb_reject_search_done(&s_ssb_reject, res != NULL, 4);
   clock_gettime(CLOCK_MONOTONIC, &scan_t1);
   LOG_I(NR_PHY, "SENSING: SYNC_SCAN ms=%.1f gscn=%d ant=%d frames=%d decim=%s detected=%d\n",
         (scan_t1.tv_sec - scan_t0.tv_sec) * 1e3 + (scan_t1.tv_nsec - scan_t0.tv_nsec) / 1e6, numGscn, scan_fp.nb_antennas_rx,

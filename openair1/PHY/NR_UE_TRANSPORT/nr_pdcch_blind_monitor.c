@@ -1596,7 +1596,8 @@ static void nid_budget_feedback(void)
         || nr_pdcch_coreset_bank_readmit_blocked(r->nid,r->grid_rb,r->groups);
     verified&=ok;
   }
-  nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_current(),generation,verified,false);
+  /* dedicated epoch, not the cell epoch: a SOFT RX_RECOVERY (timing gap, same grid) every few seconds restarted the sweep window and discarded every run (FIX1102) */
+  nr_pdcch_nid_gpu_feedback(nr_cfg_epoch_dedicated_current(),generation,verified,false);
 }
 
 /* nr_pdcch_blind_monitor_discovered_poll: periodic poll of the discovery sources (GPU records or the discovery file) and of the catalogue walk: loads new CORESETs, banks those already verified, and starts the next unverified CORESET as a dwell (saving and replacing the root configuration geometry).

@@ -1283,7 +1283,9 @@ int main(int argc, char **argv)
     /* multi-PCI (A8): the cells to serve (inventory + admission) before the core plan, which gives each one its RT reader. No inventory: 1, and
      * nr_core_layout_init_n(.., 1) is nr_core_layout_init (byte-identical CORE_PLAN line). */
     g_ncells = mpci_plan_cells(argc, argv, radio);
-    nr_core_layout_init_nf(true, radio, g_ncells, radio && g_ncells > 1); /* CHANPOOL: several cells on a radio = a wideband feed reader in the plan */
+    /* the plan serves the cells that run (g_nplan), not the spare slots: OTA 2026-11-03 (415+923 + 1 spare, DGX) the spare's RT core (7) sat idle
+     * while the pair's decode waited for a pool token on 71-90 % of leases. A spare's slot thread sits on the home anchor (nr-ue.c) until a cell takes it. */
+    nr_core_layout_init_nf(true, radio, g_nplan, radio && g_ncells > 1); /* CHANPOOL: several cells on a radio = a wideband feed reader in the plan */
     setenv("ISAC_LOG_ASYNC", "1", 0); setenv("ISAC_CSIRS_DISC", "1", 0); setenv("ISAC_GPU_BUDGET", "1", 0); setenv("ISAC_RECONF", "1", 0); /* read by shared code (LDPC pool, GPU budget) */
     /* USRP driver (hardware radio shared with the gNB): site defaults of the receiver */
     setenv("ISAC_RX_RECOVER", "1", 0); setenv("ISAC_USRP_START_TIMEOUT_MS", "2200", 0);

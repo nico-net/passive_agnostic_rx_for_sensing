@@ -93,3 +93,21 @@ TEST(FepSelfcheck, ThreeCallsCpuGpuCpu)
   confirm(r);
   EXPECT_EQ(3, r.calls);
 }
+
+/* OTA 2026-11-03 (415+923, 4 of 8 pair runs): ONE confirmed mismatch switched the GPU FEP / chest / graph pass off for every cell for the rest
+ * of the run (decode p50 5 us -> 5 ms, ring overruns, sensing drops). A GPU fault repeats; it is declared only after a run of confirmed checks. */
+TEST(FepSelfcheck, FaultNeedsConfirmedChecksInARow)
+{
+  EXPECT_FALSE(nr_fep_selfcheck_fault(1));
+  EXPECT_FALSE(nr_fep_selfcheck_fault(NR_FEP_SELFCHECK_FAULT_RUN - 1));
+  EXPECT_TRUE(nr_fep_selfcheck_fault(NR_FEP_SELFCHECK_FAULT_RUN));
+}
+
+TEST(FepSelfcheck, DiffCountsDifferingSamplesAndLargestStep)
+{
+  int16_t a[8] = {0, 1, 2, 3, -4, 5, 6, 7}, b[8] = {0, 2, 2, 3, 4, 5, 6, 7};
+  int n = -1, mx = -1;
+  nr_fep_selfcheck_diff(a, b, sizeof(a), &n, &mx);
+  EXPECT_EQ(2, n);
+  EXPECT_EQ(8, mx);
+}

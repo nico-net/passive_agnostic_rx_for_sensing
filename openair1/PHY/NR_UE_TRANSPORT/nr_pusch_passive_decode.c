@@ -63,6 +63,7 @@
 #include "nr_pusch_passive_queue.h" // nr_pusch_passive_queue_pool_copy_next
 #include "nr_snr_gate.h"
 #include "nr_ul_dmrs_diag.h" // UL_DMRS_DIAG
+#include "nr_ul_energy_probe.h" // ULEN
 #include "PHY/NR_TRANSPORT/nr_sch_dmrs.h" // get_delta
 #include "nr_pdcch_ul_interp_sweep.h" // gap item 2: nr_pusch_ul_energy_span/nr_pusch_ul_dmrs_pin_set
 
@@ -3215,6 +3216,155 @@ static void ul_dmrs_diag_maybe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, const 
   atomic_store_explicit(&busy, false, memory_order_release);
 }
 
+/* ---- ULEN: per-grant signal-level check, one grant in PASSIVE_ULEN_EVERY per consumer thread, AFTER the verdict. Re-does the FFT of the grant's
+ * symbols from a copy of the live IQ ring at the timing the decode applied, then logs (all RX antennas pooled):
+ *   e_sched_dmrs_db  mean energy per RE of the pilot REs of the scheduled PRBs on the grant's DM-RS symbols
+ *   e_sched_data_db  mean energy per RE of all REs of the scheduled PRBs on the grant's other symbols
+ *   e_unsched_db     the same symbols over the UL BWP PRBs outside this grant (2 PRBs trimmed at each BWP edge: PUCCH); other users' PRBs are NOT
+ *                    excluded (the receiver keeps no per-slot list of decoded grants), so rise_db is a lower bound
+ *   rise_db          e_sched_data - e_unsched (e_sched_dmrs - e_unsched on pilot REs when the grant has no data symbol)
+ *   dmrs_corr / dmrs_corr_null / best_off   best normalised DM-RS correlation over +-2 CP of timing (nr_ul_energy_probe.h), the same with a wrong
+ *                    scrambling id (noise floor of the same search), and the timing (samples, + = window earlier, like ta=) where it peaked
+ * (the energy of the grant's PRBs in a slot without UL grant is not measured: the receiver cannot cheaply tell which slot that is.)
+ * DECISION RULE. rise_db ~ 0 and dmrs_corr ~ dmrs_corr_null: no UE energy at our position (UE too weak here).
+ *                rise_db clearly > 0 but dmrs_corr ~ null at every offset: energy is there, pilot or allocation is wrong.
+ *                dmrs_corr >> null at best_off != 0: timing (TA) is wrong, apply ta + best_off.
+ * CP-OFDM only (the pilot generator is the CP-OFDM one). Thread-local scratch, no allocation after the first sampled grant of a thread. */
+#define PASSIVE_ULEN_EVERY 32
+#define PASSIVE_ULEN_MAXD 4
+static void ul_en_maybe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, const nr_pdcch_blind_ul_result_t *g, uint64_t abs_slot,
+                        const nr_pusch_passive_out_t *out, double fo_hz)
+{
+  static __thread unsigned n_seen;
+  static __thread c16_t *iq[PASSIVE_UL_MAX_ANT], *fd, *pil[2];
+  static __thread size_t iq_cap, fd_cap, pil_cap;
+  PHY_VARS_gNB *gnb = (ctx >= 0 && ctx < NR_PUSCH_PASSIVE_MAX_CTX) ? g_gnb[ctx] : NULL;
+  if (!gnb || !g || !abs_slot || g->num_rb < 1 || g->num_symbols < 1 || g->transform_precoding) return;
+  if (out->status != NR_PUSCH_PASSIVE_OK && out->status != NR_PUSCH_PASSIVE_CRC_FAIL) return;
+  if (++n_seen % PASSIVE_ULEN_EVERY) return;
+  const NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
+  const int nant = g_gnb_nant, N = fp->ofdm_symbol_size, spf = fp->slots_per_frame, sps = fp->symbols_per_slot;
+  const int rb0 = g->bwp_start + g->start_rb, rb1 = rb0 + g->num_rb;
+  if (nant < 1 || nant > PASSIVE_UL_MAX_ANT || rb1 > fp->N_RB_UL) return;
+  int dsym[PASSIVE_ULEN_MAXD], nd = 0;
+  for (int m = g->start_symbol; m < g->start_symbol + g->num_symbols && m < sps; m++)
+    if ((g->ul_dmrs_symb_pos & (1u << m)) && nd < PASSIVE_ULEN_MAXD) dsym[nd++] = m;
+  if (nd == 0) return;
+  const uint32_t pad = (uint32_t)(2 * N);
+  const size_t len = (size_t)get_samples_per_slot(slot, fp) + 2 * pad;
+  const long prod0 = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire);
+  if (len >= (size_t)fp->samples_per_frame || !nr_pusch_queue_snapshot_fresh(prod0, (long)abs_slot, spf) || prod0 < (long)abs_slot + 1) return;
+  const int nre = g->dmrs_config_type == 0 ? 6 : 4;
+  const size_t fd_need = ((size_t)PASSIVE_ULEN_MAXD * nant + 1) * N, pil_need = (size_t)PASSIVE_ULEN_MAXD * nre * fp->N_RB_UL;
+  if (len > iq_cap || !iq[nant - 1] || fd_need > fd_cap || pil_need > pil_cap) {
+    for (int a = 0; a < PASSIVE_UL_MAX_ANT; a++) { free(iq[a]); iq[a] = NULL; }
+    free(fd); free(pil[0]); free(pil[1]); fd = pil[0] = pil[1] = NULL;
+    iq_cap = fd_cap = pil_cap = 0;
+    void *q[4] = {NULL, NULL, NULL, NULL};
+    bool ok = true;
+    for (int a = 0; ok && a < nant; a++) { ok = posix_memalign(&q[0], 32, len * sizeof(c16_t)) == 0; iq[a] = (c16_t *)q[0]; q[0] = NULL; }
+    ok = ok && posix_memalign(&q[1], 32, fd_need * sizeof(c16_t)) == 0;
+    fd = (c16_t *)q[1];
+    ok = ok && posix_memalign(&q[2], 32, pil_need * sizeof(c16_t)) == 0;
+    pil[0] = (c16_t *)q[2];
+    ok = ok && posix_memalign(&q[3], 32, pil_need * sizeof(c16_t)) == 0;
+    pil[1] = (c16_t *)q[3];
+    if (!ok) return; /* partial buffers stay owned; freed by the next resize, caps stay 0 so that happens */
+    iq_cap = len; fd_cap = fd_need; pil_cap = pil_need;
+  }
+  const uint32_t origin = (uint32_t)(((int64_t)get_samples_slot_timestamp(fp, slot) + fp->samples_per_frame - pad) % fp->samples_per_frame);
+  for (int a = 0; a < nant; a++) {
+    const c16_t *src = (const c16_t *)ue->common_vars.rxdata[a];
+    if (!src) return;
+    const size_t first = len < (size_t)(fp->samples_per_frame - origin) ? len : (size_t)(fp->samples_per_frame - origin);
+    memcpy(iq[a], src + origin, first * sizeof(c16_t));
+    if (first < len) memcpy(iq[a] + first, src, (len - first) * sizeof(c16_t));
+  }
+  if (!nr_pusch_queue_snapshot_fresh(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_acquire), (long)abs_slot, spf)) return;
+  passive_ul_snapshot_t sn;
+  memset(&sn, 0, sizeof(sn));
+  sn.origin = origin; sn.length = (uint32_t)len; sn.valid = true;
+  for (int a = 0; a < nant; a++) sn.iq[a] = iq[a];
+
+  const int port = get_dmrs_port(0, g->dmrs_ports) < 0 ? 0 : get_dmrs_port(0, g->dmrs_ports);
+  const int delta = get_delta((uint8_t)port, (uint8_t)g->dmrs_config_type);
+  int re_off[6];
+  for (int j = 0; j < nre; j++) re_off[j] = g->dmrs_config_type == 0 ? 2 * j + delta : 6 * (j / 2) + (j % 2) + delta;
+  /* unscheduled band: the UL BWP minus this grant, trimmed at the edges */
+  int bw0 = g->bwp_start, bw1 = g->bwp_start + (g->bwp_size > 0 ? g->bwp_size : fp->N_RB_UL);
+  if (bw1 > fp->N_RB_UL) bw1 = fp->N_RB_UL;
+  if (bw1 - bw0 > 16) { bw0 += 2; bw1 -= 2; }
+
+  double s_dm = 0, s_da = 0, u_dm = 0, u_da = 0;
+  uint64_t c_dm = 0, c_da = 0, cu_dm = 0, cu_da = 0;
+  const c16_t *rows[PASSIVE_ULEN_MAXD * PASSIVE_UL_MAX_ANT];
+  c16_t *scratch = fd + (size_t)PASSIVE_ULEN_MAXD * nant * N;
+  int di = 0;
+  for (int m = g->start_symbol; m < g->start_symbol + g->num_symbols && m < sps; m++) {
+    const bool isd = (g->ul_dmrs_symb_pos & (1u << m)) != 0;
+    if (isd && di >= nd) continue; /* more DM-RS symbols than are correlated: skipped for the energies too */
+    for (int a = 0; a < nant; a++) {
+      c16_t *dst = isd ? fd + ((size_t)di * nant + a) * N : scratch;
+      if (!passive_snapshot_fep_s(&sn, fp, a, dst, (unsigned char)m, slot, out->ta_applied_samples, fo_hz)) return;
+      if (isd) {
+        rows[di * nant + a] = dst;
+        nr_ulen_energy_acc(dst, N, fp->first_carrier_offset, rb0, rb1, rb1, rb1, re_off, nre, &s_dm, &c_dm);
+        nr_ulen_energy_acc(dst, N, fp->first_carrier_offset, bw0, bw1, rb0, rb1, re_off, nre, &u_dm, &cu_dm);
+      } else {
+        nr_ulen_energy_acc(dst, N, fp->first_carrier_offset, rb0, rb1, rb1, rb1, NULL, 12, &s_da, &c_da);
+        nr_ulen_energy_acc(dst, N, fp->first_carrier_offset, bw0, bw1, rb0, rb1, NULL, 12, &u_da, &cu_da);
+      }
+    }
+    if (isd) di++;
+  }
+  /* pilots for the nd DM-RS symbols: the grant's id and a wrong one */
+  const c16_t *pr[2][PASSIVE_ULEN_MAXD * PASSIVE_UL_MAX_ANT];
+  for (int d = 0; d < nd; d++)
+    for (int c = 0; c < 2; c++) {
+      const uint32_t *gold = nr_gold_pusch(fp->N_RB_UL, sps, c ? (g->ul_dmrs_scrambling_id + 0x1357) & 0xFFFF : g->ul_dmrs_scrambling_id, g->nscid, slot, dsym[d]);
+      c16_t *p = pil[c] + (size_t)d * nre * fp->N_RB_UL;
+      if (!gold) return;
+      nr_pusch_dmrs_rx(NR_NORMAL, gold, p, (unsigned short)(1000 + port), 0, (unsigned short)fp->N_RB_UL, 0, (uint8_t)g->dmrs_config_type, 1 << 14);
+      for (int a = 0; a < nant; a++) pr[c][d * nant + a] = p;
+    }
+  int taus[NR_ULEN_MAX_TAU], ntau = 0;
+  const int step = N / 64 > 0 ? N / 64 : 1;
+  int half = 2 * fp->nb_prefix_samples / step;
+  if (half > (NR_ULEN_MAX_TAU - 1) / 2) half = (NR_ULEN_MAX_TAU - 1) / 2;
+  taus[ntau++] = 0;
+  for (int i = 1; i <= half; i++) { taus[ntau++] = i * step; taus[ntau++] = -i * step; }
+  int best_off = 0, null_off = 0;
+  const double corr = nr_ulen_corr_best(rows, pr[0], nd * nant, N, fp->first_carrier_offset, rb0, g->num_rb, re_off, nre, taus, ntau, &best_off);
+  const double corr_null = nr_ulen_corr_best(rows, pr[1], nd * nant, N, fp->first_carrier_offset, rb0, g->num_rb, re_off, nre, taus, ntau, &null_off);
+  const double e_dm = nr_ulen_db(s_dm, c_dm), e_da = nr_ulen_db(s_da, c_da);
+  const double e_un = cu_da ? nr_ulen_db(u_da, cu_da) : nr_ulen_db(u_dm, cu_dm);
+  const double rise = cu_da ? (c_da ? e_da - e_un : -99.0) : e_dm - e_un;
+  LOG_A(PHY, "SENSING: ULEN rnti=0x%04x slot=%lu mcs=%u prb=%d+%d S=%d L=%d e_sched_dmrs_db=%.1f e_sched_data_db=%.1f e_unsched_db=%.1f"
+             " rise_db=%.1f dmrs_corr=%.3f dmrs_corr_null=%.3f best_off=%d ta=%d crc=%d snr_db=%.1f seg=%d/%d tbl=%u qm=%u\n",
+        g->rnti, (unsigned long)abs_slot, (unsigned)g->mcs, rb0, g->num_rb, g->start_symbol, g->num_symbols, e_dm, e_da, e_un, rise,
+        corr, corr_null, best_off, out->ta_applied_samples, out->status == NR_PUSCH_PASSIVE_OK, out->snr_db, out->segments_ok,
+        out->segments_tried, (unsigned)out->tbl, (unsigned)out->qam_mod_order);
+  /* ULPROF: where the slot's energy actually is (antenna 0): per symbol over the whole UL carrier, and per eighth of the carrier over
+   * the 14 symbols (dB). Tells a quiet UL slot (all ~floor), a DL/special slot (symbols high), and energy at other PRBs than the grant
+   * (one eighth high, grant's eighth at the floor = PRB mapping, else = no UE heard). Same 1/32 sampling as ULEN. */
+  double es[14] = {0}, eo[8] = {0};
+  uint64_t co[8] = {0};
+  const int nrb = fp->N_RB_UL;
+  for (int m = 0; m < sps && m < 14; m++) {
+    if (!passive_snapshot_fep_s(&sn, fp, 0, scratch, (unsigned char)m, slot, out->ta_applied_samples, fo_hz)) return;
+    double ss = 0;
+    uint64_t cs = 0;
+    nr_ulen_energy_acc(scratch, N, fp->first_carrier_offset, 0, nrb, 0, 0, NULL, 12, &ss, &cs);
+    es[m] = nr_ulen_db(ss, cs);
+    for (int o = 0; o < 8; o++) nr_ulen_energy_acc(scratch, N, fp->first_carrier_offset, nrb * o / 8, nrb * (o + 1) / 8, 0, 0, NULL, 12, &eo[o], &co[o]);
+  }
+  char buf[128], bo[64];
+  int n = 0, k = 0;
+  for (int m = 0; m < sps && m < 14; m++) n += snprintf(buf + n, sizeof(buf) - n, "%.0f,", es[m]);
+  for (int o = 0; o < 8; o++) k += snprintf(bo + k, sizeof(bo) - k, "%.0f,", nr_ulen_db(eo[o], co[o]));
+  LOG_A(PHY, "SENSING: ULPROF rnti=0x%04x slot=%lu rb=%d+%d nrb=%d sym_db=%s oct_db=%s\n", g->rnti, (unsigned long)abs_slot, rb0, g->num_rb, nrb, buf, bo);
+}
+
 /* The per-grant probe lives HERE, wrapping the decode, rather than in a caller: there are two
  * callers now (the in-line uplink hook and the deferred queue's consumer) and a probe that only one
  * of them carries goes silent exactly when the configuration changes -- which is when it is most
@@ -3280,6 +3430,8 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
 
   if (!t_solver_probe && !cfr_only && g != NULL && out != NULL && !nr_ul_layout_is_probe(g) && !nr_ul_layout_is_trial(g))
     ul_dmrs_diag_maybe(ue, ctx, slot, g, abs_slot, ta_offset_samples, out, fo_hz);
+  if (!t_solver_probe && !cfr_only && g != NULL && out != NULL && !nr_ul_layout_is_probe(g) && !nr_ul_layout_is_trial(g))
+    ul_en_maybe(ue, ctx, slot, g, abs_slot, out, fo_hz);
 
   if (!t_solver_probe && (nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
                     out->status == NR_PUSCH_PASSIVE_ZERO_TB)) {

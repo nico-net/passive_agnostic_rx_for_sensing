@@ -5788,3 +5788,73 @@ Report and recipe: `docs/superpowers/reports/fix1102/mpci2/` (MPCI2.md, wide.sh,
 - Batching (Part B) only after (3) is understood. The inflight-2+ share in the 2-PCI run is not measured `[HYPOTHESIS]`.
 - Loud failure when GPU modules are missing.
 - Later: PUCCH blind detector, SPS/CG activation-DCI counting, UL SNR estimator check.
+
+## 40. Multi-PCI daytime fixes and evening A/Bs, 2026-11-03 (DGX spark-74c3 + X410 34B2AF1, cells 415 @3680.01 MHz + 923; fix1102/* branches, not merged, not pushed)
+All OTA numbers: DGX + X410, 4 RX, pair 415+923 in one process (`mpci_cells/v415_t923.json`), 240 s per run, MPCI_20261025.env, per cell, never pooled across cells.
+Single runs at variable daytime/evening load: the same build swings up to 5x between runs, so read campaign means, not single runs.
+
+### 40.1 Branch fix1102/mpci-fepcheck (from fix1102/mpci-pbch 762955c453; worktree wt/rr-fix-mpci-pbch)
+Fixes `[MEASURED OTA]`:
+- 4137b8afbb: the GPU FEP self-check switches the GPU FEP off only after 3 confirmed mismatches in a row (a single confirmed one killed it on air).
+- 5b7bc74b7f, a96a86e0c0: a cell that keeps failing acquisition backs off (first 4 attempts back to back, then 1, 2, 4 ... up to 250 discard reads, about 5 s), and drops 1 slot before each re-capture. About 30 later losses all relocked; 415 next to an absent partner is back to 1.3-1.5 s per search pass.
+- 1da86b4264: the pool never puts idle workers on any cell's RT reader core or on the feed core. Kept by operator decision, although pairs lost the borrowed capacity.
+- 9d2196b973: RT cores only for running cells (spare slots on the anchor): pool 9 -> 10 tokens.
+- 21d6663ca0 + fd224ecdf4: a thread waiting for the GPU discovery ticket parks its pool token and gets it back at the ticket's release (v1 got it back at the grant: nID passes collapsed to 5-11). Campaign L: 415 sensing drops 49.5 % -> 12-18 %, nID passes 66 -> 117-145.
+
+Diagnostics (revert before any merge): 80f42bc6fe ULEN (UL energy/DM-RS probe), 2534432676 ULPROF (per-symbol and per-eighth energy), 11119f614a ULEN crc/snr fields, 5f24e5deb3 BTIM `dlwait`.
+
+### 40.2 Cause of the pair PDCCH drops `[MEASURED OTA + /proc schedstat, campaigns M-R]`
+- Pool cores: only 2 of 10 are fast (X925) in a pair. RT readers, feed, uhd_ctrl, DPDK and isolcpus 15-19 take the rest. Solo has 4 of 6.
+  Scan fep_llr is 51 us solo vs 108-150 us in pairs.
+- Home cores: almost every unleased thread of both cells (decode workers between jobs, UL, discovery, solvers, logAsync, Tpool, RT-prio DL/UL actors) runs on 2 slow cores (0, 14).
+  These threads wait for a CPU 9-21 % of their time.
+- Scan threads: about 1,400 migrations per second (involuntary switches = migrations); a lease is acquired per job and released whenever the queue empties or anyone waits.
+- Lock stalls: a PDCCH lock holder preempted on the home cores, or waiting for its token back, stalls the other scan consumer. BTIM `dlsweep` peaks are almost all `dlwait`, the wait for the lock (38.6 of 38.9 ms in N1). Phase-2 `p2wait` reaches 0.1-0.7 ms mean and 100-320 ms peaks.
+- One run in three on BOTH builds has a long Phase-2 lock episode: 415 drops 130-190k, p2wait max 200-320 ms (Q2, R3, R4). Cause not found.
+- D2 (cap the DCI-length sweep) was dropped: the sweep already rotates with a resumable budget, and its peaks are lock waits, not work.
+
+### 40.3 Scheduling experiments
+- fix1102/sched (01b43674c4 speed tiers + RETRY on fast cores; 7c735015c2 keep the lease across queued jobs while nobody waits): no gain. O1-O3 vs N1/O2: same waits and migrations. Somebody always waits in a pair, so the lease is still released.
+- fix1102/home 01d8dd39df (experiment: home 2 -> 4 per pair, pool 10 -> 8): home waits fall to 1-4 %, but decode waits for a token in 88 % of jobs (p99 32 ms) and A2's 415 sensing drops reach 51 %. It moves the shortage, it does not remove it.
+- fix1102/split f41869892f (adaptive split: every 4 s, one free core at a time toward the side waiting more; bounds; 2-window confirmation).
+  Campaign Q (3 split vs 3 base, alternating): PDCCH drops 415+923 mean 49k vs 109k (-55 %); 415 only 14k vs 64k; scan CPU wait 6.6-11.4 vs 12-18 %. Sensing drops not better; overruns no different.
+  In Q1 both sides settle at about 20 % waiting, i.e. a real CPU shortage. Known flaws: oscillation (7 moves in Q5), windows reading 0.0 %/0.0 %.
+
+### 40.4 PDCCH front end on the GPU (fix1102/pdcch-gpu-exact 4210b63864 + 414c938a62; combo with the split = fix1102/combo 6117d37235)
+- `[OFFLINE VERIFIED, DGX replay]` GPU chest + equalisation + LLR are bit-exact with the CPU: 100.000 % on both 415 recordings (110,592/110,592 LLRs each); exact on 26,000/30,000 occasions of the big dump (the other 4,000 predate bfba6aebb3); 600/600 synthetic edge cases.
+  Self-check: first 32 GPU runs and every 16th; off after 3 confirmed mismatches in a row. Cost gate: GPU only while its call takes less thread CPU than the CPU chain.
+- `[MEASURED, DGX replay, capture b, 48 RB, 4 RX]` CPU fep_llr 53 us = FFT 36 us + LLR chain 14 us. In the receiver a GPU call costs 120 us wall and 62-96 us of thread CPU, so the gate keeps 4,955 of 5,318 occasions on the CPU: no saving at 48 RB.
+  The real saving needs the exact GPU FFT and the LLR kernel fused in one pass, without readback. Not started; it needs an operator decision.
+- `[MEASURED OTA, campaign R, combo vs base x3, evening]`
+  - combo fep_llr 150-187 us vs 120-136 us;
+  - GPU traffic 2.5-9.7 GB per run vs 0, and 196k pacer refusals in R3;
+  - R1: 21 channelizer overruns (954 ms gap) and 38 SHMIQ overruns. Base runs had 0 channelizer overruns.
+  - Drops: equal within noise. Low evening load: 415 accepts 12-35k vs 50-116k in the afternoon.
+  - Verdict: do not enable as is; keep the split, re-test the split alone at daytime load.
+- The `PDCCH_GPU_LLR` summary line prints only with ISAC_PDCCH_SCAN_TIMING (in scan_timing_note), so it was absent from campaign R.
+
+### 40.5 UL `[MEASURED OTA]`
+- 415: UEs are heard and the geometry is right. The strong RNTI 0x4698 (M1 15:16) had 1,899 attempts, 892 above 20 dB, probe rise 42-48 dB exactly on the granted PRBs, DM-RS corr 0.92 vs null 0.15, and 0 CRC.
+  The decoder used MCS table 0 in 1,859 attempts; the same RNTI decodes on the DL with table 1 (qam256). UCI-on-PUSCH search exists (nr_pusch_uci_blind.c) but learned nothing (0 learned_ok).
+- fix1102/ul-uci 64e6fb0492: a high-SNR rv0 CRC failure is retried under the other MCS tables, learned per RNTI after 2 passes; about 0.3 % of a core (CODE-READ estimate).
+  UL1 (17:07) inconclusive: the strong UE was absent (2 high-SNR attempts). Needs a run while a strong UE is active.
+  Next suspects if it fails: TBS from the DM-RS count, the data scrambling ID.
+- 923: no UE energy anywhere: 225/229 sampled UL slots are flat at the floor on every symbol and every eighth of the carrier. Coverage at our position, not a bug.
+- The UL PUSCH FEP and LDPC are already on the GPU (UL_GPU_FEP about 78k calls; UL_GPU_LDPC about 62k TBs, about 7 % CPU fallback at the 15 % cap).
+  The CPU part (chest, demod, UCI search, retries) is about 960 us per attempt; in O1-O3 the UL threads use 10-16 % CPU each.
+
+### 40.6 Process notes
+- Every build tree must have ALL module .so files (17), or the receiver silently falls back (CPU channelizer -> overruns; no dedicated grants without the GPU PDCCH modules). Check `ls *.so | wc -l` against the base build.
+- Agents build under `flock -s heavy.lock`; OTA campaigns hold it exclusively, which is most of the agents' elapsed time. One agent built during an OTA run despite the rule.
+- abq.py sensing-drop ratio: drops / (queued + drops). Earlier dropped/queued figures (105 %) were wrong.
+- Solo 415 without a PCI pin locks 442 at 3680.01 MHz (MS415, MS415r).
+- Operator rules confirmed today: no Spark/GB10 tuning, no fixed cores per activity, portable code, sensing stays off the GPU.
+
+### 40.7 Open, and pending operator decisions
+- PENDING DECISION: two versions/modes. (1) Traffic/geometry: every DCI and PUCCH on every PCI, no PDSCH/PUSCH decode. (2) Sensing: reference signals everywhere plus data-aided PDSCH on a budgeted subset.
+  `[INFERRED]` Decoding every grant on every PCI is not realistic beyond about 2 busy cells on one DGX; PDCCH + PUCCH for many PCIs is plausible.
+  Until decided, the PDSCH-payload rule (never trade CRC for latency) stands.
+- PENDING DECISION: fused exact GPU FFT + PDCCH LLR (the only GPU route that cuts scan CPU at 48 RB).
+- Split: fix the oscillation and the 0.0 % windows; re-test at daytime load.
+- The one-in-three Phase-2 lock episode (40.2) on both builds: find what holds the lock for 100-320 ms.
+- UL table test with a strong UE present. 508 CORESET never found (single-cell). ctest on today's commits not run on fix1102/mpci-fepcheck.

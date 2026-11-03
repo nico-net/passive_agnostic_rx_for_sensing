@@ -185,12 +185,14 @@ static void *worker(void *arg)
       static const char *names[] = {"SEARCHING", "LOCKED", "NO_TRAFFIC", "MISSED", "SYNC_POOR"};
       uint64_t off = 0, tak = 0, emp = 0; float nf = 0;
       nr_pdcch_nid_capture_metrics(&off, &tak, &emp, &nf);
-      LOG_A(PHY, "SENSING: CORESET_DISC state=%s reason=%s armed_for_s=%.1f window_probed=%llu window_ungranted_pdsch_like_rbslots=%llu (excl. CORESET#0) bank=%d nid_passes=%llu capture offered/taken/empty=%llu/%llu/%llu recoveries=%d%s sync_q=%s sync_step_med=%d sync_step_p90=%d reacquires=%d\n",
+      char nid_diag[200] = "";
+      nr_pdcch_nid_gpu_diag(nid_diag, sizeof(nid_diag));
+      LOG_A(PHY, "SENSING: CORESET_DISC state=%s reason=%s armed_for_s=%.1f window_probed=%llu window_ungranted_pdsch_like_rbslots=%llu (excl. CORESET#0) bank=%d nid_passes=%llu capture offered/taken/empty=%llu/%llu/%llu recoveries=%d%s sync_q=%s sync_step_med=%d sync_step_p90=%d reacquires=%d%s\n",
             names[g.cd.state], o.reason, g.cd.armed ? in.now_s - g.cd.armed_s : 0.0, (unsigned long long)in.window_probed,
             (unsigned long long)in.window_rbslots, in.bank_count, (unsigned long long)nr_pdcch_nid_gpu_passes(),
             (unsigned long long)off, (unsigned long long)tak, (unsigned long long)emp, g.cd.recoveries,
             o.recover ? " -> RECOVER" : o.reacquire ? " -> REACQUIRE_SYNC" : o.rearm ? " -> REARM" : "",
-            sq < 0 ? "OFF" : sq == 2 ? "POOR" : sq == 1 ? "DEGRADED" : "GOOD", sq_med, sq_p90, g.cd.reacquires);
+            sq < 0 ? "OFF" : sq == 2 ? "POOR" : sq == 1 ? "DEGRADED" : "GOOD", sq_med, sq_p90, g.cd.reacquires, nid_diag);
       if (o.reacquire) nr_syncq_request_reacquire();
       if (o.rearm) { nr_syncq_clamp_release(); nr_pdcch_nid_gpu_rearm(); }
       if (o.recover) {

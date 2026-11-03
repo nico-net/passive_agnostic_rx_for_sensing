@@ -163,6 +163,15 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_iq_chan)
   add_test(NAME test_iq_chan COMMAND test_iq_chan)
   add_test(NAME test_iq_chan_soak5 COMMAND nice -n 19 $<TARGET_FILE:test_iq_chan> --soak 5) # the 60 s run is the STOP evidence, run by hand
+  # FIX1102 C: the channelizer applied offline to a wideband raw capture (tool) and its check against iq_ddc
+  add_executable(iq_chan_offline ${CMAKE_SOURCE_DIR}/tools/mpci/iq_chan_offline.c)
+  target_include_directories(iq_chan_offline PRIVATE ${MPCI_RC})
+  target_link_libraries(iq_chan_offline PRIVATE mpci_iq)
+  add_executable(test_iq_chan_offline ${CMAKE_SOURCE_DIR}/tools/mpci/test_iq_chan_offline.c)
+  target_include_directories(test_iq_chan_offline PRIVATE ${MPCI_RC})
+  target_link_libraries(test_iq_chan_offline PRIVATE mpci_iq)
+  add_dependencies(tests iq_chan_offline test_iq_chan_offline)
+  add_test(NAME test_iq_chan_offline COMMAND test_iq_chan_offline)
 endif()
 # ---- end C1C2 ----
 

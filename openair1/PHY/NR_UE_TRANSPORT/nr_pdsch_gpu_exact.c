@@ -35,6 +35,7 @@ static nr_gpu_fep_cfg_t g_cfg0; /* MPCI G3b: the FEP geometry the module was ini
 static _Atomic int g_on;     /* the module's exact working set is up (also gates the chest / delay entries and the graph pass warm-up) */
 static _Atomic int g_fep_on; /* the FEP itself runs on the GPU: g_on and the per-path choice (nr_gpu_path.h, NR_GPU_PATH_FEP) */
 static _Atomic uint64_t g_calls, g_fallback, g_chk_ok, g_chk_bad, g_ns_sum, g_ns_max;
+static _Atomic int g_chk_run; /* confirmed self-check mismatches in a row (nr_fep_selfcheck_fault) */
 static _Atomic uint64_t g_chk_void; /* MPCI-DBG3: self-check mismatches not confirmed on stable input (nr_fep_selfcheck.h) */
 static _Atomic uint64_t g_hist[16];
 
@@ -264,6 +265,7 @@ typedef struct {
   size_t stride;
   const uint32_t *sfo;
   int kref;
+  const c16_t *gpu1; /* the checked row of the first GPU run (its output in rxdataF), for the confirmed-mismatch log */
 } recheck_t;
 static int recheck_cpu(void *ctx, void *out)
 {
@@ -307,7 +309,14 @@ static int mismatch_confirmed(const recheck_t *c)
     return 1; /* cannot confirm: the mismatch stands (the path's behaviour before the confirmation) */
   if (c->fp->ofdm_symbol_size > NR_MAX_OFDM_SYMBOL_SIZE)
     return 1;
-  return nr_fep_selfcheck_confirm(recheck_cpu, recheck_gpu, (void *)c, sizeof(c16_t) * c->fp->ofdm_symbol_size, s) == NR_FEP_SELFCHECK_CONFIRMED;
+  const size_t bytes = sizeof(c16_t) * c->fp->ofdm_symbol_size;
+  if (nr_fep_selfcheck_confirm(recheck_cpu, recheck_gpu, (void *)c, bytes, s) != NR_FEP_SELFCHECK_CONFIRMED)
+    return 0;
+  int n, mx; /* scratch: CPU reference, GPU re-run, CPU reference */
+  nr_fep_selfcheck_diff(s, s + c->fp->ofdm_symbol_size, bytes, &n, &mx);
+  LOG_W(PHY, "SENSING: GPU_EXACT_FEP self-check mismatch CONFIRMED slot %d ant %d sym %d: %d of %d int16 differ, max |d| %d; GPU re-run %s the first GPU run\n",
+        c->slot, c->ant, c->sym, n, 2 * c->fp->ofdm_symbol_size, mx, memcmp(s + c->fp->ofdm_symbol_size, c->gpu1, bytes) ? "differs from" : "equals");
+  return 1;
 }
 
 /* nr_pdsch_gpu_exact_fep_ranges: GPU exact FEP for PDSCH symbol ranges.
@@ -398,7 +407,8 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
       const recheck_t rc_ctx = {.ue = ue, .fp = fp, .slot = slot, .ant = pairs[k][0], .sym = pairs[k][1], .rxdata = rxdata, .rx = rx,
                                 .ring_len = 2u * fp->samples_per_frame, .ring_offset = get_samples_slot_timestamp(fp, slot), .rot = rot,
                                 .stride = stride, .sfo = sfo_on ? sfo_dphi : NULL,
-                                .kref = nr_sfo_kref(fp->ofdm_symbol_size, fp->first_carrier_offset, fp->ssb_start_subcarrier)};
+                                .kref = nr_sfo_kref(fp->ofdm_symbol_size, fp->first_carrier_offset, fp->ssb_start_subcarrier),
+                                .gpu1 = rxdataF + (size_t)pairs[k][0] * stride + (size_t)pairs[k][1] * fp->ofdm_symbol_size};
       if (!mismatch_confirmed(&rc_ctx)) {
         nr_sfo_pin(INT64_MIN);
         const uint64_t v = atomic_fetch_add_explicit(&g_chk_void, 1, memory_order_relaxed) + 1;
@@ -410,6 +420,10 @@ static int exact_run(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, 
     }
     nr_sfo_pin(INT64_MIN);
     atomic_fetch_add_explicit(ok ? &g_chk_ok : &g_chk_bad, 1, memory_order_relaxed);
+    if (ok)
+      atomic_store_explicit(&g_chk_run, 0, memory_order_relaxed);
+    else if (!nr_fep_selfcheck_fault(atomic_fetch_add_explicit(&g_chk_run, 1, memory_order_relaxed) + 1))
+      return -1; /* not (yet) a fault: CPU FEP for this slot, the path stays on (nr_fep_selfcheck.h) */
     if (!ok) {
       atomic_store(&g_on, 0);
       atomic_store(&g_fep_on, 0);

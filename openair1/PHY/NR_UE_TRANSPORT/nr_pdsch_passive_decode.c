@@ -3370,6 +3370,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       if (gp_rc == 0 && t_gpp->r.skip) { /* the in-graph gate fired: no demod / LDPC / CRC ran; the verdict is CRC fail, skip = 1, and no arm can help */
         if (gp_he) atomic_store(&gp_he->busy, 0);
         out->skip = 1;
+        nr_dmrs_snr_init(&out->dmrs_snr); /* EVMGRANT shows the SNR the gate compared (it was dmrs_snr=0 / unprocessed-looking); skip=1 still tells a gated grant apart */
+        if (t_gpp->r.gate_db > -90.f) out->dmrs_snr.comb_db = t_gpp->r.gate_db, out->dmrs_path = 3;
         out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
         return out->status;
       }
