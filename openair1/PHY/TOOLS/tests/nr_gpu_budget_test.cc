@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_gpu_budget.h"
+extern "C" {
+#include "nr_core_pool.h"
+}
 #include "../../NR_UE_TRANSPORT/nr_pdcch_nid_chunks.h"
 #include <gtest/gtest.h>
 #include <atomic>
@@ -403,4 +406,25 @@ static uint64_t pace_after_two_cells(bool rt_busy) {
 TEST(DiscTicket, PacedOnlyWhileRtKeepsTheDeviceBusy) {
   EXPECT_EQ(pace_after_two_cells(false),0u);
   EXPECT_GT(pace_after_two_cells(true),0u);
+}
+/* core-pool stubs (the real ones live in the executable's utils; weak in nr_gpu_budget.c): count the parks of the calling thread */
+static thread_local int t_parks, t_unparks;
+static thread_local bool t_parked;
+extern "C" void nr_pool_site_park(nr_pool_park_t *pk) {pk->held=true;t_parks++;t_parked=true;}
+extern "C" void nr_pool_site_unpark(const nr_pool_park_t *pk) {if(pk->held){t_unparks++;t_parked=false;}}
+/* OTA 2026-11-03 (415+923, DGX): the CSI-RS discovery workers slept in the ticket wait 71 % of the time they held a core-pool token (a pool token that decode
+ * waited for on 55-90 % of its leases). A contended ticket wait now parks the caller's pool lease; an uncontended acquire never touches the pool. */
+TEST(DiscTicket, ContendedWaitParksThePoolLeaseUncontendedDoesNot) {
+  nr_gpu_disc_ticket_test_reset(100,nullptr);
+  t_parks=t_unparks=0;
+  nr_gpu_disc_ticket_acquire(0);
+  EXPECT_EQ(t_parks,0) << "a free ticket must not cost a pool round trip";
+  int w_parks=-1,w_unparks=-1;bool w_parked_at_grant=false;
+  std::thread w([&] {nr_gpu_disc_ticket_acquire(1);w_parked_at_grant=t_parked;w_parks=t_parks;w_unparks=t_unparks;nr_gpu_disc_ticket_release();});
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  nr_gpu_disc_ticket_release();
+  w.join();
+  EXPECT_EQ(w_parks,1);
+  EXPECT_EQ(w_unparks,1);
+  EXPECT_FALSE(w_parked_at_grant) << "the lease is back when acquire returns";
 }

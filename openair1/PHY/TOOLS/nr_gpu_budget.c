@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_gpu_budget.h"
 #include "nr_gpu_poll.h"
+#include "nr_core_pool.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -283,11 +284,15 @@ static unsigned disc_share_pct(void) {
   const unsigned share=k>1?k*pct:pct;
   return share>100u?100u:share;
 }
+/* the core pool of the executable (common/utils/nr_core_pool.c); weak: tests and benches link this library without it */
+extern void nr_pool_site_park(nr_pool_park_t *) __attribute__((weak));
+extern void nr_pool_site_unpark(const nr_pool_park_t *) __attribute__((weak));
 static void tk_acquire(int cell,int bulk) {
   if(tk_depth>0) {++tk_depth;return;}
   if(cell<0 || cell>=TK_CELLS)cell=0;
   pthread_once(&tk_once,tk_init);
   tk_waiter_t w={cell,bulk,0,NULL};
+  nr_pool_park_t pk={0};
   pthread_mutex_lock(&tk_mu);
   const uint64_t t0=tk_now();
   w.seq=++tk_seq;
@@ -301,6 +306,9 @@ static void tk_acquire(int cell,int bulk) {
       if(bulk && now<tk_next_us && tk_rt_in_flight())until=tk_next_us<now+1000ull?tk_next_us:now+1000ull;
       else if(tk_best(&w,now))break;
     }
+    /* a contended wait parks the caller's core-pool lease: OTA 2026-11-03 (415+923) the CSI-RS discovery workers slept here 71 % of the time they held a
+     * pool token decode was waiting for. Taken back below, after tk_mu: nobody blocks on the pool while holding the ticket mutex. */
+    if(!waited && nr_pool_site_park)nr_pool_site_park(&pk);
     waited=1;
     /* never an unbounded wait: OTA 2026-11-03 (415+923, gdb) the ticket was free and four bulk waiters of both cells slept untimed for 107 s (a lost wakeup) -- the nID
      * sweep and the CSI-RS discovery of both cells stopped. A waiter that is not served rechecks at least every ms. */
@@ -315,6 +323,7 @@ static void tk_acquire(int cell,int bulk) {
   if(waited)st->contended++;
   pthread_mutex_unlock(&tk_mu);
   tk_depth=1;
+  if(waited && nr_pool_site_unpark)nr_pool_site_unpark(&pk);
 }
 void nr_gpu_disc_ticket_acquire(int cell) {tk_acquire(cell,0);}
 /* nr_gpu_disc_ticket_acquire_bulk: as acquire, for a kernel chunk of the search (subject to the duty pacing, served after short holders). */
