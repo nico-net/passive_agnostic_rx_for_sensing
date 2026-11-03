@@ -60,6 +60,16 @@ static inline bool nr_ssb_redo_best(int best_nid2, int best_pos, int last_nid2, 
   return best_nid2 != last_nid2 || best_pos != last_pos;
 }
 
+/* Acquisition back-off: 2-frame discard reads (20 ms each) before the next capture, after `failed` acquisitions in a row. A cell that is not on
+ * air must not search at full rate for ever: each search is about one CPU of Tpool scans on the home cores the other cells' workers share
+ * (OTA 2026-11-03 EX1). The first NR_ACQ_BACKOFF_AFTER attempts (a recovery, a fresh start) run back to back, then 1, 2, 4, ... up to 1 s. */
+enum { NR_ACQ_BACKOFF_AFTER = 16, NR_ACQ_BACKOFF_MAX = 50 };
+static inline int nr_acq_backoff_captures(int failed)
+{
+  const int k = failed - NR_ACQ_BACKOFF_AFTER;
+  return k <= 0 ? 0 : k > 6 ? NR_ACQ_BACKOFF_MAX : (1 << (k - 1)) < NR_ACQ_BACKOFF_MAX ? 1 << (k - 1) : NR_ACQ_BACKOFF_MAX;
+}
+
 /* The cell's memory, implemented in nr_initial_sync.c (called bound to the cell): add the beam of a rejected lock / forget
  * all after a verified lock. */
 void nr_initial_sync_reject_ssb(int pci, int ssb_index);

@@ -104,3 +104,14 @@ TEST(LockVerify, RelockToAnotherBeamBetweenWindowsRestartsVerification)
   EXPECT_EQ(nr_lock_verify_window(&v, true, 0, 50, 2, 415, 2, 2), NR_LOCK_REJECT);
   EXPECT_EQ(v.lock_ssb, 2); /* the beam actually locked is the one recorded for rejection */
 }
+
+/* OTA 2026-11-03 EX1: a cell that is not on air searched at full rate for the whole run (~1 CPU of Tpool scans on the shared home cores) and the
+ * other cell's nID pass took 3.4 s instead of 1.5 s. After a burst of failed acquisitions the search backs off to about one per second. */
+TEST(AcqBackoff, FullRateFirstThenAboutOncePerSecond)
+{
+  for (int n = 0; n <= NR_ACQ_BACKOFF_AFTER; n++) EXPECT_EQ(0, nr_acq_backoff_captures(n)) << n; /* recovery and a fresh start: no delay */
+  EXPECT_EQ(1, nr_acq_backoff_captures(NR_ACQ_BACKOFF_AFTER + 1));
+  EXPECT_EQ(2, nr_acq_backoff_captures(NR_ACQ_BACKOFF_AFTER + 2));
+  EXPECT_EQ(NR_ACQ_BACKOFF_MAX, nr_acq_backoff_captures(NR_ACQ_BACKOFF_AFTER + 40)); /* capped: 50 x 20 ms */
+  EXPECT_EQ(NR_ACQ_BACKOFF_MAX, nr_acq_backoff_captures(1 << 30));
+}

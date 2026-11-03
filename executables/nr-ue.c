@@ -857,6 +857,18 @@ void dummyWrite(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, int writeBlo
   AssertFatal(writeBlockSize == tmp, "write to reorder function failed %d", tmp);
 }
 
+/* nrue_trash_samples: reads and drops n samples (n <= one slot) of every antenna, moving the stream position without a capture. Caller: UE_thread() acquisition. */
+static void nrue_trash_samples(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int n)
+{
+  c16_t *rxp[UE->frame_parms.nb_antennas_rx];
+  rxp[0] = malloc16(n * sizeof(c16_t));
+  for (int i = 1; i < UE->frame_parms.nb_antennas_rx; i++)
+    rxp[i] = rxp[0];
+  if (nrue_ru_read(UE, timestamp, (void **)rxp, n, UE->frame_parms.nb_antennas_rx) != n && !oai_exit)
+    LOG_W(PHY, "SENSING: acquisition step read short of %d samples\n", n);
+  free(rxp[0]);
+}
+
 /* readFrame: reads the two frames of capture needed for acquisition (or a discard read when toTrash is set) slot by slot from the radio into the UE's rxdata, and emulates the TX side in RFsim.
  *   Returns false (and requests shutdown) on a short read. With ISAC_RX_RECOVER it also reports whether the capture was contiguous (no timestamp jump and no ring epoch change); a non-contiguous capture is discarded by the caller. Callers: UE_thread() (acquisition and the trash reads after a lock change).
  */
@@ -1231,6 +1243,7 @@ void *UE_thread(void *arg)
   long long rx_recover_gap = 0;
   struct timespec rx_recover_start = {0};
   int rx_recover_fast_tries = 0;
+  int acq_captures = 0; /* acquisition captures since the last lock (see the one-slot step before readFrame) */
   int rx_recover_old_target = -1;
   openair0_timestamp_t rx_recover_last_pss_tick = 0;
   const int nb_slot_frame = fp->slots_per_frame;
@@ -1519,6 +1532,14 @@ void *UE_thread(void *arg)
         if (nrue_band_scan_active() && s_band_scan_attempts++ > 0)
           nrue_band_scan_next(UE);
       }
+      /* Captures are whole frames, so after a stream jump the capture phase stays fixed until the next jump: a 20 ms SSB whose last symbols
+       * fall past the end of the 2-frame capture was rejected ("SSB extends beyond buffer") on every attempt, and the cell never relocked
+       * (OTA 2026-11-03 E1, qB1: PCI 923 lost at its first lock, predicted PSS 1214180 / 1221564 of 1228800, ~230 s without a lock).
+       * A failed acquisition moves the next capture by one slot, more than the 4 SSB symbols. */
+      if (acq_captures++ > 0 && !IS_SOFTMODEM_RFSIM) /* shortcut: RFsim keeps its sample clock by the TX writes of readFrame; it has no stream jumps */
+        nrue_trash_samples(UE, &sync_timestamp, get_samples_per_slot(0, fp));
+      for (int k = nr_acq_backoff_captures(acq_captures - 1); k > 0 && !oai_exit; k--) /* a cell that keeps failing: bounded search rate (nr_lock_verify.h) */
+        readFrame(UE, &sync_timestamp, duration_rx_to_tx, true);
       const bool capture_contiguous = readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
       if (oai_exit)
         break;
@@ -1581,6 +1602,7 @@ void *UE_thread(void *arg)
 
     if (stream_status == STREAM_STATUS_UNSYNC) {
       stream_status = STREAM_STATUS_SYNCING;
+      acq_captures = 0;
       const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
       /* Projecting the integrator across the acquisition gap is only meaningful if the integrator
        * is still describing the SAME timing origin. After a fault it is not: a runaway leaves
