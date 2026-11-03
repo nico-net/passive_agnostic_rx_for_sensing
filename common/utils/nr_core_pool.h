@@ -173,6 +173,10 @@ uint64_t nr_pool_now_ns(void);
  * keeps the dedicated lane (nr_pool_site_float_merged() == false): then every float call below is a no-op and the workers behave as before.
  * The rule is a function of the pool size only; there is no switch. A lease is per job and never spans a cond wait; no FIFO/RR. */
 #define NR_POOL_FLOAT_MERGE_MIN_TOKENS 5
+/* nr_pool_layout_excludes: appends to ex[0..nex) the RT reader core of every cell of layout L and its feed reader (L NULL: nothing), at most cap
+ * entries in all; returns the new count. The site pool and its home mask must stay off all of them, not only cell 0's (ISAC_UE_RT_CORE). */
+struct nr_core_layout_s;
+int nr_pool_layout_excludes(const struct nr_core_layout_s *L, int *ex, int nex, int cap);
 void nr_pool_site_set_for_test(nr_pool_t *p); /* unit tests only: use p as the site pool (NULL = back to the lazily built one); set while no thread uses the site pool */
 bool nr_pool_float_merged_n(int tokens);   /* pure: floats lease from a pool of `tokens` tokens */
 bool nr_pool_site_float_merged(void);      /* the site pool exists and is large enough (builds the site pool on first use) */

@@ -19,6 +19,7 @@
 #include <string>
 extern "C" {
 #include "nr_core_pool.h"
+#include "nr_core_layout.h"
 }
 
 static nr_pool_t *mk(int n, bool no_age = true)
@@ -1388,4 +1389,23 @@ TEST(CorePool, DecodeGpuWaitGivesWithoutScopeAndResumesAheadOfFreshWaiters)
   b.join();
   f1.join();
   nr_pool_destroy(p);
+}
+
+// OTA 2026-11-03 (2 PCIs + spare, DGX): the site home mask excluded only cell 0's RT reader (ISAC_UE_RT_CORE), so every pool member without a
+// lease sat on {0,6-8,14}: the RT readers of cells 1-2 (6, 7) and the feed reader (8) ran at 100-107 % and the pair's DL decode p99 tripled.
+TEST(CorePool, SiteExcludesEveryCellsRtReaderAndTheFeed)
+{
+  nr_core_layout_t L;
+  memset(&L, 0, sizeof(L));
+  L.n_cells = 3;
+  for (int i = 0; i < NR_CL_MAX_CELLS; i++) L.rt_cell[i] = -1;
+  L.rt_cell[0] = 5, L.rt_cell[1] = 6, L.rt_cell[2] = 7, L.feed = 8;
+  int ex[16] = {16}; /* the ring core, already listed */
+  const int n = nr_pool_layout_excludes(&L, ex, 1, 16);
+  ASSERT_EQ(n, 5);
+  EXPECT_EQ(std::vector<int>(ex, ex + n), (std::vector<int>{16, 5, 6, 7, 8}));
+  L.feed = -1, L.rt_cell[2] = -1; /* a cell without a reader and no feed: nothing invented */
+  EXPECT_EQ(nr_pool_layout_excludes(&L, ex, 1, 16), 3);
+  EXPECT_EQ(nr_pool_layout_excludes(NULL, ex, 1, 16), 1); /* no active layout (tests, ISAC_CORE_PLAN=0): the env list only */
+  EXPECT_EQ(nr_pool_layout_excludes(&L, ex, 2, 2), 2); /* never past the array */
 }

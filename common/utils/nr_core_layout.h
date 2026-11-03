@@ -71,7 +71,7 @@ typedef struct { /* explicit operator overrides; -1 / has_* false = none */
   unsigned char uhd[NR_CL_MAX_CPUS], pool[NR_CL_MAX_CPUS], lane[NR_CL_MAX_CPUS], check[NR_CL_MAX_CPUS];
 } nr_cl_over_t;
 
-typedef struct {
+typedef struct nr_core_layout_s {
   nr_cl_mode_t mode;
   int W, anchor;
   int n_cells;                 /* cells the plan was built for (1 = single cell, the historical layout) */

@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include "nr_core_pool.h"
 #include "nr_core_plan.h"
+#include "nr_core_layout.h"
 #include <dirent.h>
 #include <errno.h>
 #include <sys/prctl.h>
@@ -844,6 +845,15 @@ static void add_list(const char *e, int *v, int *n)
 
 /* The pool cores = the site core map: the PDSCH and PUSCH consumer lists (defaults built in, nr_env_core), minus the RT receive thread,
  * radio ring and UHD control cores, and minus cores the process may not use. The scan consumers no longer have cores of their own. */
+extern const nr_core_layout_t *nr_core_layout(void) __attribute__((weak)); /* the unit tests link this file without the layout */
+int nr_pool_layout_excludes(const nr_core_layout_t *L, int *ex, int nex, int cap)
+{
+  if (!L) return nex;
+  for (int k = 0; k < L->n_cells && k < NR_CL_MAX_CELLS && nex < cap; k++)
+    if (L->rt_cell[k] >= 0) ex[nex++] = L->rt_cell[k];
+  if (L->feed >= 0 && nex < cap) ex[nex++] = L->feed;
+  return nex;
+}
 static void site_init(void)
 {
   int cores[NR_POOL_MAX_TOKENS], cap[NR_POOL_MAX_TOKENS], n = 0, ex[NR_POOL_MAX_TOKENS], nex = 0;
@@ -852,6 +862,8 @@ static void site_init(void)
   add_list(getenv("ISAC_UE_RT_CORE"), ex, &nex);
   add_list(getenv("ISAC_USRP_RING_CORE"), ex, &nex);
   add_list(nr_env_core("ISAC_UHD_CTRL_CORES"), ex, &nex);
+  /* every cell's RT reader and the feed reader: OTA 2026-11-03 (2 PCIs) the home mask held cells 1-2's readers and the feed (cores 6-8 at 100 %) */
+  nex = nr_pool_layout_excludes(nr_core_layout ? nr_core_layout() : NULL, ex, nex, NR_POOL_MAX_TOKENS);
   cpu_set_t allowed; /* the mask before the float lane moved the main thread: the cores this process may really use */
   const bool have_allowed = (nr_core_inherited_mask && nr_core_inherited_mask(&allowed)) || sched_getaffinity(0, sizeof(allowed), &allowed) == 0;
   int k = 0;
