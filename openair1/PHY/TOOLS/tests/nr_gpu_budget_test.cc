@@ -284,6 +284,61 @@ TEST(DiscTicketG4B, CapFollowsMeasuredIdleTimeAndFloorOnlyRaises) {
   }
   nr_gpu_disc_ticket_test_reset(30,nullptr);
 }
+/* OTA 2026-11-03 (415+923): the process-wide discovery budget (pct of a rolling second, pacing us*100/pct) was the single-cell one, so two cells' CSI-RS discovery and nID
+ * sweeps shared ONE cell's 30 %: the nID stage1 took 1.2-8 s per pass instead of 0.56 s solo and a cell banked no CORESET in 150 s. With k cells discovering (the ticket's
+ * 2 s activity, as its cap) the budget is min(100, k*pct); one cell is unchanged. */
+static uint64_t budget_used_in_one_second(int cells) {
+  nr_gpu_budget_test_reset(30);
+  nr_gpu_disc_ticket_test_reset(30,fake_clock);
+  g_fake_us=20000000;
+  for(int c=0;c<cells;++c) {nr_gpu_disc_ticket_acquire(c);nr_gpu_disc_ticket_release();}
+  uint64_t used=0;
+  for(uint64_t now=g_fake_us;now<20000000+1000000;now+=100) {
+    g_fake_us=now;
+    if(nr_gpu_budget_discovery_begin(now)==1) {nr_gpu_budget_discovery_end(now+1000,1000);used+=1000;now+=1000;}
+  }
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+  return used;
+}
+/* OTA 2026-11-03 (415+923, diagnostic build): with two cells the RT jobs of both are in flight so often that a discovery slice, which needed the device free of RT work,
+ * started 4x less often than solo (27466 vs 122653 slices per 150 s, 9 vs 28 s of GPU work; nID passes 14-30 vs 125). Discovery has its own SMs (green context) and the
+ * ticket and budget bound it to k*pct: with two or more discovering cells a slice may start while RT work is in flight; never while another discovery slice is. One cell: as before. */
+static int begin_with_rt_in_flight(int cells) {
+  nr_gpu_budget_test_reset(30);
+  nr_gpu_disc_ticket_test_reset(30,fake_clock);
+  g_fake_us=30000000;
+  for(int c=0;c<cells;++c) {nr_gpu_disc_ticket_acquire(c);nr_gpu_disc_ticket_release();}
+  EXPECT_EQ(nr_gpu_budget_rt_begin(),1);
+  const int r=nr_gpu_budget_discovery_begin(g_fake_us);
+  int second=-1;
+  if(r==1) {second=nr_gpu_budget_discovery_begin(g_fake_us);nr_gpu_budget_discovery_end(g_fake_us+100,100);}
+  nr_gpu_budget_rt_end();
+  if(r==1 && second==1)nr_gpu_budget_discovery_end(g_fake_us+200,100);
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+  return r==1?(second==1?2:1):0;
+}
+/* ... and two discovering cells do not serialise twice: the process-wide ticket is their single flight (sleeping waiters, fair order); the budget admission no longer
+ * holds an exclusive owner across the ticket wait (pair diagnostic: 48 s admission spin + 57 s ticket wait per 150 s for 9 s of GPU work). One cell: as before. */
+TEST(DiscTicketG4B, MultiCellDiscoveryStartsBesideRtSingleCellDoesNot) {
+  EXPECT_EQ(begin_with_rt_in_flight(1),0); /* RT in flight: one cell waits */
+  EXPECT_EQ(begin_with_rt_in_flight(2),2); /* two cells: admitted beside RT, and a second slice may be admitted (the ticket serialises them) */
+}
+TEST(DiscTicketG4B, SingleCellAdmissionStaysExclusive) {
+  nr_gpu_budget_test_reset(30);
+  nr_gpu_disc_ticket_test_reset(30,fake_clock);
+  g_fake_us=40000000;
+  nr_gpu_disc_ticket_acquire(0);nr_gpu_disc_ticket_release();
+  EXPECT_EQ(nr_gpu_budget_discovery_begin(g_fake_us),1);
+  EXPECT_EQ(nr_gpu_budget_discovery_begin(g_fake_us),0);
+  nr_gpu_budget_discovery_end(g_fake_us+100,100);
+  nr_gpu_disc_ticket_test_reset(30,nullptr);
+}
+TEST(DiscTicketG4B, BudgetShareScalesWithDiscoveringCells) {
+  EXPECT_LE(budget_used_in_one_second(1),305000u); /* one cell: pct as before */
+  EXPECT_GE(budget_used_in_one_second(1),280000u);
+  EXPECT_GE(budget_used_in_one_second(2),560000u); /* two cells: 2 x pct */
+  EXPECT_LE(budget_used_in_one_second(2),605000u);
+}
 /* fair order between cells in the same state: with both cells waiting behind a holder, the one that used the device less is served first whatever the arrival order */
 TEST(DiscTicketG4B, SameStateCellsAlternateByLeastUse) {
   nr_gpu_disc_ticket_test_reset(100,nullptr);

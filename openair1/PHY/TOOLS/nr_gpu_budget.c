@@ -26,7 +26,10 @@ static _Thread_local uint64_t job_start;
 void nr_gpu_budget_rt_job_start(uint64_t start) {job_start=start;}
 /* nr_gpu_budget_rt_start_us: returns the thread's real-time job start (us), or the current time when no job start was recorded. */
 uint64_t nr_gpu_budget_rt_start_us(void) {return job_start?job_start:nr_gpu_budget_now_us();}
-static uint64_t start_us, slice_start;
+static uint64_t start_us;
+static _Thread_local uint64_t slice_start; /* per thread: with several cells, slices are admitted concurrently and the ticket serialises them */
+static _Thread_local int slice_owner;      /* this thread's slice holds DISC_OWNER (one cell) */
+static pthread_mutex_t window_mu=PTHREAD_MUTEX_INITIALIZER; /* the rolling window: owner-protected with one cell, concurrent admissions with several */
 /* Discovery owner protects this conservative rolling second. Completion is
  * charged in full to its millisecond bucket; retain the boundary bucket too. */
 static uint64_t buckets[1001], window_tick, window_used;
@@ -112,12 +115,29 @@ int nr_gpu_budget_rt_wait(int (*query)(void *),void *job,uint64_t start,
   if(rc && rc!=600)nr_gpu_budget_fault();
   return rc;
 }
+static unsigned disc_cells(void);     /* below, with the ticket: cells that discovered in the last two seconds */
+static unsigned disc_share_pct(void); /* the budget share of all discovering cells */
 /* nr_gpu_budget_discovery_begin: asks for one discovery GPU slice at time now. Returns 1 when the slice may start (the discovery owner is then held), 0 when it must yield (pacing, RT in flight, or the rolling budget is full), -1 after a fault.
  *   Reserves the hard slice ceiling (5 ms) before launch against the pct% budget per second. Counts yields. Callers: nr_gpu_budget_cuda.h (the CUDA wrappers) and the discovery GPU code.
  */
 int nr_gpu_budget_discovery_begin(uint64_t now) {
   if(!nr_gpu_budget_enabled())return 1;
   if(atomic_load(&fault))return -1;
+  /* One cell: the slice starts only on a device free of RT work and of any other discovery slice (the exclusive owner, as always).
+   * Two or more discovering cells: their RT jobs kept the device busy so often, and the exclusive owner was held across the ticket wait, that discovery starved
+   * (OTA 2026-11-03 415+923, diagnostic: 4x fewer slices than solo, 48 s of admission spin + 57 s of ticket wait per 150 s for 9 s of GPU work; nID passes 14-48 vs
+   * 125-155 solo, CORESET late or never). Discovery has its own SMs (green context), the budget below is k*pct and the process-wide ticket (nr_gpu_budget_cuda.h, taken
+   * right after this admission) is the single flight among cells: the admission is pacing + budget only. */
+  if(disc_cells()>1) {
+    if(now<atomic_load(&next_us)) {atomic_fetch_add(&yields,1);return 0;}
+    pthread_mutex_lock(&window_mu);
+    advance_window(now);
+    const int full=window_used+5000>(uint64_t)disc_share_pct()*10000;
+    pthread_mutex_unlock(&window_mu);
+    if(full) {atomic_fetch_add(&yields,1);return 0;}
+    slice_owner=0;slice_start=now;
+    return 1;
+  }
   unsigned empty=0;
   if(now<atomic_load(&next_us) || !atomic_compare_exchange_strong(&owner,&empty,DISC_OWNER)) {
     atomic_fetch_add(&yields,1);return 0;
@@ -126,12 +146,15 @@ int nr_gpu_budget_discovery_begin(uint64_t now) {
   if(now<atomic_load(&next_us)) {
     atomic_fetch_and(&owner,~DISC_OWNER);atomic_fetch_add(&yields,1);return 0;
   }
+  pthread_mutex_lock(&window_mu);
   advance_window(now);
   /* Reserve the hard slice ceiling BEFORE launch, even for a tiny kernel. */
-  if(window_used+5000>(uint64_t)pct*10000) {
+  const int full=window_used+5000>(uint64_t)disc_share_pct()*10000;
+  pthread_mutex_unlock(&window_mu);
+  if(full) {
     atomic_fetch_and(&owner,~DISC_OWNER);atomic_fetch_add(&yields,1);return 0;
   }
-  slice_start=now;
+  slice_owner=1;slice_start=now;
   return 1;
 }
 /* nr_gpu_budget_discovery_delay_us: returns how many microseconds the discovery pacing still forbids a slice at time now (0 when a slice may start). */
@@ -144,16 +167,20 @@ uint64_t nr_gpu_budget_discovery_delay_us(uint64_t now) {
  */
 void nr_gpu_budget_discovery_end(uint64_t now,uint64_t us) {
   if(!nr_gpu_budget_enabled())return;
+  pthread_mutex_lock(&window_mu);
   advance_window(now);window_used+=us;buckets[window_tick%1001]+=us;
+  pthread_mutex_unlock(&window_mu);
   atomic_fetch_add(&used_us,us);
   /* Pacing prevents catch-up bursts even after RT has held the device idle. */
-  uint64_t paced=slice_start+(us*100+pct-1)/pct;
+  const unsigned share=disc_share_pct();
+  uint64_t paced=slice_start+(us*100+share-1)/share;
   atomic_store(&next_us,paced>now?paced:now);
   /* Event intervals can include host descheduling between event/launch calls.
    * Charge the entire interval and report it, but do not turn one slow slice
    * into a permanent synthetic CUDA error on the NEXT upload/kernel. */
   if(us>5000)atomic_fetch_add(&overruns,1);
-  atomic_fetch_and(&owner,~DISC_OWNER);
+  if(slice_owner)atomic_fetch_and(&owner,~DISC_OWNER);
+  slice_owner=0;
 }
 /* G4: one prefer flag per cell (the nID sweep of that cell is in ACQUIRE); cell 0 is the single-cell receiver of today. */
 #define TK_CELLS 16 /* = NR_CELL_MAX (common/utils/nr_cell.h); this file is in the platform DSO and does not include it */
@@ -239,6 +266,22 @@ static unsigned tk_cap(uint64_t now,int active) {
   unsigned cap=(unsigned)active*pct>100u?100u:(unsigned)active*pct;
   const unsigned idle=tk_rt_frac>=1.0?0u:(unsigned)(100.0*(1.0-tk_rt_frac)+0.5); /* rounded: a residual 0.3 % of RT time is not a 99 % cap */
   return idle>cap?idle:cap;
+}
+/* disc_share_pct: the discovery budget (discovery_begin/end) of the whole process: pct for one discovering cell, min(100, k*pct) for k cells that used the ticket in the
+ * last two seconds -- the ticket's own cap rule (tk_cap). OTA 2026-11-03 415+923: with the single-cell pct two cells' CSI-RS discovery and nID sweeps shared one cell's 30 %
+ * (nID stage1 1.2-8 s per pass instead of 0.56 s solo, a cell banked no CORESET in 150 s). Real-time work in flight still blocks the next slice (discovery_begin). */
+static unsigned disc_cells(void) {
+  pthread_mutex_lock(&tk_mu);
+  const uint64_t now=tk_now();
+  unsigned k=0;
+  for(int c=0;c<TK_CELLS;++c)if(tk_last_use[c] && now-tk_last_use[c]<2000000ull)++k;
+  pthread_mutex_unlock(&tk_mu);
+  return k;
+}
+static unsigned disc_share_pct(void) {
+  const unsigned k=disc_cells();
+  const unsigned share=k>1?k*pct:pct;
+  return share>100u?100u:share;
 }
 static void tk_acquire(int cell,int bulk) {
   if(tk_depth>0) {++tk_depth;return;}
