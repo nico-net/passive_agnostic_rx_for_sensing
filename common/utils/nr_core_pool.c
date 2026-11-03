@@ -45,7 +45,7 @@ typedef struct waiter {
 struct nr_pool {
   pthread_mutex_t mu;
   nr_pool_cfg_t cfg;
-  int n, core[NR_POOL_MAX_TOKENS], cap[NR_POOL_MAX_TOKENS];
+  int n, core[NR_POOL_MAX_TOKENS], cap[NR_POOL_MAX_TOKENS], tier[NR_POOL_MAX_TOKENS]; /* tier: 0 = slowest speed tier, caps within 10 % of the next lower one are one tier */
   bool busy[NR_POOL_MAX_TOKENS];
   int nfree;
   waiter_t *wq_head, *wq_tail; /* waiters in the order the former array held them (append; removal moves the tail into the hole, see wq_remove) */
@@ -208,6 +208,7 @@ nr_pool_t *nr_pool_create(const int *cores, const int *capacity, int n, const nr
     p->cap[i] = capacity ? capacity[i] : 0;
     if (cores[i] >= 0 && cores[i] < CPU_SETSIZE) CPU_SET(cores[i], &p->poolset);
   }
+  nr_pool_speed_tiers(p->cap, n, p->tier);
   cpu_set_t cur;
   if (sched_getaffinity(0, sizeof(cur), &cur) == 0) {
     CPU_ZERO(&p->home);
@@ -363,10 +364,26 @@ static bool class_ok(const nr_pool_t *p, int prio, bool promoted, bool ul, int c
   }
 }
 
+/* Speed tiers from capacities: sort distinct values, a value within 10 % of the previous (lower) one joins its tier. All equal or unknown (0) -> all tier 0. */
+void nr_pool_speed_tiers(const int *cap, int n, int *tier)
+{
+  int prev = -1, t = -1;
+  for (int i = 0; i < n; i++) tier[i] = -1;
+  for (int done = 0; done < n;) {
+    int lo = -1; /* smallest capacity not yet assigned */
+    for (int i = 0; i < n; i++)
+      if (tier[i] < 0 && (lo < 0 || cap[i] < lo)) lo = cap[i];
+    if (prev < 0 || (long)lo * 10 > (long)prev * 11) t++;
+    prev = lo;
+    for (int i = 0; i < n; i++)
+      if (tier[i] < 0 && cap[i] == lo) tier[i] = t, done++;
+  }
+}
+
 /* Big cores to the urgent classes, small ones to the rest; the thread's previous token wins ties (cache). */
 static int pick_token(const nr_pool_t *p, int prio, bool promoted, int last)
 {
-  const bool hi = prio <= NR_POOL_DECODE || prio == NR_POOL_CHAN || promoted;
+  const bool hi = prio <= NR_POOL_RETRY || prio == NR_POOL_CHAN || promoted;
   const bool chan = prio == NR_POOL_CHAN;
   int best = -1;
   long bs = 0;
@@ -375,7 +392,7 @@ static int pick_token(const nr_pool_t *p, int prio, bool promoted, int last)
       if (p->busy[i]) continue;
       /* pass 0: CHAN only on the reserved tokens, every other class only off them; pass 1 (nothing there is free): any free token */
       if (pass == 0 && p->chan_tok[i] != chan) continue;
-      const long s = chan ? (i == last ? 1000000L : 0) + p->cap[i] : (hi ? p->cap[i] : -p->cap[i]) * 2 + (i == last);
+      const long s = chan ? (i == last ? 1000000L : 0) + p->cap[i] : (hi ? p->tier[i] : -p->tier[i]) * 2 + (i == last);
       if (best < 0 || s > bs) best = i, bs = s;
     }
   return best;
@@ -888,15 +905,22 @@ static void site_init(void)
     if (nf > n) memcpy(cores, fb, (size_t)nf * sizeof(int)), n = nf;
   }
   if (n == 0) return;
-  for (int i = 0; i < n; i++) {
-    char path[96];
-    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpu_capacity", cores[i]);
-    FILE *f = fopen(path, "r");
-    cap[i] = 0;
-    if (f) {
-      if (fscanf(f, "%d", &cap[i]) != 1) cap[i] = 0;
-      fclose(f);
+  /* speed from the OS: cpu_capacity, else cpuinfo_max_freq (kHz); one source for all cores (units differ), any unreadable -> next source, none -> all equal */
+  for (int src = 0; src < 2; src++) {
+    bool ok = true;
+    for (int i = 0; i < n && ok; i++) {
+      char path[96];
+      snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/%s", cores[i], src ? "cpufreq/cpuinfo_max_freq" : "cpu_capacity");
+      FILE *f = fopen(path, "r");
+      cap[i] = 0;
+      if (f) {
+        if (fscanf(f, "%d", &cap[i]) != 1) cap[i] = 0;
+        fclose(f);
+      }
+      ok = cap[i] > 0;
     }
+    if (ok) break;
+    for (int i = 0; i < n; i++) cap[i] = 0;
   }
   g_site = nr_pool_create(cores, cap, n, NULL);
   if (g_site) {
@@ -911,6 +935,8 @@ static void site_init(void)
     char l[256];
     int o = snprintf(l, sizeof(l), "SENSING: CORE_POOL: %d cores:", n);
     for (int i = 0; i < n && o < (int)sizeof(l) - 8; i++) o += snprintf(l + o, sizeof(l) - (size_t)o, " %d", cores[i]);
+    o += snprintf(l + o, sizeof(l) - (size_t)o, " | speed tier:");
+    for (int i = 0; i < n && o < (int)sizeof(l) - 8; i++) o += snprintf(l + o, sizeof(l) - (size_t)o, " %d", g_site->tier[i]);
     fprintf(stderr, "%s\n", l);
     nr_pool_enforce(g_site);
   }

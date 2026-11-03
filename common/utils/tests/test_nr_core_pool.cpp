@@ -668,6 +668,38 @@ TEST(CorePool, BigCoresGoToUrgentClasses)
   nr_pool_destroy(p);
 }
 
+TEST(CorePool, SpeedTiers)
+{
+  int t[6];
+  const int mixed[6] = {718, 997, 1017, 731, 997, 718};
+  nr_pool_speed_tiers(mixed, 6, t);
+  EXPECT_EQ(t[0], 0); EXPECT_EQ(t[3], 0); EXPECT_EQ(t[5], 0);
+  EXPECT_EQ(t[1], 1); EXPECT_EQ(t[2], 1); EXPECT_EQ(t[4], 1);
+  const int uni[6] = {512, 512, 512, 512, 512, 512}, unk[6] = {0, 0, 0, 0, 0, 0};
+  nr_pool_speed_tiers(uni, 6, t);
+  for (int i = 0; i < 6; i++) EXPECT_EQ(t[i], 0);
+  nr_pool_speed_tiers(unk, 6, t);
+  for (int i = 0; i < 6; i++) EXPECT_EQ(t[i], 0);
+}
+
+// RETRY is an urgent class: fastest free core; HOUSE/SENSE/DISC: slowest; stickiness inside a tier
+TEST(CorePool, RetryFastLowSlowMixedTiers)
+{
+  nr_pool_cfg_t c = nr_pool_cfg_default();
+  c.pin = false;
+  const int cores[4] = {10, 6, 7, 11}, cap[4] = {718, 997, 1017, 731};
+  nr_pool_t *p = nr_pool_create(cores, cap, 4, &c);
+  const int r = nr_pool_acquire(p, NR_POOL_RETRY, 0, 0);
+  EXPECT_TRUE(r == 6 || r == 7);
+  nr_pool_release(p);
+  EXPECT_EQ(nr_pool_acquire(p, NR_POOL_RETRY, 0, 0), r); // same tier: previous token wins
+  nr_pool_release(p);
+  const int h = nr_pool_acquire(p, NR_POOL_HOUSE, 0, 0);
+  EXPECT_TRUE(h == 10 || h == 11);
+  nr_pool_release(p);
+  nr_pool_destroy(p);
+}
+
 // B1 shape (scan side_finish at N=1): the holder waits for a thread that needs the only token. Parked, it does not deadlock; unpark restores the class.
 TEST(CorePool, ParkLetsTheWaitedForThreadTakeTheOnlyToken)
 {
