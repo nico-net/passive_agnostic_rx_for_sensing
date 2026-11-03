@@ -182,7 +182,8 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
   while (1) {
     nr_pdcch_passive_job_t job;
 
-    nr_pool_site_release(); /* core pool: a lease never outlives one iteration */
+    /* core pool: a lease does not outlive the queue; with more work queued and nobody waiting it is kept (release+acquire = 2 affinity moves per job) */
+    if (!(__atomic_load_n(&g_count, __ATOMIC_RELAXED) > 0 && nr_pool_site_keep())) nr_pool_site_release();
     nr_pool_site_enforce_tick(); /* (a) exclusivity: pool cores stay free of non-members (1/s) */
     pthread_mutex_lock(&g_lock);
     if (g_side_posted > 0) { /* another consumer's posted side work: it is for an occasion already running, run it first */

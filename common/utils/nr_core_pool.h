@@ -77,6 +77,7 @@ typedef struct {
   uint64_t wait_hist_cell[NR_POOL_MAX_CELLS][NR_POOL_WAIT_BINS];
   /* per cell and class (MPCI-DASH P1): index = class, NR_POOL_CLS_UL for first-pass UL decodes (they are DECODE leases with the UL flag; the DECODE column is DL only) */
   uint64_t leases_cell_cls[NR_POOL_MAX_CELLS][NR_POOL_NCLS], hold_ns_cell_cls[NR_POOL_MAX_CELLS][NR_POOL_NCLS];
+  uint64_t wait_ns[NR_POOL_NPRIO]; /* sum of the lease wait per class (adaptive home/pool split) */
 } nr_pool_stats_t;
 
 typedef struct nr_pool nr_pool_t;
@@ -164,6 +165,7 @@ void nr_pool_site_enforce_tick(void);    /* rate-limited (1/s) nr_pool_enforce()
 int nr_pool_site_acquire(int prio, int cell, uint64_t deadline_ns);
 int nr_pool_site_try_acquire(int prio, int cell, uint64_t deadline_ns);
 void nr_pool_site_release(void);
+bool nr_pool_site_keep(void); /* holds a lease and no waiter in any class: a worker with more queued work may skip release+acquire */
 bool nr_pool_site_yield(void);
 uint64_t nr_pool_now_ns(void);
 
@@ -223,6 +225,8 @@ int nr_pool_site_chan_max(void);                       /* chan_cap of the site p
  * nr_pool_shed_tiers_n: pure. urgent = waiters in SCAN + DECODE + RETRY, free = tokens free now (CHAN's idle reserve excluded), active = active cells.
  * Returns k: the tiers 0..k-1 are shed (k = min(tiers, urgent waiters) when free == 0 and active >= 2, else 0). */
 int nr_pool_shed_tiers_n(int urgent, int free_tokens, int active);
+/* Speed tiers from per-core capacities (0 = unknown): tier 0 slowest; values within 10 % of the next lower one share a tier; all equal -> all 0. */
+void nr_pool_speed_tiers(const int *cap, int n, int *tier);
 bool nr_pool_promo_allowed_m(double tokens_eff, double essential_demand); /* pure: tokens_eff - measured essential demand of the active cells >= 1 token */
 /* Measured demand of one cell in tokens (decayed token-time per second, half-life 2 s): ess = SCAN + DECODE + RETRY + UL, shed = DISC + HOUSE. Returns 1 when measured, 0 (zeros) when the
  * cell was observed for less than a quarter of the half-life. nr_pool_essential_wait: fraction of SCAN / DECODE / RETRY leases that waited since the pool exists, -1 under 100 leases. */
@@ -238,6 +242,21 @@ int nr_pool_site_shed_tiers(void);
 void nr_pool_site_shed_note(int tier);
 int nr_pool_site_active_cells(void);                 /* 1 when no site pool */
 void nr_pool_site_shed_counts(uint64_t out[NR_POOL_SHED_TIERS]);
+
+/* ADAPTIVE HOME / POOL SPLIT. A background thread of the site pool (>= 2 cells seen) samples every NR_POOL_SPLIT_PERIOD_S seconds (a) the run-queue wait share of the home-mask
+ * threads (/proc/self/task/<tid>/schedstat: run_delay / (run_delay + cpu time), threads whose affinity has >= 2 CPUs inside the home mask) and (b) the token wait share of the
+ * essential classes (SCAN, DECODE, RETRY: wait / (wait + hold) of the leases). It moves ONE core at a time toward the side that waits more (nr_pool_split_decide), after
+ * NR_POOL_SPLIT_CONFIRM agreeing windows. Only a free LAST token moves pool -> home (the pool is sorted fast first, so the slowest core goes); only a core that came from the
+ * pool returns (home never drops below its start-up size). RT reader, feed, radio and isolated cores are never in either set. */
+#define NR_POOL_SPLIT_PERIOD_S 4
+#define NR_POOL_SPLIT_CONFIRM 2
+#define NR_POOL_SPLIT_FLOOR 0.03  /* both waits below this: nothing to fix */
+#define NR_POOL_SPLIT_MARGIN 0.05 /* dead band between the two waits (hysteresis) */
+/* Pure. +1: move a core pool -> home, -1: home -> pool, 0: none. home_min / pool_min are the bounds the sizes must keep after the move. */
+int nr_pool_split_decide(double home_wait, double pool_wait, int home_n, int pool_n, int home_min, int pool_min);
+bool nr_pool_core_to_home(nr_pool_t *p);  /* free last token -> home mask (re-applied to the home-mask threads); false when it is busy / the pool is at its minimum size */
+bool nr_pool_core_to_pool(nr_pool_t *p);  /* the most recently moved core -> a new token; false when none was moved */
+int nr_pool_home_extra(const nr_pool_t *p); /* cores currently moved from the pool to home */
 #ifdef __cplusplus
 }
 #endif
