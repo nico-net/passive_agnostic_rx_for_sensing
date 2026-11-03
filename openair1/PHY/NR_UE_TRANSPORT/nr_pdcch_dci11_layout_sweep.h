@@ -136,6 +136,10 @@ typedef struct {
   uint8_t riv_bits;
 } nr_dci11_offsets_t;
 
+/** The sweep's own switch tables for the pre_ant group fields (read-only; never copy them). */
+typedef enum { NR_DCI11_SW_TB2, NR_DCI11_SW_HARQ, NR_DCI11_SW_DAI, NR_DCI11_SW_TPC2, NR_DCI11_SW_P2H } nr_dci11_switch_t;
+const uint8_t *nr_dci11_switch_widths(nr_dci11_switch_t which, int *n);
+
 /** Offsets implied by a layout. `tda_bits` comes from the TDRA list Technique D already recovers,
  * `riv_bits` from the BWP size. Returns false if the layout is self-inconsistent. Pure. */
 bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint8_t tda_bits,

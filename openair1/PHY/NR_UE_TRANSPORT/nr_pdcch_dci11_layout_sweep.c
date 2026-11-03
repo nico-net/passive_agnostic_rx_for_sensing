@@ -118,6 +118,19 @@ static const uint8_t kPucchCell[]= {0, 1};             /* Rel-17 PUCCH Cell indi
  * up to 3 more. (Multi-PDSCH and SCell-to-PCell alignment are FR2-2 / cross-carrier cases.) */
 static const uint8_t kPad[]      = {0, 1, 2, 3, 4};
 
+const uint8_t *nr_dci11_switch_widths(nr_dci11_switch_t which, int *n)
+{
+  switch (which) {
+    case NR_DCI11_SW_TB2:  *n = (int)sizeof(kTb2);  return kTb2;
+    case NR_DCI11_SW_HARQ: *n = (int)sizeof(kHarq); return kHarq;
+    case NR_DCI11_SW_DAI:  *n = (int)sizeof(kDai);  return kDai;
+    case NR_DCI11_SW_TPC2: *n = (int)sizeof(kTpc2); return kTpc2;
+    case NR_DCI11_SW_P2H:  *n = (int)sizeof(kP2H);  return kP2H;
+  }
+  *n = 0;
+  return NULL;
+}
+
 #define DCI11_HARQ_PID 4
 #define DCI11_TPC      2
 #define DCI11_PUCCH_RI 3
