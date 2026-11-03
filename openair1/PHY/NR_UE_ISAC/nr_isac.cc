@@ -257,14 +257,14 @@ extern "C" void nr_isac_init(void)
   // = 55,944,160 bytes (53.35 MiB). cfr_ring_frames/cfr_max_re may override it.
   int enable = 0, frames = 32, re = max_re, antennas = 0, records = 1024, sub_syms = 0, sub_re = 600;
   double sub_snr = 0;
-  char *sources = nullptr, *legacy_source = nullptr, *rec = nullptr, *cfr = nullptr, *ep = nullptr, *id = nullptr, *array = nullptr;
+  char *mode_str = nullptr, *sources = nullptr, *legacy_source = nullptr, *rec = nullptr, *cfr = nullptr, *ep = nullptr, *id = nullptr, *array = nullptr;
   std::vector<paramdef_t> params = {
     integer("enable", &enable, 0), string("sources", &sources), string("source", &legacy_source, "csi_rs"),
     string("cfr_path", &cfr), string("records_path", &rec), string("endpoint", &ep),
     integer("cfr_ring_frames", &frames, 32), integer("cfr_max_re", &re, max_re), integer("cfr_antennas", &antennas, 0),
     integer("rec_ring_slots", &records, 1024),
     integer("subslot_symbols", &sub_syms, 0), integer("subslot_min_re", &sub_re, 600),
-    string("rx_id", &id), string("rx_array", &array)
+    string("rx_id", &id), string("rx_array", &array), string("mode", &mode_str)
   };
   auto snr = parameter("subslot_min_snr_db", TYPE_DOUBLE); snr.dblptr = &sub_snr; snr.defdblval = 0;
   params.push_back(snr);
@@ -284,7 +284,17 @@ extern "C" void nr_isac_init(void)
     ignored += params[i].optname;
   }
   if (!ignored.empty()) LOG_W(PHY, "SENSING: ignored legacy algorithm keys: %s\n", ignored.c_str());
-  if (!enable) return;
+  nr_isac_mode_cfg_t mcfg;
+  if (!nr_isac_mode_resolve(mode_str, source_mask(sources), -1, -1, &mcfg)) {
+    LOG_E(PHY, "SENSING: unknown mode '%s'; staying legacy\n", mode_str);
+    nr_isac_mode_resolve(nullptr, source_mask(sources), -1, -1, &mcfg);
+  }
+  nr_isac_mode_set(mcfg.mode);
+  if (mcfg.mode == NR_ISAC_MODE_SENSING) LOG_W(PHY, "SENSING: mode=sensing is reserved; behaving as legacy\n");
+  if (mcfg.narrowed) LOG_W(PHY, "SENSING: mode=traffic narrowed sources/decode keys (no CFR in traffic mode)\n");
+  const bool traffic = mcfg.mode == NR_ISAC_MODE_TRAFFIC;
+  // Traffic opens the sense API even with enable=0: DCI records need the sink.
+  if (!enable && !traffic) return;
   if (frames < 1 || frames > 65536 || re < 1 || re > (int)max_re || antennas < 0 || antennas > 8 || records < 1 || records > 65536) {
     LOG_E(PHY, "SENSING: invalid CFR or record ring, RE, or antenna limit\n");
     return;
@@ -292,8 +302,8 @@ extern "C" void nr_isac_init(void)
   base_records_path = rec ? rec : ""; base_cfr_path = cfr ? cfr : ""; base_endpoint = ep ? ep : "";
   rx_id = id ? id : ""; rx_array = array ? array : "";
   base_cfg = {nullptr, nullptr, nullptr, (uint32_t)frames, (uint32_t)re, (uint32_t)records, 1};
-  configured_sources = source_mask(sources);
-  if (!configured_sources) {
+  configured_sources = mcfg.sources;
+  if (!configured_sources && !traffic) {
     const std::string fallback = legacy_source ? legacy_source : "csi_rs";
     configured_sources = fallback == "pdsch_dmrs" ? 1u << NR_ISAC_SRC_PDSCH_DMRS
       : fallback == "pdsch_data" ? 1u << NR_ISAC_SRC_PDSCH_DATA : 1u << NR_ISAC_SRC_CSI_RS;

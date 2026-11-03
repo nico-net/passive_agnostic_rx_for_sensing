@@ -73,6 +73,7 @@ typedef struct nr_isac_carrier_s {
 struct nr_sense_rs_meta_s;
 
 void nr_isac_init(void);
+#include "nr_isac_mode.h" /* nr_isac_mode() */
 void nr_isac_set_rx_antennas(uint32_t antennas); /* call before start, after RX frame parameters are set */
 void nr_isac_start(void);
 void nr_isac_stop(void);

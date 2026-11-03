@@ -59,6 +59,7 @@
 
 #include "PHY/CODING/nrPolar_tools/nr_polar_fssc.h"
 #include "nr_pdcch_nid_gpu.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h" // nr_isac_mode(): traffic-mode decode levels
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdcch_sib1_prior.h"
 #include "nr_pdcch_coreset_bank.h"
@@ -3598,6 +3599,14 @@ void nr_pdcch_blind_monitor_init(void)
   if (p_pdsch != NULL && p_pdsch[0] != '\0' && !parse_pdsch(p_pdsch)) {
     g_cfg.pdsch_decode = 0;
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_pdsch '%s'; passive PDSCH decode disabled\n", p_pdsch);
+  }
+  /* nr_isac_init() runs first (nr-uesoftmodem.c), so nr_isac_mode() is final here. */
+  if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
+    nr_isac_mode_cfg_t m;
+    nr_isac_mode_resolve("traffic", 0, (p_pdsch && p_pdsch[0]) ? g_cfg.pdsch_decode : -1,
+                         (p_ul_pusch && p_ul_pusch[0]) ? g_cfg.ul_pusch_decode : -1, &m);
+    g_cfg.pdsch_decode = m.pdsch_decode;
+    g_cfg.ul_pusch_decode = m.pusch_decode;
   }
   if (g_cfg.pdsch_max_per_slot <= 0) {
     g_cfg.pdsch_max_per_slot = 1;
