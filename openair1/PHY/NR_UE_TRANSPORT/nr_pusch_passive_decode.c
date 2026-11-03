@@ -3340,10 +3340,9 @@ static void ul_en_maybe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, const nr_pdcc
   const double e_un = cu_da ? nr_ulen_db(u_da, cu_da) : nr_ulen_db(u_dm, cu_dm);
   const double rise = cu_da ? (c_da ? e_da - e_un : -99.0) : e_dm - e_un;
   LOG_A(PHY, "SENSING: ULEN rnti=0x%04x slot=%lu mcs=%u prb=%d+%d S=%d L=%d e_sched_dmrs_db=%.1f e_sched_data_db=%.1f e_unsched_db=%.1f"
-             " rise_db=%.1f dmrs_corr=%.3f dmrs_corr_null=%.3f best_off=%d ta=%d crc=%d snr_db=%.1f seg=%d/%d tbl=%u qm=%u\n",
+             " rise_db=%.1f dmrs_corr=%.3f dmrs_corr_null=%.3f best_off=%d ta=%d\n",
         g->rnti, (unsigned long)abs_slot, (unsigned)g->mcs, rb0, g->num_rb, g->start_symbol, g->num_symbols, e_dm, e_da, e_un, rise,
-        corr, corr_null, best_off, out->ta_applied_samples, out->status == NR_PUSCH_PASSIVE_OK, out->snr_db, out->segments_ok,
-        out->segments_tried, (unsigned)out->tbl, (unsigned)out->qam_mod_order);
+        corr, corr_null, best_off, out->ta_applied_samples);
   /* ULPROF: where the slot's energy actually is (antenna 0): per symbol over the whole UL carrier, and per eighth of the carrier over
    * the 14 symbols (dB). Tells a quiet UL slot (all ~floor), a DL/special slot (symbols high), and energy at other PRBs than the grant
    * (one eighth high, grant's eighth at the floor = PRB mapping, else = no UE heard). Same 1/32 sampling as ULEN. */
