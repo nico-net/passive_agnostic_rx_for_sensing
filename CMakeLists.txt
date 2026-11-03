@@ -2794,6 +2794,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_ul_dmrs_diag)
   add_test(NAME test_nr_ul_dmrs_diag COMMAND ./test_nr_ul_dmrs_diag)
 
+  add_executable(test_nr_ul_energy_probe ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_energy_probe_test.cc)
+  target_include_directories(test_nr_ul_energy_probe PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR})
+  target_link_libraries(test_nr_ul_energy_probe PRIVATE GTest::gtest GTest::gtest_main m)
+  add_dependencies(tests test_nr_ul_energy_probe)
+  add_test(NAME test_nr_ul_energy_probe COMMAND ./test_nr_ul_energy_probe)
+
   add_executable(test_nr_ul_rules
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_rules_test.cc)
   target_include_directories(test_nr_ul_rules PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
