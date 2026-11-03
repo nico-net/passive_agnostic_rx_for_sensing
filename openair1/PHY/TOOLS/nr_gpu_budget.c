@@ -302,6 +302,9 @@ static void tk_acquire(int cell,int bulk) {
       else if(tk_best(&w,now))break;
     }
     waited=1;
+    /* never an unbounded wait: OTA 2026-11-03 (415+923, gdb) the ticket was free and four bulk waiters of both cells slept untimed for 107 s (a lost wakeup) -- the nID
+     * sweep and the CSI-RS discovery of both cells stopped. A waiter that is not served rechecks at least every ms. */
+    if(!until || until>now+1000ull)until=now+1000ull;
     tk_wait_until(until,now);
   }
   for(tk_waiter_t **p=&tk_wait;*p;p=&(*p)->next)if(*p==&w) {*p=w.next;break;}
@@ -389,6 +392,8 @@ int nr_gpu_discovery_due(nr_gpu_discovery_duty_t *s,uint64_t now,uint64_t epoch,
   return 1;
 }
 #ifdef NR_GPU_BUDGET_TEST
+/* nr_gpu_disc_ticket_test_release_silently: test-only: the calling thread's ticket is freed WITHOUT the broadcast (a lost wakeup). */
+void nr_gpu_disc_ticket_test_release_silently(void) {pthread_mutex_lock(&tk_mu);tk_held=0;tk_depth=0;pthread_mutex_unlock(&tk_mu);}
 /* nr_gpu_disc_ticket_test_rt_frac: test-only: pins the measured RT-busy share (0..1) for the next 250 ms window. */
 void nr_gpu_disc_ticket_test_rt_frac(double f) {pthread_mutex_lock(&tk_mu);tk_rt_frac=f;tk_rt_t=tk_now();pthread_mutex_unlock(&tk_mu);}
 /* nr_gpu_disc_ticket_test_reset: test-only: clears the ticket (no holder, no waiters), the usage, the stats and the prefer flags; pct as the budget's; clock NULL = the real one. */

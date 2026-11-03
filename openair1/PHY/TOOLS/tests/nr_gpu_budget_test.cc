@@ -372,6 +372,21 @@ TEST(DiscTicket, PreferringCellFirstThenLeastUsedThenArrival) {
   EXPECT_EQ(nr_gpu_budget_discovery_preferred(),1);
   nr_gpu_budget_discovery_prefer_cell(2,0);EXPECT_EQ(nr_gpu_budget_discovery_preferred(),0);
 }
+/* OTA 2026-11-03 (415+923, gdb on the stalled receiver): the ticket was FREE (tk_held=0, no RT in flight, pacing expired) and 4 bulk waiters of both cells slept in an untimed
+ * condvar wait for 107 s: a lost wakeup stopped the nID sweep and the CSI-RS discovery of both cells. Whatever loses a wakeup, a waiter rechecks at least every ms.
+ * Simulated: the holder frees the ticket without the broadcast; the waiter must still get it. */
+TEST(DiscTicket, WaiterRecoversFromALostWakeup) {
+  nr_gpu_disc_ticket_test_reset(100,nullptr);
+  nr_gpu_disc_ticket_acquire_bulk(0);
+  std::atomic<bool> got{false};
+  std::thread w([&] {nr_gpu_disc_ticket_acquire_bulk(1);got=true;nr_gpu_disc_ticket_release();});
+  std::this_thread::sleep_for(std::chrono::milliseconds(20)); /* the waiter is asleep */
+  nr_gpu_disc_ticket_test_release_silently();
+  const auto t0=std::chrono::steady_clock::now();
+  while(!got.load() && std::chrono::steady_clock::now()-t0<std::chrono::milliseconds(500))std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  EXPECT_TRUE(got.load()) << "the waiter slept through a free ticket";
+  if(got.load())w.join(); else {nr_gpu_disc_ticket_acquire(2);nr_gpu_disc_ticket_release();w.join();} /* a real release wakes it */
+}
 /* the cap leaves the idle device free: paced only while the RT work is keeping it busy */
 static uint64_t pace_after_two_cells(bool rt_busy) {
   nr_gpu_budget_test_reset(30);

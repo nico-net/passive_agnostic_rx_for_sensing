@@ -68,6 +68,7 @@ int nr_gpu_discovery_due(nr_gpu_discovery_duty_t *, uint64_t now, uint64_t epoch
 void nr_gpu_budget_test_reset(unsigned pct);
 void nr_gpu_disc_ticket_test_rt_frac(double f);
 void nr_gpu_disc_ticket_test_reset(unsigned pct, uint64_t (*clock_us)(void));
+void nr_gpu_disc_ticket_test_release_silently(void);
 #endif
 #ifdef __cplusplus
 }
