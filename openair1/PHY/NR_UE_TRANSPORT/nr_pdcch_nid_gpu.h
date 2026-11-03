@@ -71,6 +71,7 @@ void nr_pdcch_nid_gpu_rearm(void);
 /* ISAC_DMRS_NID_SOLVE=3 active: one CRC-confirmed record is enough to stop the on-demand sweep (a DCI-less id never confirms). */
 bool nr_pdcch_nid_gpu_primary(void);
 uint64_t nr_pdcch_nid_gpu_passes(void);
+int nr_pdcch_nid_gpu_diag(char *buf, size_t len); /* push-reject counters, batch states, ms since the last run, for the CORESET_DISC line */
 /* Single producer; bounded try-lock, drops if staging is full. rx points to the
  * first requested FFT symbol, with fft complex samples between symbols. */
 int nr_pdcch_nid_gpu_push(const void *rx, int fft, int fco, int slot, int sym,

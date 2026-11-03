@@ -44,6 +44,7 @@ typedef struct {
  uint64_t runs,stale; /* sweep GPU passes run; runs discarded because the epoch moved */
  double kernel_ms;
  _Atomic bool running;
+ _Atomic uint64_t rej_off, rej_cfg, rej_lock, rej_busy, last_done_ms, run_t0_ms; /* push rejects by cause (not running / geometry / mutex miss / no free batch); CLOCK_MONOTONIC ms of the last finished run / start of the run in progress (0 = none) */
  nr_gpu_elastic_t el; /* on-demand window: base = what the memory budget share holds (T6b), full = the requested window */
  int win_passes;      /* passes since the window was (re)started: the window is full when this reaches el.cur */
 } nr_nid_gpu_state_t;
@@ -151,6 +152,7 @@ static void *worker(void *unused)
     pthread_mutex_unlock(&g.mu);
    }
   }
+  {struct timespec t0;clock_gettime(CLOCK_MONOTONIC,&t0);atomic_store_explicit(&g.run_t0_ms,(uint64_t)t0.tv_sec*1000u+t0.tv_nsec/1000000u,memory_order_relaxed);}
   int rc=g.ops->upload(g.device,&g.batch[b]);
   pthread_mutex_lock(&g.mu);
   g.state[b]=0;
@@ -160,6 +162,7 @@ static void *worker(void *unused)
   nr_pdcch_nid_result_t result={0};
   rc=g.ops->run(g.device,&result);
   if(admit_t0){nr_admit_done(NR_ADMIT_NID,nr_admit_now_ns()-admit_t0);admit_t0=0;}
+  {struct timespec dn;clock_gettime(CLOCK_MONOTONIC,&dn);atomic_store_explicit(&g.last_done_ms,(uint64_t)dn.tv_sec*1000u+dn.tv_nsec/1000000u,memory_order_relaxed);atomic_store_explicit(&g.run_t0_ms,0,memory_order_relaxed);}
   if(rc<0)goto failed;
   if(rc==0) {
    g.runs++;
@@ -318,16 +321,17 @@ void nr_pdcch_nid_gpu_stop(void)
  */
 int nr_pdcch_nid_gpu_push(const void *rx,int fft,int fco,int slot,int sym,const nr_pdcch_nid_config_t *cfg)
 {
- if(!nr_pdcch_nid_gpu_running() || !rx || !cfg || cfg->dur!=g.dur || cfg->nsc<72
+ if(!nr_pdcch_nid_gpu_running()){atomic_fetch_add_explicit(&g.rej_off,1,memory_order_relaxed);return -1;}
+ if(!rx || !cfg || cfg->dur!=g.dur || cfg->nsc<72
     || cfg->nsc>12*g.rb || cfg->nsc>fft || fco<0 || fco>=fft || cfg->sps<1 || cfg->sps>14
     || sym<0 || sym>=cfg->sps || slot<0 || slot>=160
     || (cfg->nsc-cfg->point_a_sc)/12>275
-    || (cfg->nsc-cfg->point_a_sc)/12-(cfg->point_a_sc<0?(-cfg->point_a_sc+11)/12:0)<6)return -1;
- if(pthread_mutex_trylock(&g.mu))return -1;
+    || (cfg->nsc-cfg->point_a_sc)/12-(cfg->point_a_sc<0?(-cfg->point_a_sc+11)/12:0)<6){atomic_fetch_add_explicit(&g.rej_cfg,1,memory_order_relaxed);return -1;}
+ if(pthread_mutex_trylock(&g.mu)){atomic_fetch_add_explicit(&g.rej_lock,1,memory_order_relaxed);return -1;}
  if(g.producer<0) {
   for(int j=0;j<3;j++)if(g.state[j]==0){g.producer=j;g.state[j]=1;g.n=0;break;}
  }
- if(g.producer<0) {g.dropped++;pthread_mutex_unlock(&g.mu);return -1;}
+ if(g.producer<0) {g.dropped++;atomic_fetch_add_explicit(&g.rej_busy,1,memory_order_relaxed);pthread_mutex_unlock(&g.mu);return -1;}
  nr_pdcch_nid_batch_t *b=&g.batch[g.producer];
  nr_pdcch_nid_config_t current=*cfg;current.epoch=g.epoch+(g.rearm<<24);
  if(g.n && memcmp(&b->cfg,&current,sizeof(current)))g.n=0;
@@ -353,6 +357,18 @@ void nr_pdcch_nid_gpu_rearm(void)
  pthread_mutex_lock(&g.mu);
  g.rearm++;g.result.count=0;g.generation++;g.all_verified=false;
  pthread_mutex_unlock(&g.mu);
+}
+/* nr_pdcch_nid_gpu_diag: " nid_push_rej[...] nid_bufs=... nid_idle_ms=..." for the CORESET_DISC line: push rejects by cause, the 3 batch states (0 free, 1 producer, 2 full, 3 worker;
+ * ? = mutex held), ms since the worker last finished a run (-1 = never), ms the run in progress has lasted (-1 = none: worker idle or blocked elsewhere). Why a sweep stopped taking captures. */
+int nr_pdcch_nid_gpu_diag(char *buf,size_t len)
+{
+ char st[4]="???";
+ if(!pthread_mutex_trylock(&g.mu)){for(int j=0;j<3;j++)st[j]=(char)('0'+g.state[j]);pthread_mutex_unlock(&g.mu);}
+ struct timespec n;clock_gettime(CLOCK_MONOTONIC,&n);
+ const uint64_t d=atomic_load_explicit(&g.last_done_ms,memory_order_relaxed),r0=atomic_load_explicit(&g.run_t0_ms,memory_order_relaxed),now=(uint64_t)n.tv_sec*1000u+n.tv_nsec/1000000u;
+ return snprintf(buf,len," nid_push_rej[off=%llu cfg=%llu lock=%llu busy=%llu] nid_bufs=%s nid_idle_ms=%lld nid_run_ms=%lld",
+   (unsigned long long)atomic_load_explicit(&g.rej_off,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&g.rej_cfg,memory_order_relaxed),
+   (unsigned long long)atomic_load_explicit(&g.rej_lock,memory_order_relaxed),(unsigned long long)atomic_load_explicit(&g.rej_busy,memory_order_relaxed),st,d?(long long)(now-d):-1ll,r0?(long long)(now-r0):-1ll);
 }
 /* nr_pdcch_nid_gpu_passes: completed sweep passes (0 when the lock is contended). Caller: ACQMISS state line. */
 uint64_t nr_pdcch_nid_gpu_passes(void)
