@@ -58,8 +58,13 @@ struct nr_pool {
   int chan_demand;                  /* tokens the channelizer asked for (0 = none registered) */
   bool dyn_promo;                   /* B6: config derived (cfg == NULL at create): DISC/HOUSE promotion also follows the tokens per active cell, see promo_blocked() */
   bool chan_tok[NR_POOL_MAX_TOKENS]; /* the r reserved tokens (fastest first): CHAN's own, nobody else is placed on them while r > 0 */
-  cpu_set_t poolset, home;
+  cpu_set_t poolset, home; /* home: writer copy under mu; readers use home_pub[home_i] (a slot is rewritten only after a flip, moves are seconds apart) */
+  cpu_set_t home_pub[2];
+  _Atomic int home_i;
   bool have_home;
+  int mv_core[NR_POOL_MAX_TOKENS], mv_cap[NR_POOL_MAX_TOKENS], nmv; /* cores moved to home, newest last */
+  double split_home_w, split_pool_w;                                /* last windows (summary in the CORE_POOL line) */
+  int split_ticks, split_moves;
   pid_t member[256];
   int nmember;
   nr_pool_stats_t st;
@@ -192,6 +197,14 @@ void nr_pool_shed_note(nr_pool_t *p, int tier)
   pthread_mutex_unlock(&p->mu);
 }
 
+static void publish_home(nr_pool_t *p)
+{
+  const int i = 1 - atomic_load(&p->home_i);
+  p->home_pub[i] = p->home;
+  atomic_store(&p->home_i, i);
+}
+static const cpu_set_t *home_of(const nr_pool_t *p) { return &p->home_pub[atomic_load((_Atomic int *)&p->home_i)]; }
+
 nr_pool_t *nr_pool_create(const int *cores, const int *capacity, int n, const nr_pool_cfg_t *cfg)
 {
   if (!cores || n < 1 || n > NR_POOL_MAX_TOKENS) return NULL;
@@ -215,6 +228,7 @@ nr_pool_t *nr_pool_create(const int *cores, const int *capacity, int n, const nr
     for (int c = 0; c < CPU_SETSIZE; c++)
       if (CPU_ISSET(c, &cur) && !CPU_ISSET(c, &p->poolset)) CPU_SET(c, &p->home);
     p->have_home = CPU_COUNT(&p->home) > 0;
+    publish_home(p);
   }
   return p;
 }
@@ -465,6 +479,7 @@ static void grant(nr_pool_t *p, waiter_t *w, int tok, uint64_t now, bool promote
   const uint64_t wait = now > w->t_enq ? now - w->t_enq : 0; /* now may predate a waiter that queued while an older dispatch ran */
   p->st.leases[w->prio]++;
   if (wait > 2000) p->st.waited[w->prio]++;
+  p->st.wait_ns[w->prio] += wait;
   if (promoted) p->st.promoted[w->prio]++;
   if (wait > p->st.wait_max_ns[w->prio]) p->st.wait_max_ns[w->prio] = wait;
   if (per_cell(w->prio)) {
@@ -520,7 +535,7 @@ static bool is_member(nr_pool_t *p, pid_t tid);
 static void go_home(const nr_pool_t *p)
 {
   if (!p->cfg.pin || !p->have_home || tl.cur_core < 0) return;
-  if (sched_setaffinity(0, sizeof(p->home), &p->home) == 0) tl.cur_core = -1;
+  if (sched_setaffinity(0, sizeof(cpu_set_t), home_of(p)) == 0) tl.cur_core = -1;
 }
 
 static __thread bool tl_resume; /* the lease() in progress is a GPU-wait re-acquire */
@@ -685,6 +700,9 @@ static int pool_line_proc(const nr_pool_stats_t *sp, const nr_pool_t *p, char *b
   if (s.gpu_gives && o < len)
     o += snprintf(buf + o, (size_t)(len - o), " gpu_resume[wait_us p50<=%lu p99<=%lu max=%lu]", (unsigned long)hist_q_us(s.gpu_resume_hist, 0.5),
                   (unsigned long)hist_q_us(s.gpu_resume_hist, 0.99), (unsigned long)(s.gpu_resume_max_ns / 1000));
+  if (p && p->split_ticks && o < len) /* the adaptive split has measured at least once (racy read of the summary doubles is fine for a log line) */
+    o += snprintf(buf + o, (size_t)(len - o), " split[home=%d extra=%d moves=%d home_wait=%.1f%% pool_wait=%.1f%%]", (int)CPU_COUNT(&p->home), p->nmv, p->split_moves,
+                  p->split_home_w * 100, p->split_pool_w * 100);
   for (int i = 0; i < NR_POOL_NPRIO && o < len; i++) {
     if ((i == NR_POOL_CHAN || i == NR_POOL_SENSE) && !s.leases[i]) continue; /* no channelizer / no sensing exporter: the line is the pre-CHAN / pre-SENSE one */
     o += snprintf(buf + o, (size_t)(len - o), " %s[n=%lu waited=%lu promo=%lu wait_us p50<=%lu p99<=%lu max=%lu]", k_cls_nm[i],
@@ -824,7 +842,7 @@ int nr_pool_enforce(nr_pool_t *p)
         else CPU_SET(c, &nw);
       }
     if (!hit) continue;
-    if (CPU_COUNT(&nw) == 0) nw = p->home; /* pinned to pool cores only: the home lane */
+    if (CPU_COUNT(&nw) == 0) nw = *home_of(p); /* pinned to pool cores only: the home lane */
     if (CPU_COUNT(&nw) > 0 && sched_setaffinity((pid_t)tid, sizeof(nw), &nw) == 0) changed++;
   }
   closedir(d);
@@ -860,6 +878,7 @@ static void add_list(const char *e, int *v, int *n)
   }
 }
 
+static void split_start(nr_pool_t *p);
 /* The pool cores = the site core map: the PDSCH and PUSCH consumer lists (defaults built in, nr_env_core), minus the RT receive thread,
  * radio ring and UHD control cores, and minus cores the process may not use. The scan consumers no longer have cores of their own. */
 extern const nr_core_layout_t *nr_core_layout(void) __attribute__((weak)); /* the unit tests link this file without the layout */
@@ -922,6 +941,12 @@ static void site_init(void)
     if (ok) break;
     for (int i = 0; i < n; i++) cap[i] = 0;
   }
+  for (int i = 1; i < n; i++) { /* fastest first, stable: the LAST token is the slowest core, the one the adaptive split moves to home first */
+    const int cc = cores[i], cp = cap[i];
+    int j = i;
+    for (; j > 0 && cap[j - 1] < cp; j--) cores[j] = cores[j - 1], cap[j] = cap[j - 1];
+    cores[j] = cc, cap[j] = cp;
+  }
   g_site = nr_pool_create(cores, cap, n, NULL);
   if (g_site) {
     if (have_allowed) { /* home = allowed minus pool minus RT/ring/UHD cores (not whatever mask the first caller had) */
@@ -930,7 +955,7 @@ static void site_init(void)
         if (CPU_ISSET(c, &g_site->poolset)) CPU_CLR(c, &h);
       for (int j = 0; j < nex; j++)
         if (ex[j] < CPU_SETSIZE) CPU_CLR(ex[j], &h);
-      if (CPU_COUNT(&h) > 0) g_site->home = h, g_site->have_home = true;
+      if (CPU_COUNT(&h) > 0) g_site->home = h, g_site->have_home = true, publish_home(g_site);
     }
     char l[256];
     int o = snprintf(l, sizeof(l), "SENSING: CORE_POOL: %d cores:", n);
@@ -939,7 +964,212 @@ static void site_init(void)
     for (int i = 0; i < n && o < (int)sizeof(l) - 8; i++) o += snprintf(l + o, sizeof(l) - (size_t)o, " %d", g_site->tier[i]);
     fprintf(stderr, "%s\n", l);
     nr_pool_enforce(g_site);
+    split_start(g_site);
   }
+}
+
+
+/* ---- adaptive home / pool split (header, ADAPTIVE HOME / POOL SPLIT) ---- */
+int nr_pool_split_decide(double hw, double pw, int home_n, int pool_n, int home_min, int pool_min)
+{
+  if (hw < NR_POOL_SPLIT_FLOOR && pw < NR_POOL_SPLIT_FLOOR) return 0;
+  if (hw > pw + NR_POOL_SPLIT_MARGIN) return pool_n - 1 >= pool_min ? 1 : 0;
+  if (pw > hw + NR_POOL_SPLIT_MARGIN) return home_n - 1 >= home_min ? -1 : 0;
+  return 0;
+}
+
+static bool mask_subset(const cpu_set_t *a, const cpu_set_t *b)
+{
+  cpu_set_t t;
+  CPU_AND(&t, a, b);
+  return CPU_EQUAL(&t, a);
+}
+
+/* Threads that live on the home mask: >= 2 CPUs, all inside `home` (single-CPU pins, RT readers and radio threads are left alone). */
+static bool home_thread(pid_t tid, const cpu_set_t *home, cpu_set_t *m)
+{
+  return sched_getaffinity(tid, sizeof(*m), m) == 0 && CPU_COUNT(m) >= 2 && mask_subset(m, home);
+}
+
+/* No lock held: grow adds `core` to, shrink removes it from, the mask of every home-mask thread (judged against the OLD home). */
+static void reapply_home(const cpu_set_t *oldh, int core, bool grow)
+{
+  DIR *d = opendir("/proc/self/task");
+  if (!d) return;
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    const long tid = strtol(e->d_name, NULL, 10);
+    cpu_set_t m;
+    if (tid <= 0 || !home_thread((pid_t)tid, oldh, &m)) continue;
+    if (grow) CPU_SET(core, &m);
+    else CPU_CLR(core, &m);
+    if (CPU_COUNT(&m) > 0) sched_setaffinity((pid_t)tid, sizeof(m), &m);
+  }
+  closedir(d);
+}
+
+bool nr_pool_core_to_home(nr_pool_t *p)
+{
+  if (!p || !p->have_home) return false;
+  pthread_mutex_lock(&p->mu);
+  const int t = p->n - 1;
+  if (p->n <= 1 || p->busy[t] || p->chan_tok[t] || p->nmv >= NR_POOL_MAX_TOKENS || p->core[t] < 0 || p->core[t] >= CPU_SETSIZE) {
+    pthread_mutex_unlock(&p->mu);
+    return false;
+  }
+  const int core = p->core[t];
+  const cpu_set_t oldh = p->home;
+  p->mv_core[p->nmv] = core, p->mv_cap[p->nmv++] = p->cap[t];
+  p->n--, p->nfree--;
+  CPU_CLR(core, &p->poolset);
+  CPU_SET(core, &p->home);
+  publish_home(p);
+  nr_pool_speed_tiers(p->cap, p->n, p->tier);
+  p->chan_tok[t] = false;
+  p->split_moves++;
+  pthread_mutex_unlock(&p->mu);
+  reapply_home(&oldh, core, true);
+  return true;
+}
+
+bool nr_pool_core_to_pool(nr_pool_t *p)
+{
+  if (!p) return false;
+  pthread_mutex_lock(&p->mu);
+  if (p->nmv <= 0 || p->n >= NR_POOL_MAX_TOKENS) {
+    pthread_mutex_unlock(&p->mu);
+    return false;
+  }
+  const int core = p->mv_core[--p->nmv], t = p->n;
+  const cpu_set_t oldh = p->home;
+  p->core[t] = core, p->cap[t] = p->mv_cap[p->nmv], p->busy[t] = false, p->chan_tok[t] = false;
+  p->n++, p->nfree++;
+  CPU_SET(core, &p->poolset);
+  CPU_CLR(core, &p->home);
+  publish_home(p);
+  nr_pool_speed_tiers(p->cap, p->n, p->tier);
+  p->split_moves++;
+  dispatch(p, nr_pool_now_ns());
+  pthread_mutex_unlock(&p->mu);
+  reapply_home(&oldh, core, false);
+  return true;
+}
+
+int nr_pool_home_extra(const nr_pool_t *p) { return p ? p->nmv : 0; }
+
+typedef struct { pid_t tid; uint64_t run, wait; } tsamp_t;
+#define SPLIT_MAXT 1024
+typedef struct {
+  tsamp_t prev[SPLIT_MAXT], cur[SPLIT_MAXT];
+  int nprev, ncur;
+  uint64_t t_ns, st_wait, st_hold;
+} split_state_t;
+
+/* Home-mask threads: wait / (wait + cpu time) over the window, from the tids seen in both samples; -1 under 10 % of a CPU of activity (no evidence). */
+static double home_wait_sample(const nr_pool_t *p, split_state_t *s, uint64_t now)
+{
+  cpu_set_t home;
+  home = *home_of(p);
+  s->ncur = 0;
+  DIR *d = opendir("/proc/self/task");
+  if (!d) return -1;
+  struct dirent *e;
+  while ((e = readdir(d)) && s->ncur < SPLIT_MAXT) {
+    const long tid = strtol(e->d_name, NULL, 10);
+    cpu_set_t m;
+    if (tid <= 0 || !home_thread((pid_t)tid, &home, &m)) continue;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/task/%ld/schedstat", tid);
+    FILE *f = fopen(path, "r");
+    unsigned long long run = 0, wait = 0;
+    const int ok = f && fscanf(f, "%llu %llu", &run, &wait) == 2;
+    if (f) fclose(f);
+    if (ok) s->cur[s->ncur++] = (tsamp_t){(pid_t)tid, run, wait};
+  }
+  closedir(d);
+  double dr = 0, dw = 0;
+  for (int i = 0; i < s->ncur; i++)
+    for (int j = 0; j < s->nprev; j++)
+      if (s->prev[j].tid == s->cur[i].tid) {
+        if (s->cur[i].run >= s->prev[j].run) dr += (double)(s->cur[i].run - s->prev[j].run);
+        if (s->cur[i].wait >= s->prev[j].wait) dw += (double)(s->cur[i].wait - s->prev[j].wait);
+        break;
+      }
+  memcpy(s->prev, s->cur, (size_t)s->ncur * sizeof(tsamp_t));
+  s->nprev = s->ncur;
+  const double win = now > s->t_ns ? (double)(now - s->t_ns) : 1;
+  return s->t_ns && dr + dw >= 0.1 * win ? dw / (dr + dw) : -1;
+}
+
+/* Token wait of the essential classes over the window: wait / (wait + hold); -1 without a lease in the window. */
+static double pool_wait_sample(nr_pool_t *p, split_state_t *s)
+{
+  nr_pool_stats_t st;
+  nr_pool_stats(p, &st);
+  uint64_t w = 0, h = 0;
+  for (int c = NR_POOL_SCAN; c <= NR_POOL_RETRY; c++) w += st.wait_ns[c], h += st.hold_ns[c];
+  const uint64_t dw = w - s->st_wait, dh = h - s->st_hold;
+  s->st_wait = w, s->st_hold = h;
+  return s->t_ns && dw + dh ? (double)dw / (double)(dw + dh) : -1;
+}
+
+static void mask_list(const cpu_set_t *m, char *b, int len)
+{
+  int o = 0;
+  b[0] = 0;
+  for (int c = 0; c < CPU_SETSIZE && o < len - 8; c++)
+    if (CPU_ISSET(c, m)) o += snprintf(b + o, (size_t)(len - o), "%s%d", o ? "," : "", c);
+}
+
+static void *split_main(void *arg)
+{
+  nr_pool_t *p = arg;
+  static split_state_t s; /* one thread per process */
+  prctl(PR_SET_NAME, "poolSplit", 0, 0, 0);
+  nr_pool_member_enter(p);
+  int dir = 0, streak = 0;
+  for (;;) {
+    struct timespec ts = {NR_POOL_SPLIT_PERIOD_S, 0};
+    nanosleep(&ts, NULL);
+    pthread_mutex_lock(&p->mu);
+    int cells = 0;
+    for (int c = 0; c < NR_POOL_MAX_CELLS; c++) cells += p->dem_t0[c] != 0;
+    const int pool_n = p->n, home_n = (int)CPU_COUNT(&p->home), home_min = home_n - p->nmv;
+    pthread_mutex_unlock(&p->mu);
+    if (cells < 2) continue; /* one cell keeps the static split */
+    const uint64_t now = nr_pool_now_ns();
+    double hw = home_wait_sample(p, &s, now), pw = pool_wait_sample(p, &s);
+    s.t_ns = now;
+    if (hw < 0) hw = 0; /* no evidence on a side = no wait on it */
+    if (pw < 0) pw = 0;
+    pthread_mutex_lock(&p->mu);
+    p->split_home_w = hw, p->split_pool_w = pw, p->split_ticks++;
+    pthread_mutex_unlock(&p->mu);
+    const int pool_min = 2 * cells < 3 ? 3 : 2 * cells; /* SCAN + DECODE of every cell servable at once */
+    const int d = nr_pool_split_decide(hw, pw, home_n, pool_n, home_min, pool_min);
+    streak = d && d == dir ? streak + 1 : d ? 1 : 0;
+    dir = d;
+    if (streak < NR_POOL_SPLIT_CONFIRM) continue;
+    if (d > 0 ? nr_pool_core_to_home(p) : nr_pool_core_to_pool(p)) {
+      char l[128];
+      pthread_mutex_lock(&p->mu);
+      const cpu_set_t h = p->home;
+      const int pn = p->n;
+      pthread_mutex_unlock(&p->mu);
+      mask_list(&h, l, sizeof(l));
+      fprintf(stderr, "SENSING: CORE_SPLIT home=%s pool=%d reason=home_wait=%.1f%% pool_wait=%.1f%%\n", l, pn, hw * 100, pw * 100);
+      streak = 0;
+      s.t_ns = 0; /* rebaseline: the next window starts after the move */
+      s.nprev = 0;
+    }
+  }
+  return NULL;
+}
+
+static void split_start(nr_pool_t *p)
+{
+  pthread_t t;
+  if (p->n >= 3 && p->have_home && pthread_create(&t, NULL, split_main, p) == 0) pthread_detach(t);
 }
 
 static _Atomic bool g_site_test; /* unit tests only: g_site was injected */
@@ -1118,7 +1348,7 @@ void nr_pool_site_note_scan_extra(void) { nr_pool_note_scan_extra(g_site); }
 bool nr_pool_site_home_attr(pthread_attr_t *a)
 {
   nr_pool_t *p = g_site;
-  return p && tl.pool == p && p->have_home && pthread_attr_setaffinity_np(a, sizeof(p->home), &p->home) == 0;
+  return p && tl.pool == p && p->have_home && pthread_attr_setaffinity_np(a, sizeof(cpu_set_t), home_of(p)) == 0;
 }
 
 void nr_pool_site_enforce_tick(void)

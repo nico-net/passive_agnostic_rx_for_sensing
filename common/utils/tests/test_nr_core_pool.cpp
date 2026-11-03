@@ -1457,3 +1457,59 @@ TEST(CorePool, SiteExcludesEveryCellsRtReaderAndTheFeed)
   EXPECT_EQ(nr_pool_layout_excludes(NULL, ex, 1, 16), 1); /* no active layout (tests, ISAC_CORE_PLAN=0): the env list only */
   EXPECT_EQ(nr_pool_layout_excludes(&L, ex, 2, 2), 2); /* never past the array */
 }
+
+// ---- adaptive home / pool split ----
+TEST(CoreSplit, DecideRule)
+{
+  // sizes: home 4 (min 2), pool 8 (min 4)
+  EXPECT_EQ(nr_pool_split_decide(0.20, 0.02, 4, 8, 2, 4), 1);   // home waits more: a core pool -> home
+  EXPECT_EQ(nr_pool_split_decide(0.02, 0.40, 4, 8, 2, 4), -1);  // pool waits more: home -> pool
+  EXPECT_EQ(nr_pool_split_decide(0.02, 0.01, 4, 8, 2, 4), 0);   // both under the floor
+  EXPECT_EQ(nr_pool_split_decide(0.10, 0.07, 4, 8, 2, 4), 0);   // inside the dead band
+  EXPECT_EQ(nr_pool_split_decide(0.20, 0.02, 4, 4, 2, 4), 0);   // pool at its minimum
+  EXPECT_EQ(nr_pool_split_decide(0.02, 0.40, 2, 8, 2, 4), 0);   // home at its minimum
+  EXPECT_EQ(nr_pool_split_decide(0.20, 0.02, 4, 5, 2, 4), 1);   // pool 5 -> 4 is allowed
+}
+
+TEST(CoreSplit, MoveTokens)
+{
+  cpu_set_t al;
+  ASSERT_EQ(sched_getaffinity(0, sizeof(al), &al), 0);
+  std::vector<int> cpus;
+  for (int c = 0; c < CPU_SETSIZE; c++)
+    if (CPU_ISSET(c, &al)) cpus.push_back(c);
+  if (cpus.size() < 5) GTEST_SKIP() << "needs 5 allowed CPUs (3 pool + home)";
+  nr_pool_cfg_t cfg = nr_pool_cfg_default();
+  cfg.pin = false;
+  int cores[3] = {cpus[0], cpus[1], cpus[2]};
+  nr_pool_t *p = nr_pool_create(cores, nullptr, 3, &cfg);
+  ASSERT_EQ(nr_pool_size(p), 3);
+  ASSERT_FALSE(nr_pool_core_to_pool(p)); // nothing was moved: home never drops below its start size
+  EXPECT_EQ(nr_pool_free(p), 3);
+  const bool in2 = nr_pool_core_in_pool(p, cores[2]);
+  EXPECT_TRUE(in2);
+  ASSERT_TRUE(nr_pool_core_to_home(p));
+  EXPECT_EQ(nr_pool_size(p), 2);
+  EXPECT_EQ(nr_pool_free(p), 2);
+  EXPECT_FALSE(nr_pool_core_in_pool(p, cores[2]));
+  EXPECT_EQ(nr_pool_home_extra(p), 1);
+  // a lease never lands on the removed core
+  for (int i = 0; i < 4; i++) {
+    const int c = nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+    EXPECT_NE(c, cores[2]);
+    nr_pool_release(p);
+  }
+  ASSERT_TRUE(nr_pool_core_to_pool(p));
+  EXPECT_EQ(nr_pool_size(p), 3);
+  EXPECT_EQ(nr_pool_free(p), 3);
+  EXPECT_TRUE(nr_pool_core_in_pool(p, cores[2]));
+  EXPECT_EQ(nr_pool_home_extra(p), 0);
+  EXPECT_FALSE(nr_pool_core_to_pool(p));
+  // a busy last token is never taken: hold one lease, then try to move
+  ASSERT_EQ(nr_pool_size(p), 3);
+  const int held = nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+  const bool expect = held != nr_pool_core_of(p, 2); // refused exactly when the lessee sits on the last token
+  EXPECT_EQ(nr_pool_core_to_home(p), expect);
+  nr_pool_release(p);
+  nr_pool_destroy(p);
+}
