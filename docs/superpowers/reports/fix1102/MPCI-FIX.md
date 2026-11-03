@@ -1,44 +1,76 @@
-# MPCI-FIX — multi-PCI fixes, 2026-11-02 (branch fix1102/mpci-pbch, from mpci-main 531488c715; not merged, not pushed)
-Host DGX Spark + X410 34B2AF1, 4 RX, sensing cfg, MPCI_20261025.env + ISAC_SIB1_CACHE=0. Labels per PROJECT_MEMORY §0.1; numbers are per cell, never pooled.
-Commits: 3d5e2371c9 (nID admission), 02e01e8ad2 (lock verify + per-cell recovery), bd0585c111 / bf45fa3835 (offline channelizer tool).
+# MPCI-FIX — multi-PCI fixes, 2026-11-02/03 (branch fix1102/mpci-pbch, from mpci-main 531488c715; not merged, not pushed)
+Host DGX Spark + X410 34B2AF1, 4 RX, sensing cfg ue.passive.ota.sense.dgx.cfg, MPCI_20261025.env + ISAC_SIB1_CACHE=0. Labels per PROJECT_MEMORY §0.1; numbers are per cell, never pooled.
+OTA tonight = night load (22:15-05:30), on the operator's request; grant counts vary 5x run to run at this hour (same cell, minutes apart), so compare locks / CORESET / CRC, not counts.
 
-## B. Per-cell recovery — DONE on air
-Root cause [MEASURED, OTA 15:45-15:59]: through the wideband (channelizer) path a cell locks an SSB beam whose initial-sync PBCH passes CRC but whose tracking
-PBCH never decodes (34/34 such locks across today's OTA, 0 ok from the first census window; every lock that tracked decoded in its first window). The RFSTALL
-watchdog waited 8 windows, then a full device re-init restarted EVERY cell; after 5 the receiver exited rc=3 (6 of 6 two-cell runs at ~90 s, both builds).
-Fix 02e01e8ad2 (general, no flag): nr_lock_verify.{h,c} (pure, test_nr_lock_verify): a lock with no tracking PBCH for 2 census windows is rejected (LOCK_REJECT),
-only that cell re-acquires and the beam is skipped by its next searches (forgotten after a verified lock or 4 empty searches); a PBCH loss with signal present
-re-acquires that cell only; the device re-init stays for a collapsed RF stream. Static-audit table updated (2 per-cell statics).
-| OTA 300 s [MEASURED] | build | exit | device re-inits | 415 grants (CRC) / >128 PRB | other cell grants (CRC) |
-|---|---|---|---|---|---|
-| 415+923 x6 (b1B,f1B,b2B,b2Br,f2B,f2Br) | base / base+3d5e | rc=3 ~90 s | 4 each | ~0 | 923 ~0 |
-| 415+923 fB1 / fB2 | fix | full | 0 / 0 | 8717 (79.5 %) / 30049 (81.3 %) | 923 8680 (79.3 %) / 0 (1 lock) |
-| 403+508 bLW / fLW | base / fix | rc=3 / full | 4 / 0 | 403: 6 / 496 (0 %) | 508: 1 / 9 |
-| 415+403 bVL / fVL | base / fix | full / full | 2 / 0 | 70306 (70.7 %) / 45388 (77.6 %) | 403: 6163 (25.2 %) / 10903 (33.2 %) |
-Solos on the fix build, 180 s [MEASURED]: 415 74063 (68.2 %), 923 23599 (72.7 %), 403 2183 (18.2 %), 508 3: in this morning's range, 0 rejects.
-Not covered: the rejected beam comes back after the memory clears (same beam rejected 3-29x per run), so the cell loses time; the underlying bad lock is C below.
+## Status in one table (OTA, night/early morning load)
+Final campaign 06:24-07:16 on HEAD f47cf4925b [MEASURED]:
+| run | cell | locks / LOCK_REJECT / re-init | CORESET banked at | nID passes (longest run) | grants (CRC) | >128 PRB n (CRC) | decoded PRB | overruns |
+|---|---|---|---|---|---|---|---|---|
+| FB1 415+923 | 415 | 3 / 0 / 0 | 23.4 s | 92 (4.3 s) | 1607 (92.7) | 345 (86.1) | 87k | 5 |
+| | 923 | 4 / 0 / 0 | 6.7 s | 136 (5.0 s) | 9523 (82.7) | 59 (0.0) | 126k | |
+| FB2 415+923 | 415 | 21 / 0 / 0 | 3.6 s | 111 (3.9 s) | 5459 (90.7) | 382 (52.1) | 130k | 39 (29 in the first 20 % of the run) |
+| | 923 | 20 / 0 / 0 | 0.0 s | 85 (7.5 s) | 25469 (86.8) | 694 (48.3) | 530k | |
+| FV27 415+27 | 415 | 1 / 0 / 0 | 16.7 s | 112 (7.9 s) | 12302 (80.4) | 1555 (55.7) | 368k | |
+| | 27 | 1 / 0 / 0 | 3.3 s | 254 | 15931 (48.9) | - (51 PRB) | 239k | |
+| FVL 415+403, FLW 403+508 | 403 | never found (17-18 searches, x2 each) | - | - | - | - | - | 403 not on air (3630 MHz carries PCI 27, barred) |
+| | 415 / 508 | lock / 0 / 0 | 415 MISSED in FVL (38 passes beside a cell stuck in initial sync) | | | | | |
+| solo FS415 | 415 | 1 / 0 / 0 | 42.9 s | | | 11 (45.5) | 2k | 0 |
+| solo FS923 | 923 | 1 / 0 / 0 | 3.4 s | | | 941 (12.1) | 272k | 0 |
+All 21 415+923 runs of the night (01:26-05:08, earlier builds) and the 4+2 of 06:03-06:58: 0 LOCK_REJECT, 0 device re-init. The 415 CORESET history: banked 3/3 before 03:00,
+3/18 between 03:00 and 05:10 (before the lost-wakeup fix), 4/5 after it (LB2, LB3, FB1, FB2; LB1 0 candidates).
 
-## A. Second-cell CORESET / PBCH — partly
-[OFFLINE VERIFIED, control-arm replays] the later-locking cell's GPU nID sweep was shed by pool admission (nid_passes=0) -> fix 3d5e2371c9 (never shed the sweep
-of a cell with no published CORESET; test_nr_pdcch_nid_worker_shed). No measured gain in replay (the 4 s replay loop restarts the sweep); on air 923 banked its
-CORESET in fB1 (32 passes, 8680 grants). OPEN: 923 PBCH acquisition with two cells (fB2: 1 lock, 57 failed searches); not root-caused.
+## Fixes (commits, each test-first)
+1. 3b383fe6d7 initial sync: a search pinned to the cell's PCI (multi-cell receiver only) gets up to 3 PSS peaks of ONE N_ID_2; after the SSS ranking the best one was redone only if
+   its N_ID_2 differed from the last tried -> the PBCH was decoded off another beam's SSB symbols while timing came from the best one: initial PBCH CRC ok, tracking PBCH 0/50,
+   lock rejected forever. Root cause of "one cell works, two do not". [OFFLINE VERIFIED, DGX replay, same channelized samples]: single-cell receiver beam 4 first 3/3, multi-cell beams 2/5
+   9/9 never tracking; after the fix 0 rejects in 6 replays. [MEASURED OTA] 0 LOCK_REJECT in every pair run since (beam 5 now tracks with two cells).
+2. 0ef5347e2b lock verify: a relock between two census windows was not seen -> the old beam was rejected again (logs: "LOCK_REJECT ssb_index=5" while locked on 2). Lock generation passed in.
+3. 99be10cda0 nID sweep: it was fed the cell epoch, bumped by every SOFT RX_RECOVERY (~3 s): each bump restarted the 10-batch window (~5 s) -> 0 passes. Now the dedicated epoch.
+   [OFFLINE VERIFIED, DGX replay] 0 passes / MISSED 3/3 -> 10-30 passes, banked 3/3.
+4. dda0cfcddb GPU budget: the process-wide discovery budget was single-cell (one pct share for all cells, an exclusive owner needing a device free of RT work, held across the
+   ticket wait). [MEASURED OTA, diagnostic build] per 150 s 27466 slices / 9 s GPU per cell in a pair vs 122653 / 28 s solo, 48 s admission spin + 57 s ticket wait; yields 174-234 M.
+   Now with k >= 2 discovering cells: budget/pacing min(100, k*pct), admission = pacing + budget, the G4 ticket is the single flight. One cell unchanged (unit tested).
+   [MEASURED OTA qB2] nID passes 70/65 (were 26-52), yields 219 k, discovery share 15.3 % (solo 14.4 %), 923 dec p50/p99 747/3348 us, e2e 1828/6413, async drop 0.2 %.
+5. f47cf4925b GPU ticket: a waiter never sleeps unbounded. [MEASURED, gdb on the stalled receiver] the ticket was FREE (no holder, no RT, pacing expired) and the 4 bulk
+   waiters (nID + CSI-RS of both cells) slept untimed for up to 107 s: a lost wakeup stopped all discovery (pB2, bB1, gC2, gD2). Recheck every ms; how the wakeup was lost
+   is not established. [MEASURED] longest nID run 3.9-7.9 s in 7 runs since (was 20-107 s).
+6. 80e3de06f8, eff313dcea logging only: nID push-reject causes / batch states on CORESET_DISC; DM-RS-gated grants show the gate SNR (they looked like "never demodulated").
+Earlier: 02e01e8ad2 (reject a never-tracking lock, per-cell recovery, no device re-init: B done on air), 3d5e2371c9 (never shed a CORESET-less nID sweep), iq_chan_offline tool.
+Tried and reverted (no measured effect): ticket priority for the acquiring sweep, nID worker CPU float, nID stream priority, core-pool resize (replay).
 
-## C. Wideband path — root cause narrowed, not fixed
-[OFFLINE VERIFIED, DGX replay, 11:47 capture, fix build, 100 s, n=3; 415 = c0]
-| arm | lock rejects | >128 PRB grants (CRC) | decoded PRBs |
-|---|---|---|---|
-| X: capture channelized OFFLINE (iq_chan_offline, receiver's filter code), replayed as direct rings | 0/0/0 | ~4k each (86-88 %) | 1.2-1.3 M |
-| W: same capture, live GPU channelizer (default) | 35/32/11 | 0/0/763 | 0/0/0.23 M |
-| W at publisher speed 0.5 | 18/4/18 | 0/5056/0 | |
-| W, live CPU channelizer (NR_GPU_PATH_CHAN=cpu, diagnosis) | 0/0/0 | 891/1368/1498 (5/90/7 %: 18-20 overruns) | |
-| W, GPU channelizer + every other selectable GPU path on CPU | 28/19 | 0/0 | |
-Established: GPU vs CPU channelizer arithmetic on the real capture <= 1 LSB; a temporary tap of what 415 reads from its ring in the live GPU run equals the offline
-output (99.98 % of 61k blocks; 1/4 = the publisher's >>2, same in every arm; 10 zero samples at each 2 s replay loop seam); GPU FEP stale/self-check counters 0.
-So the samples are right; the bad locks need the live GPU channelizer running, and are not caused by real-time pressure or by the selectable GPU paths.
-Remaining suspects (no switch exists): the GPU channelizer's own stream/lease/green-context interaction with the slot path, and GPU users without a path switch
-(PDCCH GPU, CSI-RS discovery, nID sweep). Next (one plan): with the GPU channelizer on, turn those off one at a time (needs a diagnostic build); stop at the
-first one whose removal gives 0 rejects in 2 runs, else instrument the receive timing of 415's ring reads vs the X arm.
+## Per-run OTA results (night)
+| run (time) | cell | locks/rej | nID passes | CORESET | grants (CRC) | >128 PRB n (CRC) | decoded PRB |
+|---|---|---|---|---|---|---|---|
+| nB1 (01:26, 99be10cda0+logs) | 415 | 7/0 | 66 | banked | 4578 (93.1) | 606 (78.5) | 165k |
+| | 923 | 6/0 | 67 | banked | 29669 (83.8) | 2030 (68.1) | 677k |
+| nB2 (01:56) | 415 | 3/0 | 71 | banked | 2055 (90.7) | 246 (72.4) | 78k |
+| | 923 | 3/0 | 50 | banked | 37133 (87.6) | 3319 (59.0) | 948k |
+| xB3 (02:35) | 415 | 6/0 | 66 | banked at 78 s | 586 (89.9) | 204 (92.6) | 50k |
+| | 923 | 7/0 | 57 | banked | 34809 (87.8) | 1991 (59.8) | 741k |
+| xV27a (02:41) | 415 | 1/0 | 65 | banked | 11859 (94.3) | 5883 (91.3) | 1.31M |
+| | 27 | 1/0 | 53 | banked | 1356 (23.7) | - (51 PRB) | 4k |
+| nVL1 (01:32, 403 absent) | 415 | 1/0 | 32 | banked | 13413 (88.7) | 4129 (89.1) | 936k |
+| qB2 (04:56, dda0cfcddb) | 415 | 3/0 | 70 | MISSED (0 candidates) | 1 | 0 | 0 |
+| | 923 | 4/0 | 65 | banked at 6.7 s | 23922 (91.8) | 29 (34.5) | 362k |
+| qB3 (05:04) | 415 | -/0 | 81 | MISSED (14 candidate passes, none verified) | | | |
+| qV27 (05:00) | 415 | -/0 | 156 | banked at 67 s | | | |
+| solo nS415 (02:14) | 415 | 1/0 | - | banked | 14310 (96.3) | 3747 (90.4) | 960k |
+| solo nS923 (02:18) | 923 | 1/0 | - | banked | 18432 (73.3) | 3013 (44.9) | 498k |
+| solo zS415 (04:35) | 415 | 1/0 | 155 | banked at 36.7 s | | | |
+923's big-grant CRC is our link SNR (median 10 dB at 16QAM vs 12.5 on 415; 256QAM 0 % on every cell, SNR 10-20 dB, EVM 20-35 %): physics, not a receiver defect.
 
-## OTA test for the operator
-Fix build (wt/rr-fix-mpci-pbch, 02e01e8ad2 or later), daytime, 300 s, 2-PCI 415+923 and 415+403 x2 each, + solos 415/923 x1. Look at: rc (expect 130, no rc=3),
-"full device re-init" = 0, LOCK_REJECT per cell, per cell >128 PRB CRC and decoded PRBs vs solo, 923 locks / failed searches.
+## Open
+- 415's dedicated CORESET after 03:00. Interleaved A/B at 05:09-05:22 [MEASURED]: solo 415 did not bank either (bS1/bS2: 119/153 passes, 11/0 with candidates), while
+  PDSCH-like energy not explained by any grant was present in every run (window_ungranted_pdsch_like_rbslots 1.1-2.8e5), so traffic was there: 415's CORESET discovery is
+  unreliable at night even solo (zS415 at 04:35 banked at 37 s), and a pair makes it worse (fewer passes: bB1 2, bB2 28 vs 119-155 solo; with 923 the passes find 0-14
+  candidates). Next to the light PCI 27 it banks (qV27: 156 passes, 128 with candidates, banked at 67 s). (UL DCI counts are no traffic proxy: they need the CORESET.)
+- Watch: FB2 had 39 SHMIQ_OVERRUN (reader behind its channelizer ring -> resync), 29 of them at start-up; other runs of dda0cfcddb/f47cf4925b 5-11, HEAD before 4-11.
+  dda0cfcddb lets discovery run beside RT GPU work with >=2 cells: daytime A/B against eff313dcea on overruns and decode p99 before merging.
+- A partner stuck in initial sync (403 absent) slowed 415's sweep to 38 passes and 415 missed (FVL): the searching cell's acquisition load is not bounded.
+- 403/508 pair: re-test in daytime (403 off air at night).
+- ctest failures beyond the known ARM list also fail on mpci-main 531488c715 (test_nr_ssb_rate_match_prod, test_nr_gpu_pass_cells, test_nr_pusch_ul_disc,
+  test_ldpc_cuda_pool_cpu); nr_td_sim_test timed out (not compared); test_nr_gpu_pass_geo* and test_iq_chan flaky under -j4, pass alone.
+
+## OTA test for the operator (daytime)
+HEAD dda0cfcddb, 300 s, pairs 415+923, 415+403, 403+508 x2 each + solos. Look at: LOCK_REJECT = 0, device re-init = 0, per cell "CORESET_DISC state=LOCKED" and its
+armed_for_s, nid_passes, per cell >128 PRB CRC and decoded PRB vs solo.
