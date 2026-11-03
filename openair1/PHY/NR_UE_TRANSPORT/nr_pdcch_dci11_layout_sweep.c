@@ -126,6 +126,12 @@ const uint8_t *nr_dci11_switch_widths(nr_dci11_switch_t which, int *n)
     case NR_DCI11_SW_DAI:  *n = (int)sizeof(kDai);  return kDai;
     case NR_DCI11_SW_TPC2: *n = (int)sizeof(kTpc2); return kTpc2;
     case NR_DCI11_SW_P2H:  *n = (int)sizeof(kP2H);  return kP2H;
+    case NR_DCI11_SW_ONESHOT: *n = (int)sizeof(kOneShot); return kOneShot;
+    case NR_DCI11_SW_GRPIDX:  *n = (int)sizeof(kGrpIdx);  return kGrpIdx;
+    case NR_DCI11_SW_NFI:     *n = (int)sizeof(kNfi);     return kNfi;
+    case NR_DCI11_SW_NGRP:    *n = (int)sizeof(kNGrp);    return kNGrp;
+    case NR_DCI11_SW_RETX:    *n = (int)sizeof(kHarqRetx);return kHarqRetx;
+    case NR_DCI11_SW_ENHT3:   *n = (int)sizeof(kEnhType3);return kEnhType3;
   }
   *n = 0;
   return NULL;

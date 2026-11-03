@@ -1,6 +1,7 @@
 #include "nr_traffic_dci_fields.h"
 #include <gtest/gtest.h>
 #include <cstdio>
+#include <vector>
 
 // Set `w` bits of `v` at MSB-first position `pos` of a len-bit payload.
 static void put(nr_dci_bits_t &p, int len, int pos, int w, unsigned v)
@@ -41,7 +42,7 @@ static bool run11(int pre_ant, nr_dci_harq_fields_t *f, nr_dci_bits_t p = {})
 
 TEST(TrafficDciFields, Dci11UniqueSplitParses)
 {
-  // pre_ant 14 is NOT unique under the sweep tables (see PreAntUniqueValues); 9 = harq4+tpc2+pri3 and 29 = tb2 8+harq5+dai6+2+tpc2 2+3+k1 3 are.
+  // 9 = harq4+tpc2+pri3 (minimum) is unique; 10, 14 are not (extras / dai / k1 trade bits). See PreAntUniqueValues.
   const int pre_ant = 9;
   nr_dci11_layout_t l{};
   l.pre_ant = pre_ant; l.ant_ports = 4; l.fdra_mode = NR_FDRA_TYPE1;
@@ -59,13 +60,17 @@ TEST(TrafficDciFields, PreAntAmbiguousGivesNull)
 {
   nr_dci_harq_fields_t f{};
   EXPECT_FALSE(run11(14, &f));
+  EXPECT_FALSE(run11(10, &f));  // harq5 or one extra bit
   EXPECT_EQ(f.dai, -1); EXPECT_EQ(f.tpc, -1); EXPECT_EQ(f.pri, -1); EXPECT_EQ(f.k1, -1);
 }
 
 TEST(TrafficDciFields, PreAntUniqueValues)
 {
+  std::vector<int> u;
   for (int v = 0; v < 64; v++) {
     nr_dci_harq_fields_t f;
-    if (run11(v, &f)) printf("unique pre_ant=%d\n", v);
+    if (run11(v, &f)) u.push_back(v);
   }
+  for (int v : u) printf("unique pre_ant=%d\n", v);
+  EXPECT_EQ(u, std::vector<int>({9, 38}));
 }

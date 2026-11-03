@@ -137,7 +137,8 @@ typedef struct {
 } nr_dci11_offsets_t;
 
 /** The sweep's own switch tables for the pre_ant group fields (read-only; never copy them). */
-typedef enum { NR_DCI11_SW_TB2, NR_DCI11_SW_HARQ, NR_DCI11_SW_DAI, NR_DCI11_SW_TPC2, NR_DCI11_SW_P2H } nr_dci11_switch_t;
+typedef enum { NR_DCI11_SW_TB2, NR_DCI11_SW_HARQ, NR_DCI11_SW_DAI, NR_DCI11_SW_TPC2, NR_DCI11_SW_P2H,
+                NR_DCI11_SW_ONESHOT, NR_DCI11_SW_GRPIDX, NR_DCI11_SW_NFI, NR_DCI11_SW_NGRP, NR_DCI11_SW_RETX, NR_DCI11_SW_ENHT3 } nr_dci11_switch_t;
 const uint8_t *nr_dci11_switch_widths(nr_dci11_switch_t which, int *n);
 
 /** Offsets implied by a layout. `tda_bits` comes from the TDRA list Technique D already recovers,
