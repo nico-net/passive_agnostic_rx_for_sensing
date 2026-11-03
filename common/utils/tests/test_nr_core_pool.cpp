@@ -668,6 +668,22 @@ TEST(CorePool, BigCoresGoToUrgentClasses)
   nr_pool_destroy(p);
 }
 
+TEST(CorePool, SiteKeepOnlyWhileNobodyWaits)
+{
+  nr_pool_t *p = mk(1);
+  nr_pool_site_set_for_test(p);
+  EXPECT_FALSE(nr_pool_site_keep()); // no lease
+  nr_pool_acquire(p, NR_POOL_SCAN, 0, 0);
+  EXPECT_TRUE(nr_pool_site_keep());
+  std::thread w([&] { nr_pool_acquire(p, NR_POOL_DECODE, 0, 0); nr_pool_release(p); });
+  wait_waiting(p, 1);
+  EXPECT_FALSE(nr_pool_site_keep()); // a waiter of any class: release
+  nr_pool_release(p);
+  w.join();
+  nr_pool_site_set_for_test(nullptr);
+  nr_pool_destroy(p);
+}
+
 TEST(CorePool, SpeedTiers)
 {
   int t[6];

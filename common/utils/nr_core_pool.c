@@ -956,6 +956,8 @@ nr_pool_t *nr_pool_site(void)
 }
 int nr_pool_site_acquire(int prio, int cell, uint64_t dl) { return nr_pool_acquire(nr_pool_site(), prio, cell, dl); }
 int nr_pool_site_try_acquire(int prio, int cell, uint64_t dl) { return nr_pool_try_acquire(nr_pool_site(), prio, cell, dl); }
+/* The caller holds a lease and nobody waits for a token: keeping it across the next job saves two affinity moves (token core <-> home) per job. */
+bool nr_pool_site_keep(void) { return g_site && nr_pool_holds(g_site) && nr_pool_total_waiting(g_site) == 0; }
 void nr_pool_site_release(void) { if (g_site) nr_pool_release(g_site); }
 bool nr_pool_site_yield(void) { return g_site && nr_pool_yield(g_site); }
 void nr_pool_site_member_enter(void) { nr_pool_member_enter(nr_pool_site()); }

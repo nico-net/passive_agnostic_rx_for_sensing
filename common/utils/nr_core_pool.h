@@ -164,6 +164,7 @@ void nr_pool_site_enforce_tick(void);    /* rate-limited (1/s) nr_pool_enforce()
 int nr_pool_site_acquire(int prio, int cell, uint64_t deadline_ns);
 int nr_pool_site_try_acquire(int prio, int cell, uint64_t deadline_ns);
 void nr_pool_site_release(void);
+bool nr_pool_site_keep(void); /* holds a lease and no waiter in any class: a worker with more queued work may skip release+acquire */
 bool nr_pool_site_yield(void);
 uint64_t nr_pool_now_ns(void);
 
