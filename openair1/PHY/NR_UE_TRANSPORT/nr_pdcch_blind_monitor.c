@@ -3607,6 +3607,7 @@ void nr_pdcch_blind_monitor_init(void)
                          (p_ul_pusch && p_ul_pusch[0]) ? g_cfg.ul_pusch_decode : -1, &m);
     g_cfg.pdsch_decode = m.pdsch_decode;
     g_cfg.ul_pusch_decode = m.pusch_decode;
+    if (m.narrowed) LOG_W(PHY, "SENSING: mode=traffic narrowed sources/decode keys (no CFR in traffic mode)\n");
   }
   if (g_cfg.pdsch_max_per_slot <= 0) {
     g_cfg.pdsch_max_per_slot = 1;

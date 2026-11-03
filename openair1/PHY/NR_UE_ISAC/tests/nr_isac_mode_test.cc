@@ -50,3 +50,14 @@ TEST(IsacMode, UnknownModeFails)
   nr_isac_mode_cfg_t o;
   EXPECT_FALSE(nr_isac_mode_resolve("radar", 0, -1, -1, &o));
 }
+
+TEST(IsacMode, TrafficNarrowsDecodeAloneAndLogsViaNarrowed)
+{
+  nr_isac_mode_cfg_t o;
+  ASSERT_TRUE(nr_isac_mode_resolve("traffic", 0, 2, -1, &o));
+  EXPECT_EQ(o.pdsch_decode, 1);
+  EXPECT_TRUE(o.narrowed);
+  ASSERT_TRUE(nr_isac_mode_resolve("traffic", 0, -1, 2, &o));
+  EXPECT_EQ(o.pusch_decode, 1);
+  EXPECT_TRUE(o.narrowed);
+}
