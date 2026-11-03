@@ -4,6 +4,7 @@
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_sample_lifetime.h"
 #include "nr_pusch_uci_blind.h"
+#include "nr_ul_tbl_retry.h"
 /* See nr_pusch_passive_decode.h for why this file constructs a gNB by hand. */
 
 #include <stdlib.h>
@@ -3215,6 +3216,11 @@ static void ul_dmrs_diag_maybe(PHY_VARS_NR_UE *ue, int ctx, uint8_t slot, const 
   atomic_store_explicit(&busy, false, memory_order_release);
 }
 
+typedef nr_ul_tblr_ent_t tblr_cell_t[NR_UL_TBLR_UES];
+NR_CELL_STATIC(tblr_cell_t, g_tblr);
+#define g_tblr NR_CELL_REF(g_tblr)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_tblr_mu, PTHREAD_MUTEX_INITIALIZER);
+#define g_tblr_mu NR_CELL_REF(g_tblr_mu)
 /* The per-grant probe lives HERE, wrapping the decode, rather than in a caller: there are two
  * callers now (the in-line uplink hook and the deferred queue's consumer) and a probe that only one
  * of them carries goes silent exactly when the configuration changes -- which is when it is most
@@ -3269,8 +3275,47 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   } else {
     const uint64_t t_ul0 = nr_gpu_pass_ul_active() ? utim_now() : 0;
     t_ul_path_side = -1;
+    nr_pdcch_blind_ul_result_t g_tbl, g_alt;
+    const bool tbl_ok_ctx = g && !cfr_only && !t_solver_probe && g->rv == 0 && !g->transform_precoding && g->mcs_table <= 2
+                            && !nr_ul_layout_is_probe(g) && !nr_ul_layout_is_trial(g);
+    const int tbl_dflt = g ? g->mcs_table : 0;
+    /* MCS-table hypothesis (nr_ul_tbl_retry.h): the table learned for this RNTI first; a failure with the DM-RS SNR clearing another table's
+     * requirement is re-decoded under it. Dedicated PUSCH, CP-OFDM, real grants only; one extra decode at most per offer (rate-bounded). */
+    if (tbl_ok_ctx) {
+      pthread_mutex_lock(&g_tblr_mu);
+      const int first = nr_ul_tblr_first(nr_ul_tblr_get(g_tblr, g->rnti, false), tbl_dflt);
+      pthread_mutex_unlock(&g_tblr_mu);
+      if (first != tbl_dflt && first <= 2) { g_tbl = *g; g_tbl.mcs_table = (uint8_t)first; g = &g_tbl; }
+    }
     ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
                                       cfr_only, fo_hz, out);
+    if (tbl_ok_ctx && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL)) {
+      const uint16_t rnti_ = g->rnti;
+      const int tried = g->mcs_table;
+      pthread_mutex_lock(&g_tblr_mu);
+      nr_ul_tblr_ent_t *e = nr_ul_tblr_get(g_tblr, rnti_, true);
+      if (out->status == NR_PUSCH_PASSIVE_OK && (tried != tbl_dflt || e->learned)) nr_ul_tblr_pass(e, tried);
+      unsigned cand = 0;
+      if (out->status == NR_PUSCH_PASSIVE_CRC_FAIL && !out->skip && uci_share_left())
+        cand = nr_ul_tblr_pick(e, g->mcs, tried, out->snr_db, 2.0);
+      pthread_mutex_unlock(&g_tblr_mu);
+      for (int t = 0; t < 3 && cand; t++) {
+        if (!(cand >> t & 1u)) continue;
+        cand &= ~(1u << t);
+        nr_pusch_passive_out_t out2;
+        g_alt = *g;
+        g_alt.mcs_table = (uint8_t)t;
+        const bool ok2 = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, &g_alt, ta_offset_samples, abs_slot, cfr_only, fo_hz, &out2);
+        if (ok2 && out2.status == NR_PUSCH_PASSIVE_OK) {
+          *out = out2; ok = true; g = &g_alt;
+          pthread_mutex_lock(&g_tblr_mu);
+          nr_ul_tblr_pass(nr_ul_tblr_get(g_tblr, rnti_, true), t);
+          pthread_mutex_unlock(&g_tblr_mu);
+          LOG_I(PHY, "SENSING: UL_TBL_RETRY rnti=0x%04x mcs=%u table %d -> %d CRC ok snr_db=%.1f\n", rnti_, g->mcs, tried, t, out2.snr_db);
+          break;
+        }
+      }
+    }
     if (t_ul0 && !cfr_only && !t_solver_probe && out->status != NR_PUSCH_PASSIVE_UNSUPPORTED)
       nr_gpu_pass_ul_grant_us(t_ul_kind, (uint32_t)((utim_now() - t_ul0) / 1000));
     if (t_ul0 && t_ul_path_side >= 0 && t_ul_path_kllr > 0 && !cfr_only && !t_solver_probe
