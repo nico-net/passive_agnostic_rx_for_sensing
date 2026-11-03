@@ -120,6 +120,8 @@ void nr_sense_capture_grant_stamp(nr_sense_grant_meta_t *m);
 
 /* Pure formatters also serve fixtures; no I/O or allocation. */
 int nr_sense_grant_to_json(const nr_passive_obs_t *o, const nr_sense_grant_meta_t *m, char *buf, size_t n);
+/* Stamp epoch/identity (unless stamp_valid), rx_ts and verif on a grant meta; shared by the grant and DCI emitters. */
+void nr_sense_grant_meta_finish(const nr_passive_obs_t *o, nr_sense_grant_meta_t *m);
 int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_t cfr_frame_id, char *buf, size_t n);
 void nr_sense_set_session_identity(const char *rx_id, const char *rx_array);
 void nr_sense_emit_session(const NR_DL_FRAME_PARMS *fp, double rx_gain_db);

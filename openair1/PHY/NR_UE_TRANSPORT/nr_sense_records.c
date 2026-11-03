@@ -263,11 +263,9 @@ static nr_sense_grant_meta_t unknown_grant(void)
     .dmrs_type=-1,.dmrs_add_pos=-1,.dmrs_n_scid=-1,.ta_est_samples=-1,.cfo_est_hz=NAN};
   return m;
 }
-void nr_sense_emit_grant_meta(const nr_passive_obs_t *o, const nr_sense_grant_meta_t *in)
+void nr_sense_grant_meta_finish(const nr_passive_obs_t *o, nr_sense_grant_meta_t *mp)
 {
-  if (!nr_sense_enabled() || !o) return;
-  const uint64_t t_rec=nr_sense_now_ns();
-  nr_sense_grant_meta_t m=in?*in:unknown_grant();
+  nr_sense_grant_meta_t m=*mp;
   if (!m.stamp_valid) stamp(&m.epoch,&m.identity_gen,&m.dedicated_epoch);
   if (m.rx_ts<0 && o->abs_slot) { nr_sense_rx_state_t s; if (nr_sense_rx_state_lookup(o->abs_slot,&s)) m.rx_ts=s.rx_ts; }
   if (nr_ue_ctx_enabled()) {
@@ -277,6 +275,14 @@ void nr_sense_emit_grant_meta(const nr_passive_obs_t *o, const nr_sense_grant_me
       if (v->value >= 0) m.verif=v->verif==NR_UEV_TRUSTED?"TRUSTED":v->verif==NR_UEV_HINT?"HINT":"SUSPECT";
     }
   }
+  *mp=m;
+}
+void nr_sense_emit_grant_meta(const nr_passive_obs_t *o, const nr_sense_grant_meta_t *in)
+{
+  if (!nr_sense_enabled() || !o) return;
+  const uint64_t t_rec=nr_sense_now_ns();
+  nr_sense_grant_meta_t m=in?*in:unknown_grant();
+  nr_sense_grant_meta_finish(o,&m);
   char line[2048];
   if (nr_sense_grant_to_json(o,&m,line,sizeof line)>0) nr_sense_push_record(line);
   nr_sense_cost_add(NR_SENSE_COST_REC,NR_SENSE_SRC_SSB,nr_sense_now_ns()-t_rec);

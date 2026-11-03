@@ -1177,6 +1177,7 @@ endif()
 target_link_libraries(NR_UE_ISAC PUBLIC nr_sense_api nr_isac_mode PRIVATE UTIL)
 add_library(nr_sense_api ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_api.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_records.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_traffic_record.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c)
 target_compile_definitions(PHY_NR_PASSIVE_UL PRIVATE $<$<BOOL:${ENABLE_ISAC_SENSING}>:NR_SRS_EXPORT_ON>)
 target_include_directories(nr_sense_api PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
@@ -2973,6 +2974,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_sense_records PRIVATE nr_sense_api GTest::gtest GTest::gtest_main pthread m)
   add_dependencies(tests test_nr_sense_records)
   add_test(NAME test_nr_sense_records COMMAND ./test_nr_sense_records)
+
+  add_executable(test_nr_traffic_record ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_traffic_record_test.cc)
+  target_include_directories(test_nr_traffic_record PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_traffic_record PRIVATE nr_sense_api GTest::gtest GTest::gtest_main pthread m)
+  add_dependencies(tests test_nr_traffic_record)
+  add_test(NAME test_nr_traffic_record COMMAND ./test_nr_traffic_record)
 
   add_executable(test_nr_passive_ue_ctx ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.c

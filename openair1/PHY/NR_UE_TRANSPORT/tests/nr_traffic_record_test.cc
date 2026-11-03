@@ -1,0 +1,93 @@
+#include "nr_traffic_record.h"
+#include <gtest/gtest.h>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <unistd.h>
+#include "PHY/defs_nr_common.h"
+#include "nr_passive_ue_ctx.h"
+
+extern "C" {
+void *uniqCfg = nullptr;
+void exit_function(const char *, const char *, int, const char *, int) { abort(); }
+bool nr_ue_ctx_fast_open=false;
+bool nr_cfg_reconf_enabled(void) { return false; }
+uint64_t nr_cfg_epoch_cfr_stamp(void) { return 0; }
+uint32_t nr_cfg_epoch_dedicated_current(void) { return 0; }
+bool nr_ue_ctx_try_get(uint16_t, nr_ue_ctx_t *) { return false; }
+}
+
+static nr_sense_dci_rec_t fixture(nr_layout_state_t st)
+{
+  nr_sense_dci_rec_t r{};
+  r.o.abs_slot=42; r.o.t_mono_ns=123; r.o.pci=7; r.o.dir=NR_OBS_DIR_DL; r.o.rnti=0x1234;
+  r.o.start_rb=10; r.o.nb_rb=20; r.o.start_sym=2; r.o.nb_sym=12; r.o.mcs=9; r.o.mcs_table=1; r.o.qm=4; r.o.nl=1;
+  r.o.tbs=1000; r.o.harq_pid=3; r.o.ndi=1; r.o.rv=0; r.o.crc=-1;
+  r.m.epoch=3; r.m.identity_gen=3; r.m.dedicated_epoch=7; r.m.rx_ts=5; r.m.k2=-1; r.m.dci_slot=-1;
+  r.m.transform_precoding=-1; r.m.freq_hopping=-1; r.m.dmrs_type=-1; r.m.dmrs_add_pos=-1; r.m.dmrs_n_scid=-1;
+  r.m.ta_est_samples=-1; r.m.cfo_est_hz=NAN;
+  r.dci_format=1; r.ss_type=1; r.al=4; r.cce=8; r.coreset_id=1; r.dci_len=45;
+  const uint8_t b[6]={0xab,0x01,0xff,0x00,0x10,0x80}; memcpy(r.dci_bits,b,6);
+  r.rnti_confirmed=true; r.layout_state=st; r.layout_checks_ok=5; r.layout_checks_fail=1; r.cfg_ref_ver=2;
+  r.bwp_start=0; r.bwp_size=106; r.start_rb_bwp=10;
+  r.vrb_prb=-1; r.tda_index=2; r.k0=0; r.k1=4; r.dai=1; r.tpc=2; r.pri=3; r.srs_req=-1; r.csi_req=-1;
+  r.ulsch_ind=-1; r.cbgti=-1; r.retx=0; r.si_ind=-1; r.short_msg_ind=-1; r.short_msg=-1; r.tb_scaling=-1;
+  r.pdsch_abs_slot=42; r.harq_fb_abs_slot=46; r.decode=NR_DCI_DECODE_QUEUED;
+  return r;
+}
+static std::string json(const nr_sense_dci_rec_t &r)
+{
+  char b[4096]; int k=nr_sense_dci_to_json(&r,b,sizeof b); EXPECT_GT(k,0); return std::string(b,k>0?k:0);
+}
+static bool has(const std::string &s,const char *p){ return s.find(p)!=std::string::npos; }
+
+TEST(TrafficRecord, DciJsonHasEveryGrantKey)
+{
+  auto r=fixture(NR_LAYOUT_SOLVED);
+  char g[2048]; ASSERT_GT(nr_sense_grant_to_json(&r.o,&r.m,g,sizeof g),0);
+  std::string d=json(r), gs=g;
+  EXPECT_TRUE(has(d,"\"type\":\"dci\""));
+  for (size_t p=0;(p=gs.find(",\"",p))!=std::string::npos;) {
+    size_t e=gs.find('"',p+2); std::string key=gs.substr(p+1,e-p); /* "key" */
+    EXPECT_TRUE(has(d,(key+":").c_str())) << key; p=e;
+  }
+}
+TEST(TrafficRecord, DciJsonNewKeys)
+{
+  std::string d=json(fixture(NR_LAYOUT_SOLVED));
+  for (const char *k : {"\"dci_format\":1","\"al\":4","\"cce\":8","\"dci_len\":45","\"dci_bits\":\"ab01ff001080\"",
+       "\"rnti_confirmed\":true","\"layout_state\":\"solved\"","\"cfg_ref\":\"3.7.2\"","\"bwp_start\":0",
+       "\"start_rb_bwp\":10","\"k1\":4","\"pri\":3","\"tpc\":2","\"vrb_prb\":null"})
+    EXPECT_TRUE(has(d,k)) << k;
+}
+TEST(TrafficRecord, UnsolvedNullsLayoutFields)
+{
+  std::string d=json(fixture(NR_LAYOUT_UNSOLVED));
+  for (const char *k : {"\"mcs\":null","\"nb_rb\":null","\"k1\":null","\"pdsch_abs_slot\":null","\"dci_bits\":\"ab01ff001080\"",
+       "\"rnti\":4660","\"al\":4","\"layout_state\":\"unsolved\""})
+    EXPECT_TRUE(has(d,k)) << k;
+}
+TEST(TrafficRecord, DecodeRecordShape)
+{
+  struct Reset { ~Reset() { nr_sense_close(); } } reset;
+  char path[]="/tmp/nr_traffic_XXXXXX"; int fd=mkstemp(path); ASSERT_GE(fd,0); close(fd);
+  nr_sense_cfg_t cfg{}; cfg.records_path=path; cfg.rec_ring_slots=4; cfg.cfr_ring_frames=2; cfg.cfr_max_re=12;
+  ASSERT_EQ(nr_sense_open(&cfg),0);
+  nr_sense_emit_decode(77,0x4567,0,true,1,12.5f,"dci_len");
+  nr_sense_close();
+  std::ifstream f(path); std::string line; ASSERT_TRUE(std::getline(f,line));
+  EXPECT_TRUE(has(line,"\"type\":\"decode\"")); EXPECT_TRUE(has(line,"\"abs_slot\":77"));
+  EXPECT_TRUE(has(line,"\"rnti\":17767")); EXPECT_TRUE(has(line,"\"crc\":1")); EXPECT_TRUE(has(line,"\"learned\":\"dci_len\""));
+  unlink(path);
+}
+TEST(TrafficRecord, DciJsonFitsRecordBytes)
+{
+  auto r=fixture(NR_LAYOUT_SOLVED);
+  memset(r.dci_bits,0xff,sizeof r.dci_bits); r.dci_len=140;
+  r.o.abs_slot=INT64_MAX; r.pdsch_abs_slot=INT64_MAX; r.harq_fb_abs_slot=INT64_MAX; r.o.t_mono_ns=UINT64_MAX;
+  r.m.verif="SUSPECT"; r.m.ta_applied_valid=true; r.m.ta_applied_samples=-123456; r.m.cfo_est_hz=-12345.678f;
+  r.m.ul_timing_ref="dl_frame"; r.o.snr_db=-12.345f; r.o.nvar=1e-9f; r.o.fo_comp_hz=-1234.5f; r.o.delay_samples=-1.25f;
+  r.o.carrier_hz=3700000000LL; r.short_msg=255; r.short_msg_ind=3; r.tb_scaling=2; r.si_ind=1;
+  EXPECT_LT(json(r).size(), 4096u-1);
+}
