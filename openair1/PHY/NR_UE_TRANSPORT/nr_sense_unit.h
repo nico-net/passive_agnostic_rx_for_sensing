@@ -44,6 +44,7 @@ typedef struct {
   float wait_p99_ns; uint32_t late, violations, skips; /* wait: per-bucket maximum, p99 over the buckets that saw a job; counters are cumulative since the row was created (re-baseline when gen changes) */
   float rate_hz, wb_rate_hz;           /* messages / those with est_usable >= min_prb, per second over min(16 s, now - first_ns) (at least one bucket) */
   float valid_ratio, snr_db; uint64_t last_valid_wb_ns, last_msg_ns;
+  uint64_t last_cfr_ns;                /* time of the latest CFR record (0: none); valid_ratio is the EWMA of the records, the first record initialises it */
   uint32_t n_cfr;                      /* CFR records of this unit since the row was created (0: valid_ratio is unknown, not bad) */
   uint16_t est_usable_prbs;            /* usable PRBs of the unit's latest message that reported any (0: none yet, always for SRS) */
   uint64_t first_ns;                   /* first call of this unit (its history length) */

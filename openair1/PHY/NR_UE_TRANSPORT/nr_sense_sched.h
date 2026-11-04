@@ -61,7 +61,8 @@ typedef struct { int enables, disables, bad_cap; nr_res_id_t binding; float valu
 void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *st, nr_sense_sched_out_t *out);
 
 /* exposed for tests */
-bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v); /* wb_rate_hz > 0 over the window, and valid_ratio >= SENSE_ELIG_VALID_MIN once the unit has CFRs (n_cfr == 0: unknown passes) */
+bool nr_sense_unit_ratio_known(const nr_sense_unit_view_t *v, uint64_t now_ns); /* n_cfr > 0 and the latest CFR is not older than one cost window (SENSE_WIN_DECISIONS x SENSE_DECIDE_NS) */
+bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v, uint64_t now_ns);   /* wb_rate_hz > 0 over the window, and valid_ratio >= SENSE_ELIG_VALID_MIN when the ratio is known (unknown passes) */
 double nr_sense_age_boost(bool eligible, uint64_t last_valid_ns, uint64_t now_ns); /* 1 + (CAP-1) x min(1, age / FULL); exactly 1 when not eligible */
 
 #ifdef __cplusplus

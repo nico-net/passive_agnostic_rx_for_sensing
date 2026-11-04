@@ -39,6 +39,7 @@ TEST_F(Unit, BucketsAccumulate)
   nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 0x4601, 150, 10.f, tb(6));
   ASSERT_GE(snap(0, tb(7), vw), 1);
   EXPECT_EQ(vw[0].n_cfr, 2u); /* since row creation */
+  EXPECT_EQ(vw[0].last_cfr_ns, tb(6));
   EXPECT_EQ(vw[0].est_usable_prbs, 200); /* the latest usable PRBs are in the view (scheduler value) */
 }
 
@@ -360,4 +361,16 @@ TEST_F(Unit, DISABLED_Cost)
   for (int i = 0; i < 100; i++) n = snap(0, tb(2000), v);
   clock_gettime(CLOCK_MONOTONIC, &b);
   printf("%d units, %.1f us per snapshot\n", n, ((b.tv_sec - a.tv_sec) * 1e9 + (b.tv_nsec - a.tv_nsec)) / 100 / 1e3);
+}
+
+TEST_F(Unit, RatioInitialisedByFirstRecord)
+{
+  nr_sense_unit_job(NR_UNIT_PDSCH_DATA, 0x4601, MS, 0, false, 200, tb(1));
+  nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 0x4601, 20, 5.f, tb(2));   /* first record: invalid (20 of 200 PRBs) -> ratio 0.1 */
+  nr_sense_unit_view_t vw[8];
+  ASSERT_GE(snap(0, tb(3), vw), 1);
+  EXPECT_FLOAT_EQ(vw[0].valid_ratio, 0.1f);
+  for (int i = 0; i < 12; i++) nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 0x4601, 200, 5.f, tb(3) + i);
+  ASSERT_GE(snap(0, tb(4), vw), 1);
+  EXPECT_GT(vw[0].valid_ratio, 0.9f); /* follows the records, not an average from 0 */
 }

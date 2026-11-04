@@ -29,3 +29,10 @@ Concerns for S7
 - M5 min_prb < 1 clamped via prbs >= 1; M6 value_last_admitted is now the minimum admitted value.
 - Documented, not changed: queue max-aggregation only rejects a unit whose own wait exceeds the budget (aggregate load is bounded by POOL); cold unit with no same-source history costs 0 (one per decision); p99 ignores units active in <1 % of buckets; cand_t C[2048] ~250 KB on the stack (S7 thread needs >= 1 MB stack).
 Tests: test_nr_sense_sched 25/25, test_nr_sense_unit 20/20, ctest -R "sense|isac" all pass, 24 .so, frozen exit 0.
+
+## Fix round 2 (N1: lock-out of a unit disabled for a low ratio)
+- S5: view gains `last_cfr_ns` (latest CFR record). The ratio EWMA was already initialised by the first record (n_cfr == 0 branch); now pinned by test RatioInitialisedByFirstRecord (first invalid record 0.1, then valid records pull it above 0.9).
+- S6: nr_sense_unit_ratio_known(v, now): n_cfr > 0 and last CFR not older than SENSE_WIN_DECISIONS x SENSE_DECIDE_NS (16 s). Otherwise the ratio is unknown again (passes, value uses the 0.2 floor). nr_sense_unit_eligible now takes now_ns.
+- Tests: StaleRatioBecomesUnknownAndUnitIsRetried (off for low ratio, still off before 16 s, eligible after, re-enabled only after a streak of 2, then bad CFRs again: off after a streak and not back within 3 decisions); UnitProducingInvalidCfrsStaysOff. Mutation (staleness removed) fails the first.
+- Tests: sched 27/27, unit 21/21, ctest -R "sense|isac" all pass, 24 .so, frozen exit 0.
+- Residual: a retried unit that is still bad is on for >= 2 decisions (streak) before being judged again; cycle period is >= 16 s window + streaks.

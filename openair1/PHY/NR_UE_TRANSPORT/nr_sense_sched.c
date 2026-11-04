@@ -28,10 +28,16 @@ static bool is_queue(int r) { return r == NR_RES_QUEUE_DL || r == NR_RES_QUEUE_U
 /* the group a violation is charged to: the unit's own queue (per cell), else the shared pool (all cells) */
 static int group_of(nr_unit_src_t s) { return s == NR_UNIT_PDSCH_DATA ? NR_RES_QUEUE_DL : s == NR_UNIT_SRS ? NR_RES_QUEUE_UL : NR_RES_POOL; }
 
-bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v)
+bool nr_sense_unit_ratio_known(const nr_sense_unit_view_t *v, uint64_t now_ns)
+{
+  /* a disabled unit produces no CFR, so its ratio is frozen: after one window without records it is unknown again and the unit can be re-tried */
+  return v->n_cfr > 0 && !(v->last_cfr_ns && now_ns > v->last_cfr_ns && now_ns - v->last_cfr_ns > SENSE_WIN_DECISIONS * SENSE_DECIDE_NS);
+}
+
+bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v, uint64_t now_ns)
 {
   /* wb_rate_hz is a window quantity (messages with usable PRBs >= min_prb), so the size of the latest message does not matter */
-  return v->wb_rate_hz > 0.f && (v->n_cfr == 0 || v->valid_ratio >= SENSE_ELIG_VALID_MIN);
+  return v->wb_rate_hz > 0.f && (!nr_sense_unit_ratio_known(v, now_ns) || v->valid_ratio >= SENSE_ELIG_VALID_MIN);
 }
 
 double nr_sense_age_boost(bool eligible, uint64_t last_valid_ns, uint64_t now_ns)
@@ -114,7 +120,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       const nr_sense_unit_view_t *v = &in->units[c][i];
       if (v->last_valid_wb_ns > mx) mx = v->last_valid_wb_ns;
       if (v->first_ns && (!first || v->first_ns < first)) first = v->first_ns;
-      pci_elig = pci_elig || nr_sense_unit_eligible(v);
+      pci_elig = pci_elig || nr_sense_unit_eligible(v, in->now_ns);
     }
     if (mx > st->last_pci_valid_wb_ns[c]) st->last_pci_valid_wb_ns[c] = mx;
     if (!st->last_pci_valid_wb_ns[c]) st->last_pci_valid_wb_ns[c] = first ? first : in->now_ns; /* never valid: age runs from the first sight */
@@ -134,14 +140,14 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       k->enabled = v->enabled;
       if (st->enabled[c][sl][v->src] != v->enabled) st->streak[c][sl][v->src] = 0; /* the caller has not applied (or has overridden) the last decision */
       st->enabled[c][sl][v->src] = v->enabled;
-      k->elig = nr_sense_unit_eligible(v);
+      k->elig = nr_sense_unit_eligible(v, in->now_ns);
       if (k->elig && st->known[c][sl][v->src] && !st->was_elig[c][sl][v->src]) st->elig_since[c][sl][v->src] = in->now_ns;
       st->was_elig[c][sl][v->src] = k->elig;
       if (k->elig) {
         /* a wideband message had >= min_prb usable PRBs by construction; est_usable_prbs (latest) only raises the size */
         double prbs = v->est_usable_prbs > in->min_prb ? v->est_usable_prbs : in->min_prb;
         if (prbs < 1) prbs = 1;
-        const double ratio = v->n_cfr ? v->valid_ratio : SENSE_ELIG_VALID_MIN; /* unknown ratio: the floor */
+        const double ratio = nr_sense_unit_ratio_known(v, in->now_ns) ? v->valid_ratio : SENSE_ELIG_VALID_MIN; /* unknown ratio: the floor */
         uint64_t ref = v->last_valid_wb_ns ? v->last_valid_wb_ns : v->first_ns;
         if (st->elig_since[c][sl][v->src] > ref) ref = st->elig_since[c][sl][v->src];
         double boost = nr_sense_age_boost(true, ref, in->now_ns) * pci_boost;

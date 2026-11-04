@@ -29,7 +29,7 @@ struct H {
     nr_sense_unit_view_t u;
     memset(&u, 0, sizeof u);
     u.rnti = rnti; u.src = s; u.cpu_p99_ns = cpu; u.cpu_p95_ns = cpu; u.cpu_max_ns = cpu;
-    u.n_cfr = 20; u.rate_hz = 10; u.wb_rate_hz = 10; u.valid_ratio = 0.8f; u.snr_db = 10; u.est_usable_prbs = 200;
+    u.n_cfr = 20; u.last_cfr_ns = NOW - 1; u.rate_hz = 10; u.wb_rate_hz = 10; u.valid_ratio = 0.8f; u.snr_db = 10; u.est_usable_prbs = 200;
     u.last_valid_wb_ns = NOW - 1; u.last_msg_ns = NOW - 1; u.first_ns = NOW - 100 * S; u.gen = 1;
     v[c].push_back(u);
     return v[c].back();
@@ -80,7 +80,7 @@ TEST(Sched, IdleUnitGetsNoBoostAndAges0)
 {
   EXPECT_DOUBLE_EQ(nr_sense_age_boost(false, NOW - 30 * S, NOW), 1.0);
   H h; auto &u = h.add(0, 1, 10); u.wb_rate_hz = 0; u.rate_hz = 0; u.last_valid_wb_ns = NOW - 60 * S;
-  EXPECT_FALSE(nr_sense_unit_eligible(&u));
+  EXPECT_FALSE(nr_sense_unit_eligible(&u, NOW));
   h.steps(4);
   EXPECT_FALSE(h.en(0, 1)); /* plenty of capacity, still not admitted */
 }
@@ -274,7 +274,7 @@ TEST(Sched, CombinedBoostCappedAt2x)
 TEST(Sched, NewUnitWithoutCfrIsNotDisabled)
 {
   H h(1, 1000); auto &u = h.add(0, 1, 5); u.enabled = true; u.n_cfr = 0; u.valid_ratio = 0;
-  EXPECT_TRUE(nr_sense_unit_eligible(&u));
+  EXPECT_TRUE(nr_sense_unit_eligible(&u, NOW));
   h.steps(6);
   EXPECT_TRUE(h.en(0, 1)); /* unknown ratio is not a bad ratio */
   h.find(0, 1)->n_cfr = 5; h.find(0, 1)->valid_ratio = 0.1f; /* CFRs below the floor */
@@ -323,4 +323,32 @@ TEST(Sched, BadCapIsInvalidExceptGpu)
   g.add(0, 1, 10, NR_UNIT_PDSCH_DATA);
   g.steps(3);
   EXPECT_EQ(g.nen(0), 1); EXPECT_EQ(g.out.bad_cap, 0);
+}
+
+TEST(Sched, StaleRatioBecomesUnknownAndUnitIsRetried)
+{
+  H h(1, 1000); auto &u = h.add(0, 1, 5); u.enabled = true; u.valid_ratio = 0.05f; u.last_cfr_ns = NOW - 1; /* fresh, bad CFRs */
+  h.steps(2);
+  EXPECT_FALSE(h.en(0, 1)); /* disabled for the low ratio; no CFR can arrive now */
+  h.steps(3);
+  EXPECT_FALSE(h.en(0, 1)); /* the ratio is 16 s old only after 16 s */
+  h.in.now_ns = NOW + 17 * S; /* beyond one cost window without a CFR */
+  EXPECT_TRUE(nr_sense_unit_eligible(h.find(0, 1), h.in.now_ns));
+  h.step(); EXPECT_FALSE(h.en(0, 1)); /* streak */
+  h.step(); EXPECT_TRUE(h.en(0, 1));
+  /* it produces bad CFRs again: judged again, off after a streak, and not back before another window */
+  h.find(0, 1)->last_cfr_ns = h.in.now_ns - 1;
+  h.steps(2); EXPECT_FALSE(h.en(0, 1));
+  h.steps(3); EXPECT_FALSE(h.en(0, 1));
+}
+
+TEST(Sched, UnitProducingInvalidCfrsStaysOff)
+{
+  H h(1, 1000); auto &u = h.add(0, 1, 5); u.enabled = true; u.valid_ratio = 0.05f;
+  for (int i = 0; i < 8; i++) {
+    h.in.now_ns = NOW + (uint64_t)i * 4 * S;
+    h.find(0, 1)->last_cfr_ns = h.in.now_ns - 1; /* CFRs keep arriving (e.g. an external re-enable) */
+    h.step();
+    if (i >= 1) EXPECT_FALSE(h.en(0, 1)) << i;
+  }
 }

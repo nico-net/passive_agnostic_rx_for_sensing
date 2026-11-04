@@ -28,7 +28,7 @@ typedef struct {
 } ubucket_t;
 typedef struct {
   ubucket_t bk[NBS];
-  _Atomic uint64_t last_msg_ns, last_valid_wb_ns, first_ns;
+  _Atomic uint64_t last_msg_ns, last_valid_wb_ns, last_cfr_ns, first_ns;
   _Atomic uint32_t late, viol, skips, live, disabled, est_last, n_cfr, valid_bits, snr_bits;
 } unit_t;
 typedef struct {
@@ -55,6 +55,7 @@ static void reset_unit(unit_t *u)
   }
   atomic_store_explicit(&u->last_msg_ns, 0, memory_order_relaxed);
   atomic_store_explicit(&u->last_valid_wb_ns, 0, memory_order_relaxed);
+  atomic_store_explicit(&u->last_cfr_ns, 0, memory_order_relaxed);
   atomic_store_explicit(&u->first_ns, 0, memory_order_relaxed);
   atomic_store_explicit(&u->late, 0, memory_order_relaxed);
   atomic_store_explicit(&u->viol, 0, memory_order_relaxed);
@@ -243,6 +244,10 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
     if (snr_db == snr_db)
       atomic_store_explicit(&u->snr_bits, f_bits(q + EWMA_A * (snr - q)), memory_order_relaxed);
   }
+  {
+    uint64_t o = atomic_load_explicit(&u->last_cfr_ns, memory_order_relaxed);
+    while (o < t_ns && !atomic_compare_exchange_weak_explicit(&u->last_cfr_ns, &o, t_ns, memory_order_relaxed, memory_order_relaxed)) {}
+  }
   if (s == NR_UNIT_SRS) /* SRS has no daBg/queue job to count the message: the exported record is the message */
     bucket_add(u, t_ns, 0, 0, 1, wideband_capable(valid_prbs) ? 1 : 0);
   if (wideband_capable(valid_prbs)) {
@@ -364,6 +369,7 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
       v->cpu_p99_ns = (float)nrank(cpu, NB, 99);
       v->cpu_max_ns = (float)cpu[NB - 1];
       v->gen = g0;
+      v->last_cfr_ns = atomic_load_explicit(&u->last_cfr_ns, memory_order_relaxed);
       v->n_cfr = atomic_load_explicit(&u->n_cfr, memory_order_relaxed);
       v->est_usable_prbs = (uint16_t)atomic_load_explicit(&u->est_last, memory_order_relaxed);
       v->first_ns = first;
