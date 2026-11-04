@@ -143,7 +143,7 @@ TEST(PassiveMetrics, MergedSchemaFitsWithFullResourceListAndLargeCounters) {
   m.acq_state = "TRACKING";
   m.td_cb0_us_per_item = 1000000.0;
   m.csirs_confirm_resource_count = NR_PASSIVE_CSIRS_RESOURCE_METRICS_MAX;
-  char buf[16384];
+  char buf[20480];
   const int n = nr_passive_metrics_to_json(&m, buf, sizeof(buf));
   ASSERT_GT(n, 0);
   const std::string s(buf, n);
@@ -227,5 +227,24 @@ TEST(PassiveMetrics, TailKeysSerializedAndWeakGetterKeysOmitted) {
   EXPECT_EQ(s.back(), '}');
   for (const char *k : {"\"cfg_epoch\":7,\"cfg_identity_gen\":2", "\"recov_submitted\":9", "\"recov_yielded\":3,\"recov_late_ms_p50\":1,\"recov_late_ms_p99\":6",
                         "\"retry_yield_chains\":100,\"retry_yield_yields\":4,\"retry_yield_gated\":8"})
+    EXPECT_NE(s.find(k), std::string::npos) << k;
+}
+
+TEST(PassiveMetrics, TrafficKeysPresentOnlyInTrafficMode) {
+  nr_passive_metrics_t m = {};
+  m.acq_state = "TRACKING";
+  char buf[8192];
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
+  EXPECT_EQ(std::string(buf).find("dci_accepted_10"), std::string::npos);  // legacy line unchanged
+  m.has_traffic = 1;
+  m.traffic.accepted[NR_DCI_REC_FMT_10] = 7; m.traffic.state[NR_LAYOUT_UNSOLVED] = 3; m.traffic.emit_us_p99 = 9;
+  m.dci_rec_generated = 5; m.traffic.reopens = 2;
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
+  const std::string s(buf);
+  for (const char *k : {"\"dci_accepted_10\":7", "\"dci_accepted_11\":0", "\"dci_accepted_00\":0", "\"dci_accepted_01\":0",
+                        "\"dci_state_fixed\":0", "\"dci_state_solved\":0", "\"dci_state_cand\":0", "\"dci_state_unsolved\":3",
+                        "\"dci_rec_generated\":5", "\"dci_rec_persisted\":0", "\"dci_rec_lost\":0", "\"check_decodes\":0",
+                        "\"check_fail\":0", "\"probe_decodes\":0", "\"reopens\":2", "\"dci_emit_us_p50\":0", "\"dci_emit_us_p99\":9",
+                        "\"traffic_skip\":0", "\"dci_dup\":0"})
     EXPECT_NE(s.find(k), std::string::npos) << k;
 }

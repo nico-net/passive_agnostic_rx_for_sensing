@@ -30,6 +30,9 @@
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 
 #include "nr_pusch_passive_decode.h"
+#include "nr_traffic_record.h"
+#include "nr_pdsch_solver.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "PHY/MODULATION/nr_sfo_state.h" /* the receiver SFO (one provider, DL and UL) */
 #include "nr_pusch_ul_disc.h"
@@ -3326,6 +3329,13 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   if (!t_solver_probe && !cfr_only && g != NULL && out != NULL && !nr_ul_layout_is_probe(g) && !nr_ul_layout_is_trial(g))
     ul_dmrs_diag_maybe(ue, ctx, slot, g, abs_slot, ta_offset_samples, out, fo_hz);
 
+  if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC && nr_sense_enabled() && !cfr_only && g != NULL && out != NULL
+      && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL)) {
+    /* traffic mode: UL layout probes/trials and policy-wanted decodes become "decode" records */
+    const bool tprobe = t_solver_probe || nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g);
+    if (nr_traffic_decode_outcome(abs_slot, g->rnti, 1, tprobe, g->rv, out->status == NR_PUSCH_PASSIVE_OK, out->snr_db))
+      nr_pdsch_solver_reopen(g->rnti);
+  }
   if (!t_solver_probe && (nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
                     out->status == NR_PUSCH_PASSIVE_ZERO_TB)) {
     /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). cfr_only calls end UNSUPPORTED. */
@@ -3350,7 +3360,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
         .scs_khz = (int16_t)(ofp_->subcarrier_spacing / 1000),
         .fs_hz = (int64_t)ofp_->samples_per_subframe * 1000};
     if (nr_passive_obs_enabled()) nr_passive_obs_push(&o_);
-    if (nr_sense_enabled()) {
+    if (nr_sense_enabled() && nr_isac_mode() != NR_ISAC_MODE_TRAFFIC) {
       nr_sense_grant_meta_t meta = {
         .rx_ts=-1, .k2=g->k2,
         .dci_slot=-1, /* the decoded grant does not carry the actual DCI slot */
@@ -3367,6 +3377,15 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
     if (nr_ue_ctx_enabled()) nr_ue_ctx_on_obs(&o_);
   }
   return ok;
+}
+
+bool nr_pusch_passive_ul_table_learned(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_tblr_mu);
+  const nr_ul_tblr_ent_t *e = nr_ul_tblr_get(g_tblr, rnti, false);
+  const bool l = e && e->learned && e->passes >= 2;
+  pthread_mutex_unlock(&g_tblr_mu);
+  return l;
 }
 
 bool nr_pusch_passive_decode_probe(PHY_VARS_NR_UE *ue, int ctx, uint32_t frame,

@@ -193,7 +193,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
     snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,
              m->csirs_disc_readmit_skipped);
   /* tail keys: own bounded buffer, appended after every pre-existing key */
-  char tail[2560];
+  char tail[4096];
   int t = snprintf(tail, sizeof(tail), ",\"t_real_ns\":%" PRIu64 ",\"proc_utime_us\":%" PRIu64 ",\"proc_stime_us\":%" PRIu64
                    ",\"proc_maxrss_kb\":%" PRIu64 ",\"proc_minflt\":%" PRIu64 ",\"proc_majflt\":%" PRIu64,
                    m->t_real_ns, m->proc_utime_us, m->proc_stime_us, m->proc_maxrss_kb, m->proc_minflt, m->proc_majflt);
@@ -209,6 +209,19 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
   if (m->has_retry_yield && t > 0 && (size_t)t < sizeof(tail))
     t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"retry_yield_chains\":%" PRIu64 ",\"retry_yield_yields\":%" PRIu64 ",\"retry_yield_gated\":%" PRIu64,
                   m->retry_yield_chains, m->retry_yield_yields, m->retry_yield_gated);
+  if (m->has_traffic && t > 0 && (size_t)t < sizeof(tail)) {
+    const nr_traffic_stats_t *tr = &m->traffic;
+    t += snprintf(tail + t, sizeof(tail) - (size_t)t,
+                  ",\"dci_accepted_10\":%" PRIu64 ",\"dci_accepted_11\":%" PRIu64 ",\"dci_accepted_00\":%" PRIu64 ",\"dci_accepted_01\":%" PRIu64
+                  ",\"dci_state_fixed\":%" PRIu64 ",\"dci_state_solved\":%" PRIu64 ",\"dci_state_cand\":%" PRIu64 ",\"dci_state_unsolved\":%" PRIu64
+                  ",\"dci_rec_generated\":%" PRIu64 ",\"dci_rec_persisted\":%" PRIu64 ",\"dci_rec_lost\":%" PRIu64
+                  ",\"dci_dup\":%" PRIu64 ",\"traffic_skip\":%" PRIu64 ",\"check_decodes\":%" PRIu64 ",\"check_fail\":%" PRIu64
+                  ",\"probe_decodes\":%" PRIu64 ",\"reopens\":%" PRIu64 ",\"dci_emit_us_p50\":%" PRIu64 ",\"dci_emit_us_p99\":%" PRIu64,
+                  tr->accepted[NR_DCI_REC_FMT_10], tr->accepted[NR_DCI_REC_FMT_11], tr->accepted[NR_DCI_REC_FMT_00], tr->accepted[NR_DCI_REC_FMT_01],
+                  tr->state[NR_LAYOUT_FIXED], tr->state[NR_LAYOUT_SOLVED], tr->state[NR_LAYOUT_CANDIDATE], tr->state[NR_LAYOUT_UNSOLVED],
+                  m->dci_rec_generated, m->dci_rec_persisted, m->dci_rec_lost, tr->dup, tr->traffic_skip, tr->check_decodes,
+                  tr->check_fail, tr->probe_decodes, tr->reopens, tr->emit_us_p50, tr->emit_us_p99);
+  }
   {
     static const char *const ptype[NR_PTRACK_TYPES] = {"srs", "csirs", "pucch", "cg"};
     for (int i = 0; i < NR_PTRACK_TYPES && t > 0 && (size_t)t < sizeof(tail); i++)

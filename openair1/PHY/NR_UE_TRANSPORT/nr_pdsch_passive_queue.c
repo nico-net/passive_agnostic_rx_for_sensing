@@ -61,6 +61,8 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h" // P99: lag bins, scan lag histogram
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"
+#include "nr_traffic_record.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.h" // SLOTPHASE evidence of failing slot phases
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_evm_acc.h"               // RESID: nr_pdsch_resid (position-keyed equaliser residual)
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
@@ -2266,6 +2268,13 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
                 job.sweep_ticket.rnti, job.grant.mcs, dec.qm_measured, kept);
       }
+      if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC && nr_sense_enabled() && !recov_hold
+          && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+        /* traffic mode: probes and policy-wanted decodes become "decode" records (SNR = DM-RS combined, NaN when not measured) */
+        const float tsnr = dec.dmrs_snr.comb_db > -90.f ? dec.dmrs_snr.comb_db : NAN;
+        if (nr_traffic_decode_outcome(job.absolute_slot, job.rnti, 0, job.layout_probe, job.grant.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, tsnr))
+          nr_pdsch_solver_reopen(job.rnti);
+      }
       if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && !job.layout_probe &&
           (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
         /* Per-grant observation record (Task A3; schema in nr_passive_obs.h). Non-blocking. */
@@ -2294,7 +2303,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
             .scs_khz = (int16_t)(ofp_->subcarrier_spacing / 1000),
             .fs_hz = (int64_t)ofp_->samples_per_subframe * 1000};
         if (nr_passive_obs_enabled()) nr_passive_obs_push(&o_);
-        if (nr_sense_enabled()) {
+        if (nr_sense_enabled() && nr_isac_mode() != NR_ISAC_MODE_TRAFFIC) {
           nr_sense_grant_meta_t meta = {
             .stamp_valid=true, .epoch=nr_cfg_reconf_enabled()?(int)job.sense_epoch:-1,
             .identity_gen=nr_cfg_reconf_enabled()?(int)job.sense_identity_gen:-1,

@@ -59,3 +59,10 @@ bool nr_traffic_decode_result(int dir, uint16_t rnti, int rv, float snr_db, bool
   pthread_mutex_unlock(&g_td_mu);
   return reopen;
 }
+
+void nr_traffic_decode_reset(void)
+{
+  pthread_mutex_lock(&g_td_mu);
+  memset(&g_td, 0, sizeof g_td);
+  pthread_mutex_unlock(&g_td_mu);
+}

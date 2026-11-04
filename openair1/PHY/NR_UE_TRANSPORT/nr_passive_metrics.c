@@ -30,6 +30,7 @@
 #include "nr_csirs_disc.h"
 #include "nr_prach_passive.h"
 #include "nr_sense_api.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pdcch_uss_prune.h"
 __attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
 __attribute__((weak)) void nr_prach_passive_diag(uint64_t *, uint64_t *, int *);
@@ -148,6 +149,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     nr_pdsch_retry_yield_stats(&m->retry_yield_chains, &m->retry_yield_yields, &m->retry_yield_gated);
     m->has_retry_yield = 1;
   }
+  if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) { m->has_traffic = 1; nr_traffic_stats_get(&m->traffic); }
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
   if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped,
       &m->srs_pregate_skip,&m->srs_backoff_skip,&m->srs_budget_skip,&m->srs_idle_resets);
@@ -314,6 +316,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     m->sense_write_us=sense.write_ns/1000;
     m->sense_rec_count=sense.rec_count;
     m->sense_write_count=sense.write_count;
+    m->dci_rec_generated=sense.dci_generated; m->dci_rec_persisted=sense.dci_persisted; m->dci_rec_lost=sense.dci_lost;
   }
   if (nr_prach_passive_metrics)
     nr_prach_passive_metrics(&m->prach_us, &m->prach_drops, &m->prach_skipped);
@@ -351,7 +354,7 @@ void nr_passive_metrics_emit(void)
   static FILE *f = NULL;
   static int tried = 0;
   nr_passive_metrics_t m;
-  char buf[16384]; /* levers, robustness, and per-source sensing metrics */
+  char buf[20480]; /* levers, robustness, and per-source sensing metrics */
   nr_passive_metrics_collect(&m);
   if (nr_passive_metrics_to_json(&m, buf, sizeof(buf)) < 0) {
     LOG_W(PHY, "SENSING: ISAC_METRICS buffer too small\n");

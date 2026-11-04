@@ -166,6 +166,8 @@ void nr_pusch_passive_decode_free(void);
 /// Periodic census: attempts / CRC pass / per-reason rejects. Printed by the caller's summary.
 void nr_pusch_passive_stats_dump(void);
 
+/* traffic mode: the UL MCS table of this RNTI is learned (two consecutive CRC passes under one table, nr_ul_tbl_retry.h) */
+bool nr_pusch_passive_ul_table_learned(uint16_t rnti);
 #ifdef __cplusplus
 }
 #endif

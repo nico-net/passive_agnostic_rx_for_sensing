@@ -98,6 +98,12 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
 #include "nr_sense_api.h"
+#include "nr_traffic_record.h"
+#include "nr_traffic_cfg.h"
+#include "nr_traffic_decode.h"
+#include "nr_traffic_dci_fields.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
+#include "nr_pusch_passive_decode.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_gating.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
@@ -2013,6 +2019,7 @@ static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
         nr_pdsch_solver_reset();
         nr_tda_field_forget();
         nr_slotphase_reset();
+        if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) { nr_traffic_cfg_reset(); nr_traffic_retx_reset(); nr_traffic_decode_reset(); }
         LOG_A(PHY, "SENSING: PDSCH_SOLVER reset on new cell identity (identity_gen %u -> %u)\n", solver_id, s->identity_gen);
       }
       solver_id = s->identity_gen;
@@ -4536,7 +4543,8 @@ static _Thread_local uint64_t t_bank_slot;
  *   Duplicates still count as traffic for the bank's reconfiguration bookkeeping. Updates the global accept counters per pass kind.
  *   Callers: nr_pdcch_blind_monitor_run_occasion_one() (accept handling, two sites). Takes s_dedupe_mu.
  */
-static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
+/* dedupe_hit: the table lookup + insert alone (no counters, no bank bookkeeping). Traffic mode uses it with dir 2 (DL records). */
+static bool dedupe_hit(uint32_t abs_slot, uint16_t rnti, int dir)
 {
   bool dup = false;
   pthread_mutex_lock(&s_dedupe_mu);
@@ -4549,6 +4557,11 @@ static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
     s_dedupe_w++;
   }
   pthread_mutex_unlock(&s_dedupe_mu);
+  return dup;
+}
+static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
+{
+  const bool dup = dedupe_hit(abs_slot, rnti, dir);
   /* A duplicated grant is still traffic on this independently verified nID. */
   if (dup && t_pass_kind == PASS_BANK && reconf_lengths_enabled()
       && nr_pdcch_blind_monitor_get_cfg()->discovered_coreset)
@@ -4565,6 +4578,158 @@ static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
     if (dir == 0) nr_pdcch_coreset_bank_note_grant(t_bank_index, rnti); /* B1/B2: the entry that produced this DL grant is credited with its TB outcomes */
   }
   return dup;
+}
+
+/* ---- TRAFFIC MODE (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC): one DCI record per accepted DCI, emitted at the accept point.
+ * Unreachable in legacy mode (every call site is behind that one test). Layout of the code: record init, cfg snapshot, DL fill, UL fill. */
+static void traffic_rec_init(nr_sense_dci_rec_t *r)
+{
+  memset(r, 0, sizeof *r);
+  r->o = (nr_passive_obs_t){.rnti_class = -1, .mcs = -1, .mcs_table = -1, .qm = -1, .nl = -1, .dmrs_scrambling_id = -1, .tbs = -1,
+                            .harq_pid = -1, .rv = -1, .ndi = -1, .crc = NR_OBS_CRC_NA, .nvar = NAN, .snr_db = NAN,
+                            .fo_comp_hz = NAN, .delay_samples = NAN, .carrier_hz = -1, .scs_khz = -1, .fs_hz = -1,
+                            .start_rb = -1, .nb_rb = -1, .start_sym = -1, .nb_sym = -1};
+  r->m = (nr_sense_grant_meta_t){.rx_ts = -1, .k2 = -1, .dci_slot = -1, .transform_precoding = -1, .freq_hopping = -1, .dmrs_type = -1,
+                                 .dmrs_add_pos = -1, .dmrs_n_scid = -1, .ta_est_samples = -1, .cfo_est_hz = NAN};
+  nr_sense_capture_grant_stamp(&r->m);
+  r->bwp_start = r->bwp_size = r->start_rb_bwp = -1;
+  r->vrb_prb = r->tda_index = r->k0 = r->k1 = r->dai = r->tpc = r->pri = r->srs_req = r->csi_req = r->ulsch_ind = r->cbgti = r->retx = -1;
+  r->si_ind = r->short_msg_ind = r->tb_scaling = -1; r->short_msg = -1;
+  r->pdsch_abs_slot = r->harq_fb_abs_slot = -1;
+  r->coreset_id = -1; r->ss_type = -1;
+}
+
+static void traffic_rec_bits(nr_sense_dci_rec_t *r, const nr_dci_bits_t *p, uint16_t len)
+{
+  r->dci_len = len;
+  for (unsigned i = 0; i < (len + 7u) / 8u && i < sizeof r->dci_bits; i++) {
+    const int w = (int)(len - 8u * i < 8u ? len - 8u * i : 8u);
+    r->dci_bits[i] = (uint8_t)(nr_dci_bits_field(p, len, (int)(8u * i), w) << (8 - w));
+  }
+}
+
+static void traffic_tda_lists(nr_traffic_cfg_snap_t *sn, int count, const uint8_t *S, const uint8_t *L)
+{
+  for (int i = 0; i < 16; i++) { sn->s_by_tda[i] = sn->l_by_tda[i] = -1; }
+  for (int i = 0; i < count && i < 16; i++) { sn->s_by_tda[i] = (int8_t)S[i]; sn->l_by_tda[i] = (int8_t)L[i]; }
+}
+
+/* cfg_ref of this record: version of the configuration (CORESET, BWP, TDRA lists, layout) the DCI was read with. snap must be zeroed (hash covers padding). */
+static void traffic_cfg_ref(nr_sense_dci_rec_t *r, nr_traffic_cfg_snap_t *sn, const nr_pdcch_blind_monitor_cfg_t *cfg, int bwp_start, int bwp_size)
+{
+  sn->identity_gen = r->m.identity_gen >= 0 ? (uint32_t)r->m.identity_gen : 0;
+  sn->dedicated_epoch = r->m.dedicated_epoch >= 0 ? (uint32_t)r->m.dedicated_epoch : 0;
+  sn->coreset_id = r->coreset_id; sn->coreset_start_rb = (int16_t)(cfg->bwp_start + cfg->coreset_rb_offset);
+  sn->coreset_n_rb = (int16_t)(cfg->coreset_freq_domain * 6); sn->coreset_dur = (int8_t)cfg->coreset_duration;
+  sn->bwp_start = (int16_t)bwp_start; sn->bwp_size = (int16_t)bwp_size;
+  r->bwp_start = sn->bwp_start; r->bwp_size = sn->bwp_size;
+  r->cfg_ref_ver = nr_traffic_cfg_ref(r->o.rnti, sn);
+}
+
+static int traffic_fdra_bits(int n)
+{
+  int b = 0;
+  for (long v = (long)n * (n + 1) / 2; (1L << b) < v; b++) {}
+  return b;
+}
+
+/* DL: out = the grant's reading (1_1: the representative layout), payload/dci_len = its raw bits. Returns the layout state used. */
+static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL_FRAME_PARMS *fp, const nr_pdcch_blind_result_t *out,
+                                         const nr_pdcch_blind_dci10_ctx_t *c10, int bwp_start, int bwp_size, const nr_dci_bits_t *payload,
+                                         uint16_t dci_len, int al, int cce, int frame, int slot, int64_t abs_slot, nr_layout_state_t ls,
+                                         int rep, bool decode_wanted, uint64_t t0)
+{
+  const bool is10 = out->dci_format == NR_BLIND_DCI_FORMAT_1_0;
+  nr_sense_dci_rec_t r;
+  traffic_rec_init(&r);
+  nr_passive_obs_t *o = &r.o;
+  const bool no_harq = out->rnti_class >= NR_BLIND_RNTI_CLASS_SI;
+  o->abs_slot = abs_slot; o->frame = (int16_t)frame; o->slot = (int16_t)slot; o->pci = (int16_t)fp->Nid_cell;
+  o->dir = NR_OBS_DIR_DL; o->rnti = out->rnti; o->rnti_class = (int8_t)out->rnti_class;
+  o->start_rb = (int16_t)(bwp_start + out->start_rb); o->nb_rb = (int16_t)out->num_rb;
+  o->start_sym = (int8_t)out->start_symbol; o->nb_sym = (int8_t)out->num_symbols;
+  o->mcs = (int8_t)out->mcs; o->mcs_table = (int8_t)out->mcs_table; o->dmrs_symb_pos = out->dl_dmrs_symb_pos;
+  o->harq_pid = no_harq ? -1 : (int8_t)out->harq_pid; o->rv = (int8_t)out->rv; o->ndi = no_harq ? -1 : (int8_t)out->ndi;
+  o->carrier_hz = fp->dl_CarrierFreq ? (int64_t)fp->dl_CarrierFreq : -1;
+  o->scs_khz = (int16_t)(fp->subcarrier_spacing / 1000); o->fs_hz = (int64_t)fp->samples_per_subframe * 1000;
+  r.dci_format = is10 ? NR_DCI_REC_FMT_10 : NR_DCI_REC_FMT_11;
+  r.ss_type = is10 ? (int8_t)cfg->dci10_ss_type : (int8_t)NR_BLIND_SS_UE_SPECIFIC;
+  r.al = (int8_t)al; r.cce = (int16_t)cce; r.coreset_id = (int16_t)t_bank_index;
+  traffic_rec_bits(&r, payload, dci_len);
+  r.rnti_confirmed = nr_pdcch_blind_monitor_rnti_confirmed((uint32_t)abs_slot, out->rnti);
+  r.layout_state = ls;
+  if (!is10) nr_pdsch_solver_layout_state(out->rnti, &r.layout_checks_ok, &r.layout_checks_fail);
+  r.start_rb_bwp = (int16_t)out->start_rb; r.tda_index = (int8_t)out->tda_index;
+  if (is10) r.vrb_prb = (int8_t)out->vrb_to_prb;
+  else r.srs_req = (int8_t)out->srs_request;
+  if (out->rnti_class == NR_BLIND_RNTI_CLASS_SI) r.si_ind = (int8_t)out->si_indicator;
+  if (out->rnti_class == NR_BLIND_RNTI_CLASS_P) { r.short_msg_ind = (int8_t)out->short_messages_ind; r.short_msg = out->short_messages; }
+  if (out->rnti_class == NR_BLIND_RNTI_CLASS_RA || out->rnti_class == NR_BLIND_RNTI_CLASS_P) r.tb_scaling = (int8_t)out->tb_scaling;
+  nr_dci_harq_fields_t hf = {-1, -1, -1, -1};
+  if (is10 && (out->rnti_class == NR_BLIND_RNTI_CLASS_C || out->rnti_class == NR_BLIND_RNTI_CLASS_TC))
+    nr_dci10_harq_fields(*payload, dci_len, (uint16_t)traffic_fdra_bits(c10->n_rb_riv), &hf);
+  else if (!is10 && rep >= 0 && g_dci11_resolver != NULL && rep < (int)__atomic_load_n(&g_dci11_resolver->n_hyp, __ATOMIC_ACQUIRE))
+    nr_dci11_harq_fields(*payload, dci_len, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep], &hf);
+  r.dai = hf.dai; r.tpc = hf.tpc; r.pri = hf.pri; r.k1 = hf.k1;
+  r.retx = no_harq ? -1 : (int8_t)nr_traffic_retx(0, out->rnti, out->harq_pid, out->ndi);
+  r.decode = decode_wanted ? NR_DCI_DECODE_QUEUED : NR_DCI_DECODE_NONE;
+  nr_traffic_cfg_snap_t sn;
+  memset(&sn, 0, sizeof sn);
+  sn.layout_rep = (int16_t)(!is10 ? rep : -1);
+  if (sn.layout_rep >= 0 && g_dci11_resolver != NULL) sn.layout = g_dci11_resolver->hyp[rep];
+  const bool common = is10 && c10->ss_type == NR_BLIND_SS_COMMON && cfg->extract.tda_common_count > 0;
+  traffic_tda_lists(&sn, common ? cfg->extract.tda_common_count : cfg->extract.tda_count,
+                    common ? cfg->extract.tda_common_start : cfg->extract.tda_start, common ? cfg->extract.tda_common_length : cfg->extract.tda_length);
+  sn.dmrs_add_pos = (int8_t)cfg->extract.dmrs_add_pos; sn.mcs_table = (int8_t)out->mcs_table; sn.rm_set = -1;
+  traffic_cfg_ref(&r, &sn, cfg, bwp_start, bwp_size);
+  nr_sense_emit_dci(&r);
+  nr_traffic_count_dci(r.dci_format, ls, btim_now_ns() - t0);
+}
+
+/* UL 0_1 / 0_0: u = the grant. */
+static void traffic_emit_ul(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL_FRAME_PARMS *fp, const nr_pdcch_blind_ul_result_t *u,
+                            const nr_pdcch_blind_ul_opts_t *uo, int al, int cce, int frame, int slot, int64_t abs_slot, nr_layout_state_t ls,
+                            bool decode_wanted, uint64_t t0)
+{
+  const bool f00 = u->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_0;
+  nr_sense_dci_rec_t r;
+  traffic_rec_init(&r);
+  nr_passive_obs_t *o = &r.o;
+  o->abs_slot = abs_slot; o->frame = (int16_t)frame; o->slot = (int16_t)slot; o->pci = (int16_t)fp->Nid_cell;
+  o->dir = NR_OBS_DIR_UL; o->rnti = u->rnti;
+  o->start_rb = (int16_t)(u->bwp_start + u->start_rb); o->nb_rb = (int16_t)u->num_rb;
+  o->start_sym = (int8_t)u->start_symbol; o->nb_sym = (int8_t)u->num_symbols;
+  o->mcs = (int8_t)u->mcs; o->mcs_table = (int8_t)u->mcs_table; o->nl = (int8_t)u->nrOfLayers; o->dmrs_symb_pos = u->ul_dmrs_symb_pos;
+  o->harq_pid = (int8_t)u->harq_pid; o->rv = (int8_t)u->rv; o->ndi = (int8_t)u->ndi;
+  o->carrier_hz = fp->ul_CarrierFreq ? (int64_t)fp->ul_CarrierFreq : -1;
+  o->scs_khz = (int16_t)(fp->subcarrier_spacing / 1000); o->fs_hz = (int64_t)fp->samples_per_subframe * 1000;
+  r.m.k2 = u->k2;
+  r.dci_format = f00 ? NR_DCI_REC_FMT_00 : NR_DCI_REC_FMT_01;
+  r.ss_type = f00 ? (int8_t)cfg->dci10_ss_type : (int8_t)NR_BLIND_SS_UE_SPECIFIC;
+  r.al = (int8_t)al; r.cce = (int16_t)cce; r.coreset_id = (int16_t)t_bank_index;
+  traffic_rec_bits(&r, &u->raw_payload, u->dci_length);
+  r.rnti_confirmed = nr_pdcch_blind_monitor_rnti_confirmed((uint32_t)abs_slot, u->rnti);
+  r.layout_state = ls;
+  r.start_rb_bwp = (int16_t)u->start_rb; r.tda_index = (int8_t)u->tda_index; r.tpc = (int8_t)u->tpc;
+  if (!f00) { r.dai = (int8_t)u->dai; r.srs_req = (int8_t)u->srs_request; r.csi_req = (int8_t)u->csi_request; r.ulsch_ind = (int8_t)u->ulsch_indicator; }
+  r.retx = (int8_t)nr_traffic_retx(1, u->rnti, u->harq_pid, u->ndi);
+  r.decode = decode_wanted ? NR_DCI_DECODE_QUEUED : NR_DCI_DECODE_NONE;
+  nr_traffic_cfg_snap_t sn;
+  memset(&sn, 0, sizeof sn);
+  sn.layout_rep = -1;
+  traffic_tda_lists(&sn, uo->tda_count, uo->tda_start, uo->tda_length);
+  sn.dmrs_add_pos = (int8_t)uo->dmrs_add_pos; sn.mcs_table = (int8_t)uo->mcs_table; sn.rm_set = -1;
+  traffic_cfg_ref(&r, &sn, cfg, u->bwp_start, u->bwp_size);
+  nr_sense_emit_dci(&r);
+  nr_traffic_count_dci(r.dci_format, ls, btim_now_ns() - t0);
+}
+
+/* The decode gate of a non-probe C-RNTI job (see nr_traffic_decode.h); other RNTI classes are always decoded. */
+static bool traffic_skip_note(void) { nr_traffic_count(NR_TRAFFIC_CNT_SKIP); return true; }
+static bool traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_learned)
+{
+  const bool hv = dir == 0 && rnti_class == NR_BLIND_RNTI_CLASS_C && nr_pdsch_solver_take_hrv_alert(rnti);
+  return nr_traffic_decode_wanted(dir, rnti, rnti_class, ls, ul_learned, btim_now_ns(), hv);
 }
 
 /* The banked CORESET passes of ONE dedicated-only slot (T26d): each pass is ~250 us FEP+LLR + decode, and Phase 1 of different
@@ -8317,6 +8482,14 @@ constdiag_done:;
         cand_task[ti].ok = false; /* same UL DCI already accepted by another pass this slot */
       if (cand_task[ti].ok) {
         NR_BLIND_CTR_INC(g_ul_accepts);
+        bool ul_dec = true; /* traffic mode: a non-probe PUSCH decode of this grant is wanted */
+        if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
+          const uint64_t tt0 = btim_now_ns();
+          const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
+          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti));
+          traffic_emit_ul(cfg, fp, u, &ul_opts, cand_task[ti].L, cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot, source_absolute_slot,
+                          uls, ul_dec, tt0);
+        }
         if (nr_ue_ctx_enabled()) {
           const int64_t coreset = ue_ctx_coreset_packed(cfg);
           nr_ue_ctx_on_dci_accept(u->rnti,u->ul_dci_format==NR_BLIND_UL_DCI_FORMAT_0_1,
@@ -8391,7 +8564,7 @@ constdiag_done:;
           /* UL-LAYOUT: until this length is locked only its DM-RS probe (booked above) reaches the PUSCH worker; the
            * width/U3 readings of an unlocked layout are logged but not decoded. */
         } else if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce)) {
-          if (nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(u, source_absolute_slot);
+          if (nr_cfg_epoch_work_current() && (ul_dec || !traffic_skip_note())) nr_pusch_grant_book_add(u, source_absolute_slot);
         } else if (ul_verdict == NR_DCI01_FDRA_REFUSE && ul_oracle) {
           /* Gap item 1 (PUSCH RA type 0 / dynamicSwitch). Type 1 is refuted for this class; rather than
            * drop the already-CRC-verified payload, re-extract it under each FDRA mode that reproduces
@@ -8413,7 +8586,7 @@ constdiag_done:;
                     nb, u->rnti, n_cand);
             /* One queue job preserves all interpretations through book deduplication.
              * Only the consumer's TB CRC may stop the bounded (at most four) search. */
-            if (nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&alternatives, source_absolute_slot);
+            if (nr_cfg_epoch_work_current() && (ul_dec || !traffic_skip_note())) nr_pusch_grant_book_add(&alternatives, source_absolute_slot);
           }
 #undef s_ul_type0_booked
         }
@@ -8456,7 +8629,15 @@ constdiag_done:;
                   ul00.rnti, (unsigned)ul00.start_rb, (unsigned)ul00.num_rb,
                   (unsigned)ul00.start_symbol, (unsigned)ul00.num_symbols,
                   (unsigned)ul00.k2, (unsigned)ul00.mcs);
-          if (nr_cfg_epoch_work_current()) nr_pusch_grant_book_add(&ul00, source_absolute_slot);
+          bool ul00_dec = true;
+          if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
+            const uint64_t tt0 = btim_now_ns();
+            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti));
+            if (dedupe_hit(abs_slot, ul00.rnti, 1)) nr_traffic_count(NR_TRAFFIC_CNT_DUP);
+            else traffic_emit_ul(cfg, fp, &ul00, &ul_opts, cand_task[ti].L, cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot,
+                                 source_absolute_slot, NR_LAYOUT_FIXED, ul00_dec, tt0);
+          }
+          if (nr_cfg_epoch_work_current() && (ul00_dec || !traffic_skip_note())) nr_pusch_grant_book_add(&ul00, source_absolute_slot);
         } else {
 #undef logged00
           NR_BLIND_CTR_INC(g_ul00_rejects);
@@ -8632,6 +8813,25 @@ constdiag_done:;
                                     out.mismatched_bits, ue->dci_thres))
       nr_cfg_epoch_note_si_modification(cfg_abs_slot, nr_cfg_epoch_si_period());
     NR_BLIND_CTR_INC(g_accepts);
+    int tw = -1; /* traffic mode only: 1 = a non-probe decode of this DCI is wanted, 0 = suppressed (-1 in legacy mode: never read) */
+    if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
+      const uint64_t tt0 = btim_now_ns();
+      const bool is10t = out.dci_format == NR_BLIND_DCI_FORMAT_1_0;
+      const bool slv = !is10t && nr_pdsch_solver_enabled() && cand_task[ti].dl_auto && g_dci11_state == 1 && g_dci11_resolver != NULL;
+      const int rep_t = !is10t ? nr_pdsch_solver_rep(out.rnti) : -1;
+      const nr_layout_state_t lst = is10t ? NR_LAYOUT_FIXED : slv ? nr_pdsch_solver_layout_state(out.rnti, NULL, NULL) : NR_LAYOUT_SOLVED;
+      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false) ? 1 : 0;
+      /* DL 1_1 of dl_auto already went through the dir-0 dedupe; every other accept can repeat (other passes / AL / CORESET hypotheses) */
+      if (!(cand_task[ti].dl_auto && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) && dedupe_hit(abs_slot, out.rnti, 2)) {
+        nr_traffic_count(NR_TRAFFIC_CNT_DUP);
+      } else {
+        const int dbs = cand_task[ti].bwp_entry > 0 && pbwp_snap[cand_task[ti].bwp_entry].start >= 0 ? pbwp_snap[cand_task[ti].bwp_entry].start : cfg->bwp_start;
+        const int dbz = is10t ? (int)dci10_ctx.n_rb_riv : cand_task[ti].bwp_size;
+        const nr_dci_bits_t *pl = is10t ? &out.payload : &cand_task[ti].dl_raw.payload;
+        traffic_emit_dl(cfg, fp, &out, &dci10_ctx, is10t ? (int)dci10_ctx.rb_offset : dbs, dbz, pl, cand_task[ti].dci_length, cand_task[ti].L,
+                        cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot, source_absolute_slot, lst, rep_t, tw == 1, tt0);
+      }
+    }
     if (nr_ue_ctx_enabled() && out.rnti) {
       nr_ue_ctx_on_param(out.rnti, NR_UEP_RNTI_CLASS, out.rnti_class,
                          NR_UEV_TRUSTED, NR_UEC_FIRST_LEARNED, source_absolute_slot);
@@ -9515,6 +9715,10 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       bool tf_noted = false;
       for (; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
         const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
+        if (tw == 0 && !var[v].probe && traffic_skip_note()) { /* traffic mode: a full decode the policy does not want; probes always run */
+          nr_pdsch_solver_feedback(var[v].token, false, false);
+          continue;
+        }
         if (var[v].probe && nr_admit_on()) { /* ISAC_BG_LANE: a solver probe waits for an idle critical lane */
           const uint64_t t_now = nr_admit_now_ns();
           if (!nr_admit_try(NR_ADMIT_PROBE, t_now, 0, 0)) {
@@ -9724,7 +9928,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
     if ((g_pdsch_sweep_on || (cand_task[ti].bwp_entry > 0 && cfg->dl_full_auto)) && !is_dci10) {
       /* Rotate only grants eligible for a CRC attempt, not deterministic RV/cap drops. */
       if (!want_decode || (rv0_drop(cfg, &out))
-          || decodes_this_occasion >= cfg->pdsch_max_per_slot)
+          || decodes_this_occasion >= cfg->pdsch_max_per_slot || (tw == 0 && traffic_skip_note()))
         continue;
       nr_pdsch_cfg_hypothesis_t hy;
       if (!nr_pdsch_config_sweep_select(cand_task[ti].dl_auto ? cand_task[ti].dl_layout_configuration : g_pdsch_configuration,
@@ -9851,6 +10055,8 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
      * costs it nothing. `sources = "pdsch_data"` makes want_dmrs false, and this deployment runs the
      * SNR gate off, so on the sensing config this skips the whole block. */
     const bool need_chest = nr_sense_blind_need_chest(dmrs_source, cfg->min_snr_lin);
+    if (tw == 0 && want_decode && !rv0_drop(cfg, &out) && decodes_this_occasion < cfg->pdsch_max_per_slot && traffic_skip_note())
+      continue; /* traffic mode: not a grantdrop; the policy declined this decode */
     if (want_decode && (rv0_drop(cfg, &out)))
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "rv!=0");
     if (want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot)
@@ -10127,7 +10333,12 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
             else
               NR_BLIND_CTR_INC(g_dec_k0_wait);
             btim_add(BTIM_PDSCH, btim_t_pds);
-            if (nr_sense_enabled() && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+            if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC && nr_sense_enabled()
+                && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+              const float tsnr = dec.dmrs_snr.comb_db > -90.f ? dec.dmrs_snr.comb_db : NAN;
+              if (nr_traffic_decode_outcome(grant_pd.source_absolute_slot, out.rnti, 0, false, out.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, tsnr))
+                nr_pdsch_solver_reopen(out.rnti);
+            } else if (nr_sense_enabled() && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
               struct timespec sense_ts;
               clock_gettime(CLOCK_MONOTONIC, &sense_ts);
               const bool no_harq = out.rnti_class >= NR_BLIND_RNTI_CLASS_SI;

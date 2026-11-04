@@ -17,6 +17,7 @@ bool nr_traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_
                               uint64_t t_ns, bool hrv_alert);
 /* Returns true when the RNTI must be reopened (K_REOPEN consecutive counted failures: rv 0 and snr >= 10 dB). */
 bool nr_traffic_decode_result(int dir, uint16_t rnti, int rv, float snr_db, bool crc_ok);
+void nr_traffic_decode_reset(void);   /* HARD_RESET epochs: forget every RNTI's counters */
 #ifdef __cplusplus
 }
 #endif

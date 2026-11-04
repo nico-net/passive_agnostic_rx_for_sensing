@@ -2,6 +2,7 @@
 /* Traffic-mode DCI record: JSON formatter (writer thread) and the emit functions. */
 #include "nr_traffic_record.h"
 #include "nr_sense_api.h"
+#include "nr_traffic_decode.h"
 #include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
@@ -82,4 +83,85 @@ void nr_sense_emit_decode(uint64_t abs_slot, uint16_t rnti, int dir, bool probe,
       abs_slot, (unsigned)rnti, dir ? "UL" : "DL", probe ? "true" : "false", crc, snr,
       has_l ? "\"" : "null", lr, has_l ? "\"" : "");
   if (k > 0 && (size_t)k < sizeof line) nr_sense_push_record(line);
+}
+
+/* ---- counters (this cell) ---- */
+#include "common/utils/nr_cell.h"
+#include <stdatomic.h>
+#include <stdlib.h>
+#define TS_RING 512
+typedef struct { _Atomic uint64_t accepted[4], state[4], cnt[6]; _Atomic uint32_t emit_us[TS_RING]; _Atomic uint32_t w; } traffic_ctr_t;
+NR_CELL_STATIC(traffic_ctr_t, g_traffic_ctr)
+#define g_traffic_ctr NR_CELL_REF(g_traffic_ctr)
+
+void nr_traffic_count_dci(int fmt, nr_layout_state_t ls, uint64_t emit_ns)
+{
+  traffic_ctr_t *c = &g_traffic_ctr;
+  atomic_fetch_add_explicit(&c->accepted[fmt & 3], 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&c->state[(unsigned)ls & 3u], 1, memory_order_relaxed);
+  const uint32_t w = atomic_fetch_add_explicit(&c->w, 1, memory_order_relaxed);
+  atomic_store_explicit(&c->emit_us[w % TS_RING], (uint32_t)(emit_ns / 1000u) + 1u, memory_order_relaxed); /* +1: 0 = empty */
+}
+
+void nr_traffic_count(int what)
+{
+  if (what >= 0 && what < 6) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
+}
+
+static int cmp_u32(const void *a, const void *b) { const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return (x > y) - (x < y); }
+
+void nr_traffic_stats_get(nr_traffic_stats_t *s)
+{
+  memset(s, 0, sizeof *s);
+  traffic_ctr_t *c = &g_traffic_ctr;
+  for (int i = 0; i < 4; i++) { s->accepted[i] = atomic_load_explicit(&c->accepted[i], memory_order_relaxed); s->state[i] = atomic_load_explicit(&c->state[i], memory_order_relaxed); }
+  s->dup = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_DUP], memory_order_relaxed);
+  s->traffic_skip = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_SKIP], memory_order_relaxed);
+  s->check_decodes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK], memory_order_relaxed);
+  s->check_fail = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK_FAIL], memory_order_relaxed);
+  s->probe_decodes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_PROBE], memory_order_relaxed);
+  s->reopens = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_REOPEN], memory_order_relaxed);
+  uint32_t v[TS_RING]; int n = 0;
+  for (int i = 0; i < TS_RING; i++) { const uint32_t x = atomic_load_explicit(&c->emit_us[i], memory_order_relaxed); if (x) v[n++] = x - 1u; }
+  if (n) { qsort(v, (size_t)n, sizeof v[0], cmp_u32); s->emit_us_p50 = v[n / 2]; s->emit_us_p99 = v[(n * 99) / 100 >= n ? n - 1 : (n * 99) / 100]; }
+}
+
+/* ---- retransmission flag: last NDI per (dir, rnti, pid), direct-mapped (a collision only loses the flag: -1) ---- */
+#include <pthread.h>
+#define RX_SLOTS 1024
+typedef struct { uint32_t key; int8_t ndi; } rx_ent_t;   /* key 0 = empty; key = 1 + (dir<<20 | rnti<<4 | pid) */
+typedef struct { rx_ent_t e[RX_SLOTS]; } rx_tab_t;
+NR_CELL_STATIC(rx_tab_t, g_retx_tab)
+#define g_retx_tab NR_CELL_REF(g_retx_tab)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_retx_mu, PTHREAD_MUTEX_INITIALIZER)
+#define g_retx_mu NR_CELL_REF(g_retx_mu)
+
+int nr_traffic_retx(int dir, uint16_t rnti, int pid, int ndi)
+{
+  if (ndi < 0 || pid < 0) return -1;
+  const uint32_t key = 1u + (((uint32_t)(dir & 1) << 20) | ((uint32_t)rnti << 4) | ((uint32_t)pid & 15u));
+  rx_ent_t *e = &g_retx_tab.e[(key * 2654435761u) >> 22 & (RX_SLOTS - 1)];
+  pthread_mutex_lock(&g_retx_mu);
+  const int r = e->key == key ? (e->ndi == ndi ? 1 : 0) : -1;
+  e->key = key; e->ndi = (int8_t)ndi;
+  pthread_mutex_unlock(&g_retx_mu);
+  return r;
+}
+
+void nr_traffic_retx_reset(void)
+{
+  pthread_mutex_lock(&g_retx_mu);
+  memset(&g_retx_tab, 0, sizeof g_retx_tab);
+  pthread_mutex_unlock(&g_retx_mu);
+}
+
+bool nr_traffic_decode_outcome(uint64_t abs_slot, uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db)
+{
+  nr_sense_emit_decode(abs_slot, rnti, dir, probe, crc, snr_db, NULL);
+  if (probe) { nr_traffic_count(NR_TRAFFIC_CNT_PROBE); return false; }
+  nr_traffic_count(NR_TRAFFIC_CNT_CHECK);
+  if (crc == 0) nr_traffic_count(NR_TRAFFIC_CNT_CHECK_FAIL);
+  const bool reopen = crc >= 0 && nr_traffic_decode_result(dir, rnti, rv, snr_db, crc == 1);
+  if (reopen) nr_traffic_count(NR_TRAFFIC_CNT_REOPEN);
+  return reopen;
 }

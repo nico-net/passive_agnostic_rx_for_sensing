@@ -4174,3 +4174,6 @@ openair1/PHY/NR_UE_TRANSPORT/nr_traffic_cfg.c	15	g_cfg_tab	file_static	cfg_tab_t
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_cfg.c	17	g_cfg_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_decode.c	13	g_td	file_static	td_tab_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, traffic decode policy table (128 RNTIs x DL/UL, LRU)
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_decode.c	11	g_td_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_td
+openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	94	g_traffic_ctr	file_static	traffic_ctr_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, traffic-mode counters + emit-time ring of this cell
+openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	134	g_retx_tab	file_static	rx_tab_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, last NDI per (dir, RNTI, HARQ pid) of this cell
+openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	136	g_retx_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_retx_tab

@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include "nr_sense_api.h"
 #include "nr_periodic_track.h"
+#include "nr_traffic_record.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -103,6 +104,10 @@ typedef struct {
   uint64_t recov_submitted, recov_rescued, recov_stale, recov_expired, recov_dropped_full, recov_dropped_old, recov_yielded;
   int recov_late_ms_p50, recov_late_ms_p99;
   uint64_t retry_yield_chains, retry_yield_yields, retry_yield_gated;
+  /* traffic mode only (has_traffic = nr_isac_mode() == TRAFFIC; the keys are omitted otherwise): nr_traffic_stats() + DCI record ring counters */
+  int has_traffic;
+  nr_traffic_stats_t traffic;
+  uint64_t dci_rec_generated, dci_rec_persisted, dci_rec_lost;
 } nr_passive_metrics_t;
 #ifndef __cplusplus
 /* PCI of the locked cell, -1 before PBCH lock. Written by nr-ue.c (relaxed), read by collect (relaxed). */
