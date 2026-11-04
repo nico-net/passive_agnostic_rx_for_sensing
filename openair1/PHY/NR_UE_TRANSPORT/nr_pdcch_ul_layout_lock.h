@@ -20,8 +20,6 @@
  *    their CDM-group count, and the DM-RS additional-position set.
  * Nothing needs a PUSCH TB CRC. The DL BWP is never assumed for the UL. Grants of a locked length are read with
  * the locked layout and tagged NR_UL_LAYOUT_TAG; runner-up tails are logged (ISAC_UL_RETRY covers the CDM count). */
-#include <sched.h>
-#include <sys/types.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include "nr_pdcch_blind_monitor.h"
@@ -166,11 +164,6 @@ int nr_ul_layout_hyp_list_ref(uint16_t rnti, uint16_t len, nr_dci_bits_t payload
                               uint32_t *total, uint32_t *next);
 extern void (*nr_ul_layout_hyp_list_gap_hook)(void);
 uint64_t nr_ul_layout_hyp_list_discarded(void);
-/* ulNidBg only: the calling (SCHED_IDLE) thread announces itself; afterwards nr_ul_layout_hyp_list runs it as SCHED_OTHER inside its two g_mu sections. boost_stats: boosts done, sched_setscheduler failures (no boost), setpriority refusals, failed restores. */
-void nr_ul_layout_boost_thread_enable(void);
-void nr_ul_layout_boost_stats(unsigned long *n, unsigned long *sched_fail, unsigned long *nice_fail, unsigned long *restore_fail);
-
-extern int (*nr_ul_layout_boost_setsched)(pid_t, int, const struct sched_param *); /* test only */
 bool nr_ul_layout_test_tp_tail_to_walked(uint16_t len);
 void nr_ul_layout_test_tp_counters(uint16_t len, uint32_t *ill, uint32_t *ok, uint64_t *spec);
 /* a reset or re-fit during the unlocked walk discards it once and retries once; a second discard returns 0 */

@@ -88,6 +88,7 @@ void nr_ul_nid_bg_stats(nr_ul_nid_stats_t *s);
 bool nr_ul_nid_bg_wants_next(const nr_pdcch_blind_ul_result_t *g);
 void nr_ul_nid_bg_note_iq2(bool ok); /* the k2 + 1 snapshot was / was not obtained */
 void nr_ul_nid_bg_stop(void);
+bool nr_ul_nid_bg_worker_sched(int *policy, int *nice_val); /* policy / nice the worker set for itself (false before it ran); test seam */
 
 #include "nr_ul_nid_rule.h"
 #endif

@@ -12,7 +12,7 @@
  *   NBWP 4      stage B BWP hypotheses of the lock's ranking walked per DCI
  *   MCS 4       stage B admits grants with an MCS index <= this (QPSK in every table); stage A needs the decoded Qm <= QM
  *   DROP 100    qualified real-time failures (and no pass) that drop a confirmed entry
- * ISAC_UL_NID_BG_CORE=<cpu> pins the worker thread (default: unpinned, nice 19, SCHED_IDLE). */
+ * ISAC_UL_NID_BG_CORE=<cpu> pins the worker thread (default: unpinned, SCHED_OTHER nice 19). */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -20,6 +20,7 @@
 #include "common/utils/nr_core_plan.h"
 #include <math.h>
 #include <pthread.h>
+#include <sys/resource.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -67,6 +68,14 @@ typedef nid_rnti_t g_rnti_cell_t[RNTI_CAP];
 NR_CELL_STATIC_HEAP(g_rnti_cell_t, g_rnti); /* 132 KiB per cell */
 #define g_rnti NR_CELL_HEAP_REF(g_rnti_cell_t, g_rnti)
 /* Allocate cell `cell`'s heap objects (call for every active cell before nr_cell_alloc_fence(); cell 0 included). */
+static atomic_int g_worker_policy = -1, g_worker_nice = 1000; /* what the worker set for itself (test seam) */
+bool nr_ul_nid_bg_worker_sched(int *policy, int *nice_val)
+{
+  *policy = atomic_load(&g_worker_policy);
+  *nice_val = atomic_load(&g_worker_nice);
+  return *policy >= 0;
+}
+
 static void *worker(void *a);
 NR_CELL_STATIC(nr_cell_parked_t, g_parked); /* lazy-thread audit: the worker thread is created parked here (before the fence), nr_ul_nid_bg_start only arms it */
 #define g_parked NR_CELL_REF(g_parked)
@@ -594,11 +603,16 @@ static void *worker(void *a)
 {
   (void)a;
   pthread_setname_np(pthread_self(), "ulNidBg"); /* visible in LOCKHOLD and top -H */
-  if (nice(19) == -1) { /* best effort */ }
-  { /* SCHED_IDLE: runs only on a core nothing else wants */
+  /* SCHED_OTHER nice 19, NOT SCHED_IDLE: this thread takes the per-cell UL-layout lock g_mu (nr_ul_layout_hyp_list, short sections), and the scan consumers wait for g_mu
+   * while holding g_phase2_mu. A SCHED_IDLE holder can be starved for as long as any other thread wants its core (a thread cannot be boosted back out of SCHED_IDLE without
+   * CAP_SYS_NICE / RLIMIT_NICE), which stalled both consumers of the cell (OTA 2026-11-04: holds up to 59 ms, phase2 waits 197 ms); at nice 19 a preempted holder gets CPU
+   * again within about one CFS latency period. Set explicitly: the thread may have been created by a SCHED_FIFO consumer. */
+  {
     const struct sched_param sp0 = {0};
-    if (sched_setscheduler(0, SCHED_IDLE, &sp0)) LOG_W(PHY, "SENSING: UL_NID_BG cannot use SCHED_IDLE\n");
-    else nr_ul_layout_boost_thread_enable(); /* SCHED_OTHER only inside the short g_mu sections of nr_ul_layout_hyp_list */
+    if (sched_setscheduler(0, SCHED_OTHER, &sp0)) LOG_W(PHY, "SENSING: UL_NID_BG cannot set SCHED_OTHER\n");
+    if (setpriority(PRIO_PROCESS, 0, 19)) LOG_W(PHY, "SENSING: UL_NID_BG cannot set nice 19\n");
+    atomic_store(&g_worker_policy, sched_getscheduler(0));
+    atomic_store(&g_worker_nice, getpriority(PRIO_PROCESS, 0));
   }
   if (g_core >= 0 && !nr_pool_site_float_merged()) { /* keep the search off the downlink cores; merged float lane (mpci B5): a HOUSE lease per job, no pin */
     cpu_set_t cs;

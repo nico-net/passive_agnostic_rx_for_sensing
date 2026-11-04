@@ -36,9 +36,6 @@
 #include <algorithm>
 #include <chrono>
 #include <atomic>
-#include <errno.h>
-#include <sched.h>
-#include <sys/resource.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -6787,114 +6784,6 @@ TEST(UlLayoutLock, HypListResultIsDiscardedWhenTheStateIsResetDuringTheEnumerati
   EXPECT_EQ(tot, 0u);
   EXPECT_EQ(next, 5u) << "the cursor stays where it was";
   EXPECT_EQ(nr_ul_layout_hyp_list_discarded(), d0 + 1) << "attempt 1 discarded; the retry meets an unfitted state and returns 0 (no second discard)";
-  nr_ul_layout_lock_reset();
-}
-
-namespace {
-std::vector<int> g_boost_seq;  // policies requested through the injected sched_setscheduler stub
-bool g_boost_fail_other = false;
-// emulated: the sandbox user cannot leave SCHED_IDLE (RLIMIT_NICE 0, no CAP_SYS_NICE), so the sequence is recorded and the call is reported as done
-int BoostStub(pid_t, int pol, const struct sched_param *)
-{
-  g_boost_seq.push_back(pol);
-  if (g_boost_fail_other && pol == SCHED_OTHER) { errno = EPERM; return -1; }
-  return 0;
-}
-void BoostGapProbe(void) { g_boost_seq.push_back(1000 + sched_getscheduler(0)); }  // policy seen between the two sections
-// a ulNidBg-like thread: SCHED_IDLE, nice 19, announced; runs `fn` there
-template <class F> void OnIdleThread(F fn)
-{
-  std::thread t([&] {
-    ASSERT_EQ(setpriority(PRIO_PROCESS, 0, 19), 0);
-    const struct sched_param sp0 = {0};
-    ASSERT_EQ(sched_setscheduler(0, SCHED_IDLE, &sp0), 0);
-    nr_ul_layout_boost_thread_enable();
-    fn();
-  });
-  t.join();
-}
-void UllFitted(UllGen &g, nr_dci_bits_t *pay, uint16_t *rnti)
-{
-  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
-                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
-  UllFit(g, cell);
-  nr_pdcch_blind_ul_result_t o;
-  const nr_ul_layout_dci_t x = g.next();
-  nr_ul_layout_on_dci(x.rnti, 44, x.slot, x.p, &cell, &o);
-  *pay = x.p; *rnti = x.rnti;
-}
-}  // namespace
-
-TEST(UlLayoutLock, HypListBoostsOnlyTheAnnouncedThreadInsideItsTwoSectionsAndRestoresThePolicy)
-{
-  UllGen g;
-  nr_dci_bits_t pay; uint16_t rnti;
-  UllFitted(g, &pay, &rnti);
-  nr_pdcch_blind_ul_result_t out[1];
-  uint32_t tot, next;
-  nr_ul_layout_boost_setsched = BoostStub;
-  // an unannounced thread (this one) is never touched
-  g_boost_seq.clear();
-  EXPECT_EQ(nr_ul_layout_hyp_list(rnti, 44, pay, 0, 8, 1, out, 1, &tot, &next), 1);
-  EXPECT_TRUE(g_boost_seq.empty());
-  OnIdleThread([&] {
-    unsigned long n0, sf0, nf0, rf0, n1, sf1, nf1, rf1;
-    nr_ul_layout_boost_stats(&n0, &sf0, &nf0, &rf0);
-    g_boost_seq.clear();
-    nr_ul_layout_hyp_list_gap_hook = BoostGapProbe;
-    EXPECT_EQ(nr_ul_layout_hyp_list(rnti, 44, pay, 0, 8, 1, out, 1, &tot, &next), 1);
-    nr_ul_layout_hyp_list_gap_hook = nullptr;
-    // OTHER (section 1), IDLE (after it), probe sees IDLE between the sections, OTHER (section 3), IDLE (after it)
-    EXPECT_EQ(g_boost_seq, (std::vector<int>{SCHED_OTHER, SCHED_IDLE, 1000 + SCHED_IDLE, SCHED_OTHER, SCHED_IDLE}));
-    // (the probe reads the real policy, which stays IDLE under the emulation; the order of the calls is what is checked)
-    EXPECT_EQ(sched_getscheduler(0), SCHED_IDLE);
-    EXPECT_EQ(getpriority(PRIO_PROCESS, 0), 19) << "nice restored";
-    nr_ul_layout_boost_stats(&n1, &sf1, &nf1, &rf1);
-    EXPECT_EQ(n1 - n0, 2ul);
-    EXPECT_EQ(sf1, sf0);
-    EXPECT_EQ(rf1, rf0);
-    nr_ul_layout_boost_thread_enable(); // re-announce (nice is read again)
-    // sched_setscheduler(OTHER) fails: no boost, counted, the result is unchanged and the policy untouched
-    g_boost_fail_other = true;
-    g_boost_seq.clear();
-    EXPECT_EQ(nr_ul_layout_hyp_list(rnti, 44, pay, 0, 8, 1, out, 1, &tot, &next), 1);
-    g_boost_fail_other = false;
-    EXPECT_EQ(g_boost_seq, (std::vector<int>{SCHED_OTHER})) << "one failure, then the thread stops trying";
-    EXPECT_EQ(sched_getscheduler(0), SCHED_IDLE);
-    nr_ul_layout_boost_stats(&n1, &sf1, &nf1, &rf1);
-    EXPECT_EQ(sf1 - sf0, 1ul);
-    EXPECT_EQ(n1 - n0, 2ul) << "no boost counted for the failed one";
-    g_boost_seq.clear();
-    EXPECT_EQ(nr_ul_layout_hyp_list(rnti, 44, pay, 0, 8, 1, out, 1, &tot, &next), 1);
-    EXPECT_TRUE(g_boost_seq.empty());
-  });
-  nr_ul_layout_boost_setsched = sched_setscheduler;
-  nr_ul_layout_lock_reset();
-}
-
-// Manual: cost of the boost syscalls. The sandbox user cannot leave SCHED_IDLE, so the permitted equivalents are timed: a SCHED_OTHER thread switching
-// OTHER -> BATCH -> OTHER (2 sched_setscheduler) and nice 0 -> 1 -> 0 (2 setpriority) are the same kernel paths as one boost_enter + boost_leave.
-TEST(UlLayoutLock, DISABLED_HypListBoostCost)
-{
-  const int N = 200000;
-  const struct sched_param sp0 = {0};
-  auto ns = [](std::chrono::steady_clock::time_point t0) { return (double)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(); };
-  auto t0 = std::chrono::steady_clock::now();
-  for (int i = 0; i < N; i++) { sched_setscheduler(0, SCHED_BATCH, &sp0); sched_setscheduler(0, SCHED_OTHER, &sp0); }
-  const double sched_pair = ns(t0) / N;
-  t0 = std::chrono::steady_clock::now();
-  for (int i = 0; i < N; i++) { setpriority(PRIO_PROCESS, 0, 1); setpriority(PRIO_PROCESS, 0, 0); }
-  const double nice_pair = ns(t0) / N;
-  UllGen g;
-  nr_dci_bits_t pay; uint16_t rnti;
-  UllFitted(g, &pay, &rnti);
-  nr_pdcch_blind_ul_result_t out[1];
-  uint32_t tot, next = 0;
-  t0 = std::chrono::steady_clock::now();
-  for (int i = 0; i < 100 * 720; i++) nr_ul_layout_hyp_list(rnti, 44, pay, 0, 64, 3, out, 1, &tot, &next);
-  const double call = ns(t0) / (100 * 720);
-  printf("BOOSTCOST hyp_list_call_ns=%.0f  per_section(enter+leave): sched_pair_ns=%.0f nice_pair_ns=%.0f  per_call(2 sections)_ns=%.0f  per_job(720 calls)_ms=%.3f (without nice: %.3f ms)\n",
-         call, sched_pair, nice_pair, 2 * (sched_pair + nice_pair), 720 * 2 * (sched_pair + nice_pair) / 1e6, 720 * 2 * sched_pair / 1e6);
   nr_ul_layout_lock_reset();
 }
 

@@ -3610,6 +3610,15 @@ if(ENABLE_TESTS)
     ${T_LIB} m pthread dl asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
   add_dependencies(tests test_nr_re_pattern)
   add_test(NAME test_nr_re_pattern COMMAND ./test_nr_re_pattern)
+  # ulNidBg worker is SCHED_OTHER nice 19 (it holds the per-cell UL-layout lock; SCHED_IDLE holders starve)
+  add_executable(test_nr_ul_nid_bg_sched ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ul_nid_bg_sched_check.c)
+  target_link_libraries(test_nr_ul_nid_bg_sched PRIVATE
+    -Wl,--start-group PHY_NR_UE PHY_NR_PASSIVE_UL PHY_NR_COMMON PHY_COMMON nr_phy_common nr_common nr_pdcch_blind_monitor NR_UE_ISAC
+    SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB shlib_loader UTIL ds -Wl,--end-group
+    ${T_LIB} m pthread dl asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  target_include_directories(test_nr_ul_nid_bg_sched PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  add_dependencies(tests test_nr_ul_nid_bg_sched)
+  add_test(NAME test_nr_ul_nid_bg_sched COMMAND ./test_nr_ul_nid_bg_sched)
   # A10 cell identity at sync: the PSS/SSS search pinned to the descriptor PCI locks the weaker co-channel cell (nr_search_ssb_common + ru_park registry)
   add_executable(test_nr_sync_pin ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_sync_pin_check.c ${CMAKE_SOURCE_DIR}/radio/COMMON/ru_park.c)
   target_include_directories(test_nr_sync_pin PRIVATE ${CMAKE_SOURCE_DIR}/radio/COMMON)
