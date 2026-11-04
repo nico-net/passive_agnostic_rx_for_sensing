@@ -4523,9 +4523,10 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
  * discovery). A DCI whose REs lie in CORESET#0's RBs decodes in BOTH the bank pass and the CORESET#0-USS
  * pass under different CCE numbering -- run s3live4: 1962 DL DCIs accepted twice (CCE 4 and CCE 6), i.e.
  * duplicate grants and duplicate PDSCH decodes. One accept per (slot, RNTI, direction). */
+#include "nr_dedupe.h"
 NR_CELL_STATIC_INIT(pthread_mutex_t, s_dedupe_mu, PTHREAD_MUTEX_INITIALIZER);
 #define s_dedupe_mu NR_CELL_REF(s_dedupe_mu)
-typedef struct { uint32_t slot; uint16_t rnti; uint8_t dir; } s_dedupe_cell_t[256];
+typedef nr_dedupe_ent_t s_dedupe_cell_t[NR_DEDUPE_N];
 NR_CELL_STATIC(s_dedupe_cell_t, s_dedupe);
 #define s_dedupe NR_CELL_REF(s_dedupe)
 NR_CELL_STATIC(unsigned, s_dedupe_w);
@@ -4539,29 +4540,21 @@ NR_CELL_STATIC(_Atomic uint64_t, g_dup_dropped);
 static _Thread_local int t_bank_index = -1;
 /* All health calls for an occasion use the producer clock, never wrapped SFN. */
 static _Thread_local uint64_t t_bank_slot;
-/* accept_dup: de-duplicates accepted DCIs of one slot: returns true when the same (slot, RNTI, direction) was already accepted in the last 256 entries.
+/* accept_dup: de-duplicates accepted DCIs of one slot: returns true when the same (slot, RNTI, direction) was already accepted in the last 256 entries within NR_DEDUPE_WINDOW monotonic slots.
  *   Duplicates still count as traffic for the bank's reconfiguration bookkeeping. Updates the global accept counters per pass kind.
  *   Callers: nr_pdcch_blind_monitor_run_occasion_one() (accept handling, two sites). Takes s_dedupe_mu.
  */
 /* dedupe_hit: the table lookup + insert alone (no counters, no bank bookkeeping). Traffic mode uses it with dir 2 (DL records). */
-static bool dedupe_hit(uint32_t abs_slot, uint16_t rnti, int dir)
+static bool dedupe_hit(uint32_t abs_slot, long mono, uint16_t rnti, int dir)
 {
-  bool dup = false;
   pthread_mutex_lock(&s_dedupe_mu);
-  for (int i = 0; i < 256 && !dup; i++)
-    dup = s_dedupe[i].slot == abs_slot + 1 && s_dedupe[i].rnti == rnti && s_dedupe[i].dir == dir;
-  if (!dup) {
-    s_dedupe[s_dedupe_w & 255].slot = abs_slot + 1; /* +1: slot 0 never looks like an empty entry */
-    s_dedupe[s_dedupe_w & 255].rnti = rnti;
-    s_dedupe[s_dedupe_w & 255].dir = (uint8_t)dir;
-    s_dedupe_w++;
-  }
+  const bool dup = nr_dedupe_probe(s_dedupe, &s_dedupe_w, abs_slot, mono, rnti, dir);
   pthread_mutex_unlock(&s_dedupe_mu);
   return dup;
 }
-static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
+static bool accept_dup(uint32_t abs_slot, long mono, uint16_t rnti, int dir)
 {
-  const bool dup = dedupe_hit(abs_slot, rnti, dir);
+  const bool dup = dedupe_hit(abs_slot, mono, rnti, dir);
   /* A duplicated grant is still traffic on this independently verified nID. */
   if (dup && t_pass_kind == PASS_BANK && reconf_lengths_enabled()
       && nr_pdcch_blind_monitor_get_cfg()->discovered_coreset)
@@ -4817,6 +4810,8 @@ uint64_t nr_pdcch_blind_inline_drop_epoch(void)
 static bool es_global_ok(void)
 {
   const nr_pdcch_blind_monitor_cfg_t *root = nr_pdcch_blind_monitor_get_cfg();
+  /* Traffic mode keeps the legacy scan scheduling: it needs every DCI (a displaced slot-end job loses CORESET#0/discovered passes) and the A/B arms stay comparable; decode latency is not its goal. */
+  if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) return false;
   if (!root->autodiscover || root->pdsch_decode < 1) return false;
   if (!nr_pdsch_passive_queue_running() || !nr_pdcch_passive_queue_running() || !nr_csirs_disc_enabled()) return false;
   if (nr_sense_blind_dmrs_source() >= 0) return false;
@@ -8486,7 +8481,7 @@ constdiag_done:;
         if(cand_task[ti].ok) cand_task[ti].ul_out=discovered;
       }
       const nr_pdcch_blind_ul_result_t *u = &cand_task[ti].ul_out;
-      if (cand_task[ti].ok && accept_dup(abs_slot, u->rnti, 1))
+      if (cand_task[ti].ok && accept_dup(abs_slot, source_absolute_slot, u->rnti, 1))
         cand_task[ti].ok = false; /* same UL DCI already accepted by another pass this slot */
       if (cand_task[ti].ok) {
         NR_BLIND_CTR_INC(g_ul_accepts);
@@ -8641,7 +8636,7 @@ constdiag_done:;
           if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
             const uint64_t tt0 = btim_now_ns();
             ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti));
-            if (dedupe_hit(abs_slot, ul00.rnti, 1)) nr_traffic_count(NR_TRAFFIC_CNT_DUP);
+            if (dedupe_hit(abs_slot, source_absolute_slot, ul00.rnti, 1)) nr_traffic_count(NR_TRAFFIC_CNT_DUP);
             else traffic_emit_ul(cfg, fp, &ul00, &ul_opts, cand_task[ti].L, cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot,
                                  source_absolute_slot, NR_LAYOUT_FIXED, ul00_dec, tt0);
           }
@@ -8683,7 +8678,7 @@ constdiag_done:;
                                            nr_dci_bits_hash(&raw->payload, cand_task[ti].dci_length));
         nr_pdcch_coreset_bank_note_alias(t_bank_index, disc_slot_key(ue, proc, source_absolute_slot), cand_task[ti].cce, cand_task[ti].L);
       }
-      if (!t_discovered_token && accept_dup(abs_slot, raw->rnti, 0))
+      if (!t_discovered_token && accept_dup(abs_slot, source_absolute_slot, raw->rnti, 0))
         continue;
       if (nr_a2e_trace()) nr_a2e_ts[5] = btim_now_ns();
       if (t_discovered_token) t_discovered_prescreen_passed = true; /* CRC-OK DCI = fresh evidence */
@@ -8829,8 +8824,10 @@ constdiag_done:;
       const int rep_t = !is10t ? nr_pdsch_solver_rep(out.rnti) : -1;
       const nr_layout_state_t lst = is10t ? NR_LAYOUT_FIXED : slv ? nr_pdsch_solver_layout_state(out.rnti, NULL, NULL) : NR_LAYOUT_SOLVED;
       tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false) ? 1 : 0;
-      /* DL 1_1 of dl_auto already went through the dir-0 dedupe; every other accept can repeat (other passes / AL / CORESET hypotheses) */
-      if (!(cand_task[ti].dl_auto && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) && dedupe_hit(abs_slot, out.rnti, 2)) {
+      /* the record never presents a guess as solved: a 1_1 without solver state is a CANDIDATE (the decode policy above still sees SOLVED) */
+      const nr_layout_state_t rec_lst = (!is10t && !slv) ? NR_LAYOUT_CANDIDATE : lst;
+      /* DL 1_1 of dl_auto already went through the dir-0 dedupe (not in a discovered pass: no dir-0 dedupe there); every other accept can repeat (other passes / AL / CORESET hypotheses) */
+      if (!(cand_task[ti].dl_auto && !t_discovered_token && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) && dedupe_hit(abs_slot, source_absolute_slot, out.rnti, 2)) {
         nr_traffic_count(NR_TRAFFIC_CNT_DUP);
       } else {
         const int dbs = cand_task[ti].bwp_entry > 0 && pbwp_snap[cand_task[ti].bwp_entry].start >= 0 ? pbwp_snap[cand_task[ti].bwp_entry].start : cfg->bwp_start;
@@ -8838,7 +8835,7 @@ constdiag_done:;
         /* 1_1 payload exists only for dl_auto / bwp_probe tasks (dl_raw); other 1_1 extractions keep no payload: bits unavailable (null) */
         const nr_dci_bits_t *pl = is10t ? &out.payload : (cand_task[ti].dl_auto || cand_task[ti].bwp_probe) ? &cand_task[ti].dl_raw.payload : NULL;
         traffic_emit_dl(cfg, fp, &out, &dci10_ctx, is10t ? (int)dci10_ctx.rb_offset : dbs, dbz, pl, cand_task[ti].dci_length, cand_task[ti].L,
-                        cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot, source_absolute_slot, lst, rep_t, tw == 1, tt0);
+                        cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot, source_absolute_slot, rec_lst, rep_t, tw == 1, tt0);
       }
     }
     if (nr_ue_ctx_enabled() && out.rnti) {
