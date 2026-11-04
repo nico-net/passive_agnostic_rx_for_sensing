@@ -2819,6 +2819,8 @@ static unsigned joint_anon_mm_max(int L);
 /* janon_should_run: admission of one queued anonymous-solver item (ISAC_BG_LANE); suspect = reconfiguration priority token. */
 /* nr_pdcch_blind_monitor_rt_final_stats: end-of-run totals of the anonymous solver and the admission counters. Caller: nr-uesoftmodem.c shutdown. */
 void nr_pdcch_blind_monitor_rt_final_stats(void);
+NR_CELL_STATIC(nr_admit_skipq_t, g_janon_skipq); /* skipped items, replayed by janon_worker when the pool stops shedding */
+#define g_janon_skipq NR_CELL_REF(g_janon_skipq)
 static int janon_should_run(uint64_t now_ns, uint64_t deadline_ns, int suspect)
 {
   return nr_admit_try(NR_ADMIT_JANON, now_ns, deadline_ns, suspect);
@@ -2849,15 +2851,38 @@ static void *janon_worker(void *arg)
     }
   }
   for (;;) {
+    int replay = 0; /* the item comes from the skip backlog: the pool was not shedding when it was taken, no second admission */
     pthread_mutex_lock(&g_janon_mu);
-    while (g_janon_n == 0)
-      pthread_cond_wait(&g_janon_cv, &g_janon_mu);
-    it = g_janon_q[g_janon_head];
-    g_janon_head = (g_janon_head + 1) % g_janon_cap;
-    g_janon_n--;
+    while (g_janon_n == 0) {
+      if (nr_admit_skipq_len(&g_janon_skipq) == 0) {
+        pthread_cond_wait(&g_janon_cv, &g_janon_mu);
+        continue;
+      }
+      struct timespec until; /* a backlog waits for the pool to go idle: poll every 50 ms, on this worker only */
+      clock_gettime(CLOCK_REALTIME, &until);
+      until.tv_nsec += 50000000;
+      if (until.tv_nsec >= 1000000000) { ++until.tv_sec; until.tv_nsec -= 1000000000; }
+      if (pthread_cond_timedwait(&g_janon_cv, &g_janon_mu, &until) == ETIMEDOUT) break;
+    }
+    if (g_janon_n > 0) {
+      it = g_janon_q[g_janon_head];
+      g_janon_head = (g_janon_head + 1) % g_janon_cap;
+      g_janon_n--;
+    } else
+      replay = 1;
     pthread_mutex_unlock(&g_janon_mu);
-    if (nr_admit_on() && !janon_should_run(nr_admit_now_ns(), it.enq_ns + JANON_FRESH_NS, it.suspect)) {
-      atomic_fetch_add_explicit(&g_janon_drop, 1, memory_order_relaxed); /* critical lane busy or item stale: the next occasion offers fresh bits */
+    if (replay) {
+      janon_item_t *b = nr_admit_skipq_pop(NR_ADMIT_JANON, &g_janon_skipq, nr_admit_now_ns(), free);
+      if (!b) continue; /* still shedding, or expired */
+      it = *b;
+      free(b);
+    } else if (nr_admit_on() && !janon_should_run(nr_admit_now_ns(), it.enq_ns + JANON_FRESH_NS, it.suspect)) {
+      atomic_fetch_add_explicit(&g_janon_drop, 1, memory_order_relaxed); /* critical lane busy: kept for replay while fresh (JANON_FRESH_NS), else expired */
+      janon_item_t *b = malloc(sizeof *b);
+      if (b) {
+        *b = it;
+        nr_admit_skipq_push(NR_ADMIT_JANON, &g_janon_skipq, b, it.enq_ns + JANON_FRESH_NS, free);
+      }
       continue;
     }
     /* mpci B5: one DISC lease per item (cell = the bound cell), never across the cond wait above; not merged: no lease. The item queue is the

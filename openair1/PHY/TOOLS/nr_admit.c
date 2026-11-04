@@ -1,7 +1,13 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_admit.h"
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
+
+/* process-wide per-class counters (like the shed counters of the pool) */
+static struct { uint64_t att, skip, rec, exp; } g_cls[NR_ADMIT_N];
+#define CNT(f, c) __atomic_fetch_add(&g_cls[c].f, 1, __ATOMIC_RELAXED)
+#define LD(f, c) __atomic_load_n(&g_cls[c].f, __ATOMIC_RELAXED)
 
 /* Admission of background (speculative / discovery) work. mpci B6: the gate is the value order of the core pool under overload (common/utils/nr_core_pool.h,
  * SHED). With one cell, or while the pool has a free token or no urgent waiter, everything runs and nothing is counted: the behaviour of before. While the
@@ -39,17 +45,81 @@ int nr_admit_try(nr_admit_class_t c, uint64_t now, uint64_t deadline, int token)
 {
   (void)now; (void)deadline; (void)token; /* freshness stays with each producer (its own queue and age check) */
   const int tier = nr_admit_tier(c);
+  CNT(att, c);
   if (tier < 0 || !nr_pool_site_shed_tiers) return 1;
   if (nr_pool_site_shed_tiers() <= tier) return 1;
   if (nr_pool_site_shed_note) nr_pool_site_shed_note(tier);
+  CNT(skip, c);
   return 0;
 }
 void nr_admit_done(nr_admit_class_t c, uint64_t busy_ns) { (void)c; (void)busy_ns; }
+void nr_admit_class_counts(nr_admit_class_t c, uint64_t *a, uint64_t *s, uint64_t *r, uint64_t *e)
+{
+  *a = LD(att, c); *s = LD(skip, c); *r = LD(rec, c); *e = LD(exp, c);
+}
+void nr_admit_reset_for_test(void) { memset(g_cls, 0, sizeof g_cls); }
+void nr_admit_note_duty_for_test(nr_admit_class_t c, int pct) { (void)c; (void)pct; }
+
+static void skipq_lock(nr_admit_skipq_t *q) { while (__atomic_exchange_n(&q->lock, 1, __ATOMIC_ACQUIRE)) {} }
+static void skipq_unlock(nr_admit_skipq_t *q) { __atomic_store_n(&q->lock, 0, __ATOMIC_RELEASE); }
+/* drop items past their deadline from the head (oldest first; deadlines grow with arrival), caller holds the lock */
+static void skipq_purge(nr_admit_class_t c, nr_admit_skipq_t *q, uint64_t now, void (*free_fn)(void *))
+{
+  while (q->n > 0 && q->deadline[q->head] < now) {
+    free_fn(q->p[q->head]);
+    q->head = (q->head + 1) % NR_ADMIT_SKIPQ_DEPTH;
+    q->n--;
+    CNT(exp, c);
+  }
+}
+void nr_admit_skipq_push(nr_admit_class_t c, nr_admit_skipq_t *q, void *item, uint64_t deadline, void (*free_fn)(void *))
+{
+  skipq_lock(q);
+  if (q->n == NR_ADMIT_SKIPQ_DEPTH) {
+    free_fn(q->p[q->head]);
+    q->head = (q->head + 1) % NR_ADMIT_SKIPQ_DEPTH;
+    q->n--;
+    CNT(exp, c);
+  }
+  const int at = (q->head + q->n) % NR_ADMIT_SKIPQ_DEPTH;
+  q->p[at] = item;
+  q->deadline[at] = deadline;
+  q->n++;
+  skipq_unlock(q);
+}
+void *nr_admit_skipq_pop(nr_admit_class_t c, nr_admit_skipq_t *q, uint64_t now, void (*free_fn)(void *))
+{
+  void *it = NULL;
+  skipq_lock(q);
+  skipq_purge(c, q, now, free_fn);
+  if (q->n > 0 && (!nr_pool_site_shed_tiers || nr_pool_site_shed_tiers() == 0)) {
+    it = q->p[q->head];
+    q->head = (q->head + 1) % NR_ADMIT_SKIPQ_DEPTH;
+    q->n--;
+    CNT(rec, c);
+  }
+  skipq_unlock(q);
+  return it;
+}
+int nr_admit_skipq_len(const nr_admit_skipq_t *q) { return __atomic_load_n(&q->n, __ATOMIC_RELAXED); }
+
 void nr_admit_stats(char *buf, int n)
 {
   if (n <= 0) return;
   buf[0] = 0;
   uint64_t s[3] = {0, 0, 0};
   if (nr_pool_site_shed_counts) nr_pool_site_shed_counts(s);
-  if (s[0] || s[1] || s[2]) snprintf(buf, (size_t)n, "ADMIT shed tier0(housekeeping)=%llu tier1(csirs,dmrs_id)=%llu tier2(janon,nid)=%llu", (unsigned long long)s[0], (unsigned long long)s[1], (unsigned long long)s[2]);
+  int o = 0;
+  static const char *const nm[NR_ADMIT_N] = {"janon", "uss", "nid", "csirs", "dmrs_scan", "dmrs_id", "probe", "ul_disc"};
+  if (s[0] || s[1] || s[2]) o = snprintf(buf, (size_t)n, "ADMIT shed tier0(housekeeping)=%llu tier1(csirs,dmrs_id)=%llu tier2(janon,nid)=%llu", (unsigned long long)s[0], (unsigned long long)s[1], (unsigned long long)s[2]);
+  if (o < 0 || o >= n) return;
+  for (int c = 0; c < NR_ADMIT_N && o < n; c++) {
+    uint64_t a, k, r, e;
+    nr_admit_class_counts((nr_admit_class_t)c, &a, &k, &r, &e);
+    if (!a && !e) continue;
+    const int w = snprintf(buf + o, (size_t)(n - o), "%s%s[attempts=%llu skipped=%llu recovered=%llu expired=%llu]", o ? " " : "ADMIT ", nm[c],
+                           (unsigned long long)a, (unsigned long long)k, (unsigned long long)r, (unsigned long long)e);
+    if (w < 0 || w >= n - o) break;
+    o += w;
+  }
 }

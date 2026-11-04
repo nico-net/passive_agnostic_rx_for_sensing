@@ -248,3 +248,18 @@ TEST(PassiveMetrics, TrafficKeysPresentOnlyInTrafficMode) {
                         "\"traffic_skip\":0", "\"dci_dup\":0"})
     EXPECT_NE(s.find(k), std::string::npos) << k;
 }
+
+TEST(PassiveMetrics, AdmitClassCountersOmittedUntilAttempted)
+{
+  nr_passive_metrics_t m = {};
+  m.acq_state = "TRACKING";
+  char buf[8192];
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
+  EXPECT_EQ(std::string(buf).find("admit_janon"), std::string::npos);
+  m.admit_cls[0][0] = 9; m.admit_cls[0][1] = 4; m.admit_cls[0][2] = 3; m.admit_cls[0][3] = 1;
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
+  const std::string s(buf);
+  for (const char *k : {"\"admit_janon_attempts\":9", "\"admit_janon_skipped\":4", "\"admit_janon_recovered\":3", "\"admit_janon_expired\":1"})
+    EXPECT_NE(s.find(k), std::string::npos) << k;
+  EXPECT_EQ(s.find("admit_dmrs_id"), std::string::npos);
+}

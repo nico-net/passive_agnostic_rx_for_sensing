@@ -1271,20 +1271,33 @@ static int cdmrs_async_on(void)
   return on;
 }
 #undef on
+#define CDMRS_FRESH_NS 1000000000ull /* same validity as a queued janon item */
+NR_CELL_STATIC(nr_admit_skipq_t, g_cdmrs_skipq);
+#define g_cdmrs_skipq NR_CELL_REF(g_cdmrs_skipq)
+static void cdmrs_obs_free(void *p)
+{
+  cdmrs_obs_t *o = p;
+  free(o->row);
+  free(o);
+}
 static void cdmrs_run(void *arg)
 {
   cdmrs_obs_t *o = arg;
   nr_cell_bind(o->cell); /* the worker serves one cell's queue (g_cdmrs_q is per cell), the job names it */
   const uint64_t t_adm = nr_admit_now_ns();
-  if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, 0, 0)) { /* ISAC_BG_LANE: critical lane busy, the observation is dropped */
-    free(o->row);
-    free(o);
+  if (!nr_admit_try(NR_ADMIT_DMRS_ID, t_adm, 0, 0)) { /* ISAC_BG_LANE: critical lane busy: the observation waits in the backlog for 1 s (it feeds a statistic, an older one is as good) */
+    nr_admit_skipq_push(NR_ADMIT_DMRS_ID, &g_cdmrs_skipq, o, t_adm + CDMRS_FRESH_NS, cdmrs_obs_free);
     return;
   }
   coreset_dmrs_observe(o, o->row, 1);
   nr_admit_done(NR_ADMIT_DMRS_ID, nr_admit_now_ns() - t_adm);
-  free(o->row);
-  free(o);
+  cdmrs_obs_free(o);
+  /* replay one waiting observation (only while no tier is shed, checked by the pop), on this worker, behind the new one */
+  cdmrs_obs_t *b = nr_admit_skipq_pop(NR_ADMIT_DMRS_ID, &g_cdmrs_skipq, nr_admit_now_ns(), cdmrs_obs_free);
+  if (b) {
+    coreset_dmrs_observe(b, b->row, 1);
+    cdmrs_obs_free(b);
+  }
   const uint64_t n = __atomic_load_n(&g_cdmrs_q.done, __ATOMIC_RELAXED) + 1;
   if (n == 1 || n % 2000 == 0)
     LOG_A(PHY, "SENSING: DMRS_ID_ASYNC done=%lu queued=%lu dropped=%lu\n", (unsigned long)n,

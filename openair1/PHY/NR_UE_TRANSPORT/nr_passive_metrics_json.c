@@ -222,6 +222,13 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
                   m->dci_rec_generated, m->dci_rec_persisted, m->dci_rec_lost, tr->dup, tr->traffic_skip, tr->check_decodes,
                   tr->check_fail, tr->probe_decodes, tr->reopens, tr->reopens_ul, tr->emit_us_p50, tr->emit_us_p99);
   }
+  for (int i = 0; i < 2 && t > 0 && (size_t)t < sizeof(tail); i++) {
+    static const char *const an[2] = {"janon", "dmrs_id"};
+    if (m->admit_cls[i][0])
+      t += snprintf(tail + t, sizeof(tail) - (size_t)t,
+                    ",\"admit_%s_attempts\":%" PRIu64 ",\"admit_%s_skipped\":%" PRIu64 ",\"admit_%s_recovered\":%" PRIu64 ",\"admit_%s_expired\":%" PRIu64,
+                    an[i], m->admit_cls[i][0], an[i], m->admit_cls[i][1], an[i], m->admit_cls[i][2], an[i], m->admit_cls[i][3]);
+  }
   {
     static const char *const ptype[NR_PTRACK_TYPES] = {"srs", "csirs", "pucch", "cg"};
     for (int i = 0; i < NR_PTRACK_TYPES && t > 0 && (size_t)t < sizeof(tail); i++)

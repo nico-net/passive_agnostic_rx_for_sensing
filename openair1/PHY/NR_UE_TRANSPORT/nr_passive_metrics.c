@@ -30,6 +30,7 @@
 #include "nr_csirs_disc.h"
 #include "nr_prach_passive.h"
 #include "nr_sense_api.h"
+#include "PHY/TOOLS/nr_admit.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pdcch_uss_prune.h"
 __attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
@@ -291,6 +292,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   nr_pdsch_passive_ldpc_tb_decoders(&m->ldpc_tb_cpu, &m->ldpc_tb_cuda);
   nr_pusch_passive_counters(&m->pusch_try, &m->pusch_crc_ok);
   nr_passive_obs_stats(&m->obs_pushed, &m->obs_written, &m->obs_dropped);
+  nr_admit_class_counts(NR_ADMIT_JANON, &m->admit_cls[0][0], &m->admit_cls[0][1], &m->admit_cls[0][2], &m->admit_cls[0][3]);
+  nr_admit_class_counts(NR_ADMIT_DMRS_ID, &m->admit_cls[1][0], &m->admit_cls[1][1], &m->admit_cls[1][2], &m->admit_cls[1][3]);
   if (nr_sense_stats) {
     nr_sense_stats_t sense;
     nr_sense_stats(&sense);

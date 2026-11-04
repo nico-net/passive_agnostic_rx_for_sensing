@@ -255,7 +255,7 @@ extern "C" void nr_isac_init(void)
   // At 4 RX and 106 PRB the worst allowed RE cap still fits: 32 *
   // (48 + 3*46200 + 8*4*46200 + 3) + 1024*4096 + index arrays
   // = 55,944,160 bytes (53.35 MiB). cfr_ring_frames/cfr_max_re may override it.
-  int enable = 0, frames = 32, re = max_re, antennas = 0, records = 1024, sub_syms = 0, sub_re = 600;
+  int min_prb = 128, enable = 0, frames = 32, re = max_re, antennas = 0, records = 1024, sub_syms = 0, sub_re = 600;
   double sub_snr = 0;
   char *mode_str = nullptr, *sources = nullptr, *legacy_source = nullptr, *rec = nullptr, *cfr = nullptr, *ep = nullptr, *id = nullptr, *array = nullptr;
   std::vector<paramdef_t> params = {
@@ -263,6 +263,7 @@ extern "C" void nr_isac_init(void)
     string("cfr_path", &cfr), string("records_path", &rec), string("endpoint", &ep),
     integer("cfr_ring_frames", &frames, 32), integer("cfr_max_re", &re, max_re), integer("cfr_antennas", &antennas, 0),
     integer("rec_ring_slots", &records, 1024),
+    integer("sense_min_prb", &min_prb, 128),
     integer("subslot_symbols", &sub_syms, 0), integer("subslot_min_re", &sub_re, 600),
     string("rx_id", &id), string("rx_array", &array), string("mode", &mode_str)
   };
@@ -290,8 +291,10 @@ extern "C" void nr_isac_init(void)
     nr_isac_mode_resolve(nullptr, source_mask(sources), -1, -1, &mcfg);
   }
   nr_isac_mode_set(mcfg.mode);
-  if (mcfg.mode == NR_ISAC_MODE_SENSING) LOG_W(PHY, "SENSING: mode=sensing is reserved; behaving as legacy\n");
-  if (mcfg.narrowed) LOG_W(PHY, "SENSING: mode=traffic narrowed sources/decode keys (no CFR in traffic mode)\n");
+  if (!nr_isac_sense_min_prb_set(min_prb)) LOG_E(PHY, "SENSING: sense_min_prb=%d is invalid (>= 1); using 128\n", min_prb);
+  if (mcfg.mode == NR_ISAC_MODE_SENSING) LOG_W(PHY, "SENSING: mode=sensing min_prb=%d\n", nr_isac_sense_min_prb());
+  if (mcfg.narrowed && mcfg.mode == NR_ISAC_MODE_SENSING) LOG_W(PHY, "SENSING: mode=sensing cut sources outside the sensing set\n");
+  else if (mcfg.narrowed) LOG_W(PHY, "SENSING: mode=traffic narrowed sources/decode keys (no CFR in traffic mode)\n");
   const bool traffic = mcfg.mode == NR_ISAC_MODE_TRAFFIC;
   // Traffic opens the sense API even with enable=0: DCI records need the sink.
   if (!enable && !traffic) return;

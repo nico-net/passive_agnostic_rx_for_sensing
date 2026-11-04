@@ -3609,6 +3609,14 @@ void nr_pdcch_blind_monitor_init(void)
     g_cfg.ul_pusch_decode = m.pusch_decode;
     if (m.narrowed) LOG_W(PHY, "SENSING: mode=traffic narrowed sources/decode keys (no CFR in traffic mode)\n");
   }
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING) { /* spec 4.1: data-aided PDSCH (2) and PUSCH decode (1) by default; the keys may only lower them */
+    nr_isac_mode_cfg_t m;
+    nr_isac_mode_resolve("sensing", 0, (p_pdsch && p_pdsch[0]) ? g_cfg.pdsch_decode : -1,
+                         (p_ul_pusch && p_ul_pusch[0]) ? g_cfg.ul_pusch_decode : -1, &m);
+    g_cfg.pdsch_decode = m.pdsch_decode;
+    g_cfg.ul_pusch_decode = m.pusch_decode;
+    if (m.narrowed) LOG_W(PHY, "SENSING: mode=sensing narrowed decode keys\n");
+  }
   if (g_cfg.pdsch_max_per_slot <= 0) {
     g_cfg.pdsch_max_per_slot = 1;
   }

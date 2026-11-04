@@ -108,6 +108,8 @@ typedef struct {
   int has_traffic;
   nr_traffic_stats_t traffic;
   uint64_t dci_rec_generated, dci_rec_persisted, dci_rec_lost;
+  /* admission per class, all modes (nr_admit.h): [0] JANON, [1] DMRS_ID; {attempts, skipped, recovered, expired}; keys omitted while attempts == 0 */
+  uint64_t admit_cls[2][4];
 } nr_passive_metrics_t;
 #ifndef __cplusplus
 /* PCI of the locked cell, -1 before PBCH lock. Written by nr-ue.c (relaxed), read by collect (relaxed). */
