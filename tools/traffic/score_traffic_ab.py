@@ -42,9 +42,11 @@ def cell_stats(rundir, arm, cell, met):
     acc = sum(met.get("dci_accepted_" + k, 0) for k in ("10", "11", "00", "01")) if "dci_accepted_10" in met else None  # legacy has no such keys
     try: cpu = float(open(os.path.join(rundir, "cpu_cores.txt")).read())
     except (OSError, ValueError): cpu = None
-    return dict(acc=acc, gen=met.get("dci_rec_generated"), lost=met.get("dci_rec_lost"),
+    queued = met.get("scanq_queued")
+    drop = sum(met.get("scanq_drop_" + k, 0) for k in ("full", "stale", "epoch"))
+    return dict(queued=queued, drop_pct=100.0 * drop / queued if queued else None, acc=acc, gen=met.get("dci_rec_generated"), lost=met.get("dci_rec_lost"),
                 solved=sd if arm == "T" else gr,
-                drop=sum(met.get("scanq_drop_" + k, 0) for k in ("full", "stale", "epoch")),
+                drop=drop,
                 cpu=cpu, emit_p99=met.get("dci_emit_us_p99"))
 
 def ms(runs, k):
@@ -54,17 +56,19 @@ def ms(runs, k):
 def evaluate(L, T):
     """L, T: lists of per-run stat dicts for one (case, cell). -> [(bound, pass|None, detail)]"""
     out = []
+    for r in L + T: r.setdefault("drop_pct", None)
     bad = [r for r in T if r["acc"] != r["gen"]]
     out.append(("accepted==generated", not bad, "%d/%d runs differ" % (len(bad), len(T))))
     lost = [r["lost"] for r in T]
     out.append(("rec_lost==0", all(x == 0 for x in lost), "lost=%s" % lost))
-    (lm, _), (tm, _) = ms(L, "solved"), ms(T, "solved")
-    out.append(("solved>=90%L", tm >= 0.9 * lm, "T=%.1f L=%.1f (%.0f%%)" % (tm, lm, 100 * tm / lm if lm else 0)))
-    (dl, dls), (dt, _) = ms(L, "drop"), ms(T, "drop")
-    out.append(("scanq_drop<=L+sd", dt <= dl + dls, "T=%.1f L=%.1f sd=%.1f" % (dt, dl, dls)))
-    (cl, _), (ct, _) = ms(L, "cpu"), ms(T, "cpu")
-    out.append(("cpu T<L", None if cl is None or ct is None else ct < cl,
-                "T=%s L=%s cores" % (ct and round(ct, 2), cl and round(cl, 2))))
+    # arms count different things (T: solved dci RNTIs; L: non-SI grant RNTIs): info only
+    out.append(("solved RNTIs", None, "n/a (not comparable); T=%s L=%s info" % (fmt(ms(T, "solved")[0]), fmt(ms(L, "solved")[0]))))
+    (dl, dls), (dt, _) = ms(L, "drop_pct"), ms(T, "drop_pct")
+    out.append(("scanq drop_pct<=L+sd", None if dl is None or dt is None else dt <= dl + dls,
+                "T=%s%% L=%s%% sd=%s" % (fmt(dt), fmt(dl), fmt(dls))))
+    (cl, cls), (ct, _) = ms(L, "cpu"), ms(T, "cpu")  # confound: T does less work (no CFR/PRACH/SRS, less LDPC)
+    out.append(("cpu T<L-sd", None if cl is None or ct is None else ct < cl - cls,
+                "T=%s L=%s sd=%s cores (process)" % (fmt(ct), fmt(cl), fmt(cls))))
     out.append(("field agreement>=99%", None, "n/a OTA"))
     return out
 
@@ -87,8 +91,10 @@ def main(camp):
     fails = 0
     for (case, pci), a in sorted(cases.items()):
         print("\n== case %s cell PCI %s: L runs=%d T runs=%d" % (case, pci, len(a["L"]), len(a["T"])))
-        for k in ("acc", "gen", "lost", "solved", "drop", "cpu", "emit_p99"):
+        for k in ("queued", "acc", "gen", "lost", "solved", "drop", "drop_pct", "cpu", "emit_p99"):
             print("  %-9s L mean=%s sd=%s | T mean=%s sd=%s" % ((k,) + tuple(fmt(x) for x in ms(a["L"], k) + ms(a["T"], k))))
+        for arm in ("L", "T"):
+            print("  per-run %s: " % arm + "; ".join("q=%s drop=%s (%s%%) cpu=%s" % (r["queued"], r["drop"], fmt(r["drop_pct"]), r["cpu"]) for r in a[arm]))
         if not a["L"] or not a["T"]: print("  (missing arm, not scored)"); continue
         for b, ok, d in evaluate(a["L"], a["T"]):
             fails += ok is False
