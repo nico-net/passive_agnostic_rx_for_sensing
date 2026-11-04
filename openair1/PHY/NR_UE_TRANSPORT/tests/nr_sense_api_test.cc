@@ -366,9 +366,14 @@ TEST_F(QRing, UnitCfrFromWriter)
   nr_sense_unit_reset(0);
   nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
   open(8);
+  /* a wideband frame (130 PRBs): rows are opened by wideband-capable records only */
+  k.clear(); l.clear();
+  for (int sy = 2; sy <= 3; sy++) for (int p = 0; p < 130; p++) for (int i = 0; i < 6; i++) { k.push_back(12*p+2*i); l.push_back(sy); }
+  iq.assign(2*k.size(),0.f);
+  for (size_t i=0;i<k.size();i++) { iq[2*i]=4.f; iq[2*i+1]=0.5f*float(k[i]%5); }
   nr_sense_rs_meta_t m{};
   m.rnti = 0x4601; m.ssb_index = -1; m.k_ssb = -1; m.ta_est_samples = -1; m.transform_precoding = -1; m.dmrs_type = 1; m.dmrs_add_pos = -1; m.dmrs_n_scid = -1;
-  m.nb_rb = 4; m.n_re = (int)k.size(); m.n_ant = 1; m.ports = 1;
+  m.nb_rb = 130; m.n_re = (int)k.size(); m.n_ant = 1; m.ports = 1;
   for (nr_isac_mode_t md : {NR_ISAC_MODE_LEGACY, NR_ISAC_MODE_TRAFFIC}) {
     nr_isac_mode_set(md);
     nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DMRS, &m, push(1));

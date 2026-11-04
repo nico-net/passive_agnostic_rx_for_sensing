@@ -18,27 +18,40 @@ typedef enum { NR_UNIT_PDSCH_DMRS = 0, NR_UNIT_PDSCH_DATA, NR_UNIT_PUSCH_DMRS, N
 #define NR_UNIT_ROWS 64              /* RNTIs per cell, LRU on the last message */
 #define NR_UNIT_LATE_NS 20000000ull  /* a job whose enqueue-to-end time exceeds this is late (the DECSLOW threshold of the PDSCH queue) */
 
+/* Rows (RNTIs) are opened only by wideband-capable calls: est_usable_prbs (job, skip) or valid_prbs (cfr) >= sense_min_prb. A cost-only or narrow call for an
+ * RNTI without a row changes no unit; its CPU is added to the cell's nr_sense_unit_unattributed_ns() so it stays in the baseline. The one exception is SRS:
+ * it is a per-cell unit (rnti forced to 0 in every call) for both cost and messages (one message per exported record, counted by nr_sense_unit_cfr).
+ * Messages: PDSCH_DATA is a message only when its daBg job runs (est_usable_prbs > 0 there; the decode stage passes 0), so a grant that was decoded but not
+ * data-aided is not in the rate. `late` can count one grant twice (decode stage and recon stage). DM-RS sources report wait 0 and late false (inline, no queue). */
 /* One job of unit (s, rnti): thread CPU, enqueue-to-start wait, late flag. est_usable_prbs > 0 counts the job as one message of the unit (rate, wideband rate);
  * 0 attributes cost only (a second stage of an already counted message). t_ns = CLOCK_MONOTONIC ns (nr_sense_now_ns) at the job's end. */
 void nr_sense_unit_job(nr_unit_src_t s, uint16_t rnti, uint64_t cpu_ns, uint64_t wait_ns, bool late, uint16_t est_usable_prbs, uint64_t t_ns);
 /* One exported CFR record of the unit (from the sense writer's emit_rs). */
 void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, float snr_db, uint64_t t_ns);
-void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti); /* a drop inside an enabled unit */
-void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti);      /* a message of a disabled unit, gated before work: also counts as a (never produced) message */
+void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti); /* a drop inside an enabled unit; never opens a row */
+/* A message of a disabled unit, gated before work: counts as a (never produced) message with its usable PRBs, so a disabled unit keeps its (wideband) rate.
+ * t_ns = nr_sense_now_ns(). Like job(), it opens a row only when est_usable_prbs >= sense_min_prb. */
+void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs, uint64_t t_ns);
 /* The scheduler's switch; units default to enabled. Creates the row. */
 void nr_sense_unit_set_enabled(int cell, uint16_t rnti, nr_unit_src_t s, bool enabled);
+/* CPU ns of cost-only calls that had no row (cumulative, per cell). */
+uint64_t nr_sense_unit_unattributed_ns(int cell);
 
 typedef struct {
   uint16_t rnti; nr_unit_src_t src; bool enabled;
-  float cpu_p95_ns, cpu_p99_ns;        /* per 50 ms bucket demand over the last SENSE_WIN_DECISIONS decisions (nearest-rank, idle buckets count as 0) */
-  float wait_p99_ns; uint32_t late, violations, skips; /* wait: per-bucket maximum, p99 over the buckets that saw a job; counters are cumulative */
-  float rate_hz, wb_rate_hz;           /* messages / those with est_usable >= min_prb, per second over the 320-bucket window */
+  float cpu_p95_ns, cpu_p99_ns;        /* per 50 ms bucket demand over the last SENSE_WIN_DECISIONS decisions (nearest-rank, idle buckets count as 0; p99 ignores the 3 busiest buckets of 320) */
+  float cpu_max_ns;                    /* the busiest of those buckets (burst) */
+  float wait_p99_ns; uint32_t late, violations, skips; /* wait: per-bucket maximum, p99 over the buckets that saw a job; counters are cumulative since the row was created (re-baseline when gen changes) */
+  float rate_hz, wb_rate_hz;           /* messages / those with est_usable >= min_prb, per second over min(16 s, now - first_ns) (at least one bucket) */
   float valid_ratio, snr_db; uint64_t last_valid_wb_ns, last_msg_ns;
+  uint64_t first_ns;                   /* first call of this unit (its history length) */
+  uint32_t gen;                        /* row generation: changes when the row is evicted and re-created; counters restart from 0 */
 } nr_sense_unit_view_t;
 /* scheduler thread; returns the number of units written (only units with history) */
 int nr_sense_unit_snapshot(int cell, nr_sense_unit_view_t *out, int max);
 int nr_sense_unit_snapshot_at(int cell, uint64_t now_ns, nr_sense_unit_view_t *out, int max); /* now_ns explicit (tests, replay) */
 uint64_t nr_sense_unit_bucket_cpu(int cell, uint16_t rnti, nr_unit_src_t s, uint64_t t_ns); /* CPU ns accumulated in the bucket holding t_ns (0 if none) */
+void nr_sense_unit_test_seam(void (*f)(void));                                                /* tests: called between locating a row and updating it */
 void nr_sense_unit_reset(int cell);                                                           /* tests / cell restart */
 
 /* Thread CPU clock for the sites: 0 outside the SENSING mode (the one mode branch per site), else a nonzero stamp. */

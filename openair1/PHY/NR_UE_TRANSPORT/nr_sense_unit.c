@@ -17,6 +17,7 @@
 #include <string.h>
 
 #define NB ((int)SENSE_WIN_BUCKETS)
+#define NBS (NB + 1) /* ring slots: the bucket being written never aliases the oldest bucket of the window (M-3) */
 #define TAG_MASK 0xFFFFFFull
 #define CPU_MASK ((1ull << 40) - 1)
 #define WAIT_MAX 0xFFFFFu
@@ -26,13 +27,15 @@ typedef struct {
   _Atomic uint64_t a, b;
 } ubucket_t;
 typedef struct {
-  ubucket_t bk[NB];
-  _Atomic uint64_t last_msg_ns, last_valid_wb_ns;
+  ubucket_t bk[NBS];
+  _Atomic uint64_t last_msg_ns, last_valid_wb_ns, first_ns;
   _Atomic uint32_t late, viol, skips, live, disabled, est_last, n_cfr, valid_bits, snr_bits;
 } unit_t;
 typedef struct {
   _Atomic uint32_t key[NR_UNIT_ROWS];
   _Atomic uint64_t row_last[NR_UNIT_ROWS];
+  _Atomic uint32_t gen[NR_UNIT_ROWS];  /* bumped when the row is evicted (I-5) */
+  _Atomic uint64_t unattributed_ns;    /* cost-only calls of an RNTI without a row (I-1) */
   atomic_flag create_lock;
   unit_t u[NR_UNIT_ROWS][NR_UNIT_SRC_N];
 } unit_tab_t;
@@ -46,12 +49,13 @@ static inline int32_t tag_diff(uint32_t a, uint32_t b) { return (int32_t)((a - b
 
 static void reset_unit(unit_t *u)
 {
-  for (int i = 0; i < NB; i++) {
+  for (int i = 0; i < NBS; i++) {
     atomic_store_explicit(&u->bk[i].a, 0, memory_order_relaxed);
     atomic_store_explicit(&u->bk[i].b, 0, memory_order_relaxed);
   }
   atomic_store_explicit(&u->last_msg_ns, 0, memory_order_relaxed);
   atomic_store_explicit(&u->last_valid_wb_ns, 0, memory_order_relaxed);
+  atomic_store_explicit(&u->first_ns, 0, memory_order_relaxed);
   atomic_store_explicit(&u->late, 0, memory_order_relaxed);
   atomic_store_explicit(&u->viol, 0, memory_order_relaxed);
   atomic_store_explicit(&u->skips, 0, memory_order_relaxed);
@@ -63,23 +67,29 @@ static void reset_unit(unit_t *u)
   atomic_store_explicit(&u->snr_bits, 0, memory_order_relaxed);
 }
 
-static int row_find(unit_tab_t *T, uint16_t rnti)
+/* g0 (optional) receives the row generation read BEFORE the key: an eviction clears the key, then bumps the generation, so a writer that saw the key
+ * under generation g0 detects any later eviction by a changed generation (I-5). */
+static int row_find(unit_tab_t *T, uint16_t rnti, uint32_t *g0)
 {
   const uint32_t k = (uint32_t)rnti + 1u;
-  for (int i = 0; i < NR_UNIT_ROWS; i++)
-    if (atomic_load_explicit(&T->key[i], memory_order_acquire) == k)
+  for (int i = 0; i < NR_UNIT_ROWS; i++) {
+    const uint32_t g = atomic_load_explicit(&T->gen[i], memory_order_acquire);
+    if (atomic_load_explicit(&T->key[i], memory_order_acquire) == k) {
+      if (g0) *g0 = g;
       return i;
+    }
+  }
   return -1;
 }
 
-static int row_get(unit_tab_t *T, uint16_t rnti, bool create, uint64_t t_ns)
+static int row_get(unit_tab_t *T, uint16_t rnti, bool create, uint64_t t_ns, uint32_t *g0)
 {
-  int r = row_find(T, rnti);
+  int r = row_find(T, rnti, g0);
   if (r >= 0 || !create)
     return r;
   if (atomic_flag_test_and_set_explicit(&T->create_lock, memory_order_acquire))
     return -1; /* another thread is creating a row: this one sample is dropped, never waited for */
-  r = row_find(T, rnti);                       /* it may have been created while we took the lock */
+  r = row_find(T, rnti, g0);                   /* it may have been created while we took the lock */
   if (r < 0) {
     int v = 0;
     uint64_t best = UINT64_MAX;
@@ -89,8 +99,10 @@ static int row_get(unit_tab_t *T, uint16_t rnti, bool create, uint64_t t_ns)
       if (l < best) { best = l; v = i; }
     }
     atomic_store_explicit(&T->key[v], 0, memory_order_release); /* readers stop finding the old RNTI before its history is cleared */
+    atomic_fetch_add_explicit(&T->gen[v], 1, memory_order_acq_rel); /* writers that located the old RNTI drop their update */
     for (int s = 0; s < NR_UNIT_SRC_N; s++) reset_unit(&T->u[v][s]);
     atomic_store_explicit(&T->row_last[v], t_ns, memory_order_relaxed);
+    if (g0) *g0 = atomic_load_explicit(&T->gen[v], memory_order_relaxed);
     atomic_store_explicit(&T->key[v], (uint32_t)rnti + 1u, memory_order_release);
     r = v;
   }
@@ -101,6 +113,8 @@ static int row_get(unit_tab_t *T, uint16_t rnti, bool create, uint64_t t_ns)
 static inline void touch(unit_tab_t *T, int r, unit_t *u, uint64_t t_ns)
 {
   atomic_store_explicit(&u->live, 1, memory_order_relaxed);
+  uint64_t z = 0;
+  atomic_compare_exchange_strong_explicit(&u->first_ns, &z, t_ns, memory_order_relaxed, memory_order_relaxed);
   uint64_t o = atomic_load_explicit(&u->last_msg_ns, memory_order_relaxed);
   while (o < t_ns && !atomic_compare_exchange_weak_explicit(&u->last_msg_ns, &o, t_ns, memory_order_relaxed, memory_order_relaxed)) {}
   o = atomic_load_explicit(&T->row_last[r], memory_order_relaxed);
@@ -110,14 +124,14 @@ static inline void touch(unit_tab_t *T, int r, unit_t *u, uint64_t t_ns)
 static inline void bucket_add(unit_t *u, uint64_t t_ns, uint64_t cpu, uint64_t wait_ns, unsigned msgs, unsigned wb)
 {
   const uint64_t bidx = t_ns / SENSE_BUCKET_NS;
-  ubucket_t *bk = &u->bk[bidx % NB];
+  ubucket_t *bk = &u->bk[bidx % NBS];
   const uint32_t tag = tag_of(bidx);
   if (cpu) {
     if (cpu > CPU_MASK) cpu = CPU_MASK;
     uint64_t w = atomic_load_explicit(&bk->a, memory_order_relaxed), n;
     do {
       const int32_t d = tag_diff(tag, (uint32_t)(w >> 40));
-      if (w && d < 0 && d > -NB) goto word_b; /* a late thread: the slot already holds a newer bucket */
+      if (w && d < 0) goto word_b; /* a late thread: the slot already holds a newer bucket */
       uint64_t c = (w && d == 0) ? (w & CPU_MASK) + cpu : cpu;
       if (c > CPU_MASK) c = CPU_MASK;
       n = ((uint64_t)tag << 40) | c;
@@ -130,7 +144,7 @@ word_b:
     uint64_t w = atomic_load_explicit(&bk->b, memory_order_relaxed), n;
     do {
       const int32_t d = tag_diff(tag, (uint32_t)(w >> 40));
-      if (w && d < 0 && d > -NB) return;
+      if (w && d < 0) return;
       uint64_t wm = wu, m = msgs, q = wb;
       if (w && d == 0) {
         const uint64_t ow = (w >> 20) & WAIT_MAX, om = (w >> 10) & CNT_MAX, oq = w & CNT_MAX;
@@ -145,17 +159,6 @@ word_b:
   }
 }
 
-static inline unit_t *unit_get(unit_tab_t *T, nr_unit_src_t s, uint16_t rnti, uint64_t t_ns, int *row)
-{
-  if ((unsigned)s >= NR_UNIT_SRC_N || nr_isac_mode() != NR_ISAC_MODE_SENSING)
-    return NULL;
-  const int r = row_get(T, rnti, true, t_ns);
-  if (r < 0)
-    return NULL;
-  *row = r;
-  return &T->u[r][s];
-}
-
 static inline uint64_t now_ns(void)
 {
   struct timespec t;
@@ -163,19 +166,51 @@ static inline uint64_t now_ns(void)
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
+/* Test seam (I-5): called between locating a row and updating it, so a test can evict the row at exactly that point. Unset in production. */
+static void (*_Atomic g_seam)(void);
+void nr_sense_unit_test_seam(void (*f)(void)) { atomic_store_explicit(&g_seam, f, memory_order_relaxed); }
+
+/* SRS is one unit per cell (the blind search has no RNTI): every SRS call lands on rnti 0 whatever the record's attribution. */
+static inline uint16_t unit_rnti(nr_unit_src_t s, uint16_t rnti) { return s == NR_UNIT_SRS ? 0 : rnti; }
+
+/* Locates the unit; create = this call may open a row (wideband-capable call, or the per-cell SRS unit). Returns NULL when the call is not for a live row
+ * (outside sensing mode, no row and not creatable, or the row was evicted since it was located: the update would land on the successor RNTI). */
+static inline unit_t *unit_get(unit_tab_t *T, nr_unit_src_t s, uint16_t rnti, bool create, uint64_t t_ns, int *row)
+{
+  if ((unsigned)s >= NR_UNIT_SRC_N || nr_isac_mode() != NR_ISAC_MODE_SENSING)
+    return NULL;
+  uint32_t g0 = 0;
+  const int r = row_get(T, rnti, create || s == NR_UNIT_SRS, t_ns, &g0);
+  if (r < 0)
+    return NULL;
+  void (*f)(void) = atomic_load_explicit(&g_seam, memory_order_relaxed);
+  if (f) f();
+  if (atomic_load_explicit(&T->gen[r], memory_order_acquire) != g0)
+    return NULL;
+  *row = r;
+  return &T->u[r][s];
+}
+
+static inline bool wideband_capable(unsigned prbs) { return prbs >= (unsigned)nr_isac_sense_min_prb(); }
+
 void nr_sense_unit_job(nr_unit_src_t s, uint16_t rnti, uint64_t cpu_ns, uint64_t wait_ns, bool late, uint16_t est_usable_prbs, uint64_t t_ns)
 {
   unit_tab_t *T = tab_of(nr_cell_idx());
+  rnti = unit_rnti(s, rnti);
   int r;
-  unit_t *u = unit_get(T, s, rnti, t_ns, &r);
-  if (!u)
+  unit_t *u = unit_get(T, s, rnti, wideband_capable(est_usable_prbs), t_ns, &r);
+  if (!u) {
+    /* no row and none to create (narrow or cost-only call): the cost stays in the cell's baseline, not lost */
+    if (cpu_ns && nr_isac_mode() == NR_ISAC_MODE_SENSING)
+      atomic_fetch_add_explicit(&T->unattributed_ns, cpu_ns, memory_order_relaxed);
     return;
+  }
   touch(T, r, u, t_ns);
   if (late)
     atomic_fetch_add_explicit(&u->late, 1, memory_order_relaxed);
   if (est_usable_prbs)
     atomic_store_explicit(&u->est_last, est_usable_prbs, memory_order_relaxed);
-  bucket_add(u, t_ns, cpu_ns, wait_ns, est_usable_prbs ? 1 : 0, est_usable_prbs >= (unsigned)nr_isac_sense_min_prb() ? 1 : 0);
+  bucket_add(u, t_ns, cpu_ns, wait_ns, est_usable_prbs ? 1 : 0, wideband_capable(est_usable_prbs) ? 1 : 0);
 }
 
 static inline float bits_f(uint32_t b) { float f; memcpy(&f, &b, 4); return f; }
@@ -185,14 +220,17 @@ static inline uint32_t f_bits(float f) { uint32_t b; memcpy(&b, &f, 4); return b
 void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, float snr_db, uint64_t t_ns)
 {
   unit_tab_t *T = tab_of(nr_cell_idx());
+  rnti = unit_rnti(s, rnti);
   int r;
-  unit_t *u = unit_get(T, s, rnti, t_ns, &r);
+  unit_t *u = unit_get(T, s, rnti, wideband_capable(valid_prbs), t_ns, &r);
   if (!u)
     return;
   touch(T, r, u, t_ns);
-  uint32_t den = atomic_load_explicit(&u->est_last, memory_order_relaxed);
-  if (den < valid_prbs) den = valid_prbs; /* the estimate of usable PRBs is a floor of the valid count */
-  const float ratio = den ? (float)valid_prbs / (float)den : 0.f;
+  const uint32_t est = atomic_load_explicit(&u->est_last, memory_order_relaxed);
+  /* ratio of real counts: valid / usable PRBs when the unit reports usable PRBs; otherwise (SRS) the record is 1 when it is wideband-valid, else 0 */
+  float ratio;
+  if (est) ratio = valid_prbs >= est ? 1.f : (float)valid_prbs / (float)est;
+  else ratio = wideband_capable(valid_prbs) ? 1.f : 0.f;
   const float snr = snr_db == snr_db ? snr_db : 0.f;
   /* single writer per record in practice (the sense writer); a lost update between two writers only skews one EWMA step */
   if (atomic_fetch_add_explicit(&u->n_cfr, 1, memory_order_relaxed) == 0) {
@@ -205,7 +243,9 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
     if (snr_db == snr_db)
       atomic_store_explicit(&u->snr_bits, f_bits(q + EWMA_A * (snr - q)), memory_order_relaxed);
   }
-  if (valid_prbs >= (unsigned)nr_isac_sense_min_prb()) {
+  if (s == NR_UNIT_SRS) /* SRS has no daBg/queue job to count the message: the exported record is the message */
+    bucket_add(u, t_ns, 0, 0, 1, wideband_capable(valid_prbs) ? 1 : 0);
+  if (wideband_capable(valid_prbs)) {
     uint64_t o = atomic_load_explicit(&u->last_valid_wb_ns, memory_order_relaxed);
     while (o < t_ns && !atomic_compare_exchange_weak_explicit(&u->last_valid_wb_ns, &o, t_ns, memory_order_relaxed, memory_order_relaxed)) {}
   }
@@ -214,27 +254,30 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
 void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti)
 {
   unit_tab_t *T = tab_of(nr_cell_idx());
+  rnti = unit_rnti(s, rnti);
   int r;
   const uint64_t t = now_ns();
-  unit_t *u = unit_get(T, s, rnti, t, &r);
+  unit_t *u = unit_get(T, s, rnti, false, t, &r); /* a drop never opens a row */
   if (!u)
     return;
   touch(T, r, u, t);
   atomic_fetch_add_explicit(&u->viol, 1, memory_order_relaxed);
 }
 
-void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti)
+void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs, uint64_t t_ns)
 {
   unit_tab_t *T = tab_of(nr_cell_idx());
+  rnti = unit_rnti(s, rnti);
   int r;
-  const uint64_t t = now_ns();
-  unit_t *u = unit_get(T, s, rnti, t, &r);
+  unit_t *u = unit_get(T, s, rnti, wideband_capable(est_usable_prbs), t_ns, &r);
   if (!u)
     return;
-  touch(T, r, u, t);
+  touch(T, r, u, t_ns);
   atomic_fetch_add_explicit(&u->skips, 1, memory_order_relaxed);
-  /* a gated message is still a message of the unit: its rate is what lets the scheduler value it while it is off */
-  bucket_add(u, t, 0, 0, 1, atomic_load_explicit(&u->est_last, memory_order_relaxed) >= (unsigned)nr_isac_sense_min_prb() ? 1 : 0);
+  /* a gated message is still a message of the unit: its (wideband) rate is what lets the scheduler value the unit while it is off */
+  if (est_usable_prbs)
+    atomic_store_explicit(&u->est_last, est_usable_prbs, memory_order_relaxed);
+  bucket_add(u, t_ns, 0, 0, est_usable_prbs ? 1 : 0, wideband_capable(est_usable_prbs) ? 1 : 0);
 }
 
 void nr_sense_unit_set_enabled(int cell, uint16_t rnti, nr_unit_src_t s, bool enabled)
@@ -242,12 +285,22 @@ void nr_sense_unit_set_enabled(int cell, uint16_t rnti, nr_unit_src_t s, bool en
   if (cell < 0 || cell >= NR_CELL_MAX || (unsigned)s >= NR_UNIT_SRC_N)
     return;
   unit_tab_t *T = tab_of(cell);
-  const int r = row_get(T, rnti, true, now_ns());
+  rnti = unit_rnti(s, rnti);
+  uint32_t g0;
+  const uint64_t t = now_ns();
+  const int r = row_get(T, rnti, true, t, &g0);
   if (r < 0)
     return;
   unit_t *u = &T->u[r][s];
   atomic_store_explicit(&u->live, 1, memory_order_relaxed);
   atomic_store_explicit(&u->disabled, enabled ? 0 : 1, memory_order_relaxed);
+  uint64_t z = 0;
+  atomic_compare_exchange_strong_explicit(&u->first_ns, &z, t, memory_order_relaxed, memory_order_relaxed);
+}
+
+uint64_t nr_sense_unit_unattributed_ns(int cell)
+{
+  return cell < 0 || cell >= NR_CELL_MAX ? 0 : atomic_load_explicit(&tab_of(cell)->unattributed_ns, memory_order_relaxed);
 }
 
 static int cmp_u64(const void *a, const void *b)
@@ -273,6 +326,7 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
   const uint64_t bn = now / SENSE_BUCKET_NS; /* the window is the NB completed buckets before the one holding `now` */
   int n = 0;
   for (int r = 0; r < NR_UNIT_ROWS && n < max; r++) {
+    const uint32_t g0 = atomic_load_explicit(&T->gen[r], memory_order_acquire);
     const uint32_t key = atomic_load_explicit(&T->key[r], memory_order_acquire);
     if (key == 0 || key == 0xFFFFFFFFu)
       continue;
@@ -285,7 +339,7 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
       uint64_t msgs = 0, wbs = 0;
       for (int i = 0; i < NB; i++) {
         const uint64_t b = bn - NB + (uint64_t)i;
-        const ubucket_t *bk = &u->bk[b % NB];
+        const ubucket_t *bk = &u->bk[b % NBS];
         const uint64_t a = atomic_load_explicit(&bk->a, memory_order_relaxed), w = atomic_load_explicit(&bk->b, memory_order_relaxed);
         cpu[i] = (a >> 40) == tag_of(b) ? (a & CPU_MASK) : 0;
         if ((w >> 40) == tag_of(b)) {
@@ -297,7 +351,10 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
       }
       qsort(cpu, NB, sizeof cpu[0], cmp_u64);
       qsort(wt, (size_t)nw, sizeof wt[0], cmp_u64);
-      const double win_s = (double)NB * (double)SENSE_BUCKET_NS * 1e-9;
+      const uint64_t first = atomic_load_explicit(&u->first_ns, memory_order_relaxed);
+      double win_s = (double)NB * (double)SENSE_BUCKET_NS * 1e-9; /* a unit younger than the window is divided by its age (at least one bucket) */
+      if (first && now > first && (double)(now - first) * 1e-9 < win_s) win_s = (double)(now - first) * 1e-9;
+      if (win_s < SENSE_BUCKET_NS * 1e-9) win_s = SENSE_BUCKET_NS * 1e-9;
       nr_sense_unit_view_t *v = &out[n++];
       memset(v, 0, sizeof *v);
       v->rnti = (uint16_t)(key - 1u);
@@ -305,6 +362,9 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
       v->enabled = !atomic_load_explicit(&u->disabled, memory_order_relaxed);
       v->cpu_p95_ns = (float)nrank(cpu, NB, 95);
       v->cpu_p99_ns = (float)nrank(cpu, NB, 99);
+      v->cpu_max_ns = (float)cpu[NB - 1];
+      v->gen = g0;
+      v->first_ns = first;
       v->wait_p99_ns = (float)nrank(wt, nw, 99);
       v->late = atomic_load_explicit(&u->late, memory_order_relaxed);
       v->violations = atomic_load_explicit(&u->viol, memory_order_relaxed);
@@ -315,6 +375,8 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
       v->snr_db = atomic_load_explicit(&u->n_cfr, memory_order_relaxed) ? bits_f(atomic_load_explicit(&u->snr_bits, memory_order_relaxed)) : 0.f;
       v->last_valid_wb_ns = atomic_load_explicit(&u->last_valid_wb_ns, memory_order_relaxed);
       v->last_msg_ns = atomic_load_explicit(&u->last_msg_ns, memory_order_relaxed);
+      /* the row was evicted while it was being read: its history is the successor's zeros under the old RNTI, discard the view (M-2) */
+      if (atomic_load_explicit(&T->key[r], memory_order_acquire) != key || atomic_load_explicit(&T->gen[r], memory_order_acquire) != g0) n--;
     }
   }
   return n;
@@ -327,11 +389,11 @@ uint64_t nr_sense_unit_bucket_cpu(int cell, uint16_t rnti, nr_unit_src_t s, uint
   if (cell < 0 || cell >= NR_CELL_MAX || (unsigned)s >= NR_UNIT_SRC_N)
     return 0;
   unit_tab_t *T = tab_of(cell);
-  const int r = row_find(T, rnti);
+  const int r = row_find(T, unit_rnti(s, rnti), NULL);
   if (r < 0)
     return 0;
   const uint64_t b = t_ns / SENSE_BUCKET_NS;
-  const uint64_t a = atomic_load_explicit(&T->u[r][s].bk[b % NB].a, memory_order_relaxed);
+  const uint64_t a = atomic_load_explicit(&T->u[r][s].bk[b % NBS].a, memory_order_relaxed);
   return (a >> 40) == tag_of(b) ? (a & CPU_MASK) : 0;
 }
 
@@ -342,7 +404,9 @@ void nr_sense_unit_reset(int cell)
   unit_tab_t *T = tab_of(cell);
   for (int r = 0; r < NR_UNIT_ROWS; r++) {
     atomic_store_explicit(&T->key[r], 0, memory_order_release);
+    atomic_fetch_add_explicit(&T->gen[r], 1, memory_order_acq_rel);
     atomic_store_explicit(&T->row_last[r], 0, memory_order_relaxed);
     for (int s = 0; s < NR_UNIT_SRC_N; s++) reset_unit(&T->u[r][s]);
   }
+  atomic_store_explicit(&T->unattributed_ns, 0, memory_order_relaxed);
 }
