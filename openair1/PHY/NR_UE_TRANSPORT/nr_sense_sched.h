@@ -1,6 +1,9 @@
 /* Sensing-mode scheduler constants (spec 2026-11-03-two-modes-design.md section 5). Compile-time only. */
 #ifndef NR_SENSE_SCHED_H
 #define NR_SENSE_SCHED_H
+#include <stdbool.h>
+#include <stdint.h>
+#include "nr_sense_unit.h"
 
 #define SENSE_BUCKET_NS 50000000ull      /* cost bucket */
 #define SENSE_DECIDE_NS 4000000000ull    /* decision period */
@@ -9,9 +12,54 @@
 #define SENSE_HEADROOM 0.40              /* share of each resource a unit may use at its p99 */
 #define SENSE_HYST 0.20                  /* hysteresis margin */
 #define SENSE_MAX_ENABLES 2              /* units enabled per decision */
+#define SENSE_ELIG_VALID_MIN 0.2f        /* a unit is eligible only above this valid ratio (and with wb_rate_hz > 0) */
 #define SENSE_AGE_CAP 2.0                /* fairness multiplier cap ... */
 #define SENSE_AGE_FULL_NS 10000000000ull /* ... reached at this age since the last valid wideband CFR */
 /* buckets in the cost window: 4 decisions x 4 s / 50 ms = 320 */
 #define SENSE_WIN_BUCKETS ((SENSE_WIN_DECISIONS * SENSE_DECIDE_NS) / SENSE_BUCKET_NS)
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define NR_SENSE_CELLS 8
+#define NR_SENSE_SLOTS 64 /* RNTI slots per cell in the state: slot 0 is the per-cell SRS unit (rnti 0), 1..63 hold the other RNTIs */
+
+/* One shared resource, in ns per 50 ms bucket (the unit of cpu_p99_ns, so no further scaling). For NR_RES_QUEUE_*: cap_ns = the queue's deadline budget and
+ * base_p99_ns = its baseline wait p99, both in ns. cap_ns <= 0 means the resource does not exist on this host (GPU on x86): it is not constrained. */
+typedef struct { float cap_ns, base_p99_ns; } nr_sense_res_t;
+typedef enum { NR_RES_POOL = 0, NR_RES_QUEUE_DL, NR_RES_QUEUE_UL, NR_RES_GPU, NR_RES_SENSE_RING, NR_RES_N } nr_res_id_t;
+/* Resources a unit uses (demand): POOL and SENSE_RING by every unit (cpu_p99_ns; the ring is a proxy: the writer cost is not attributed per unit),
+ * GPU by PDSCH_DATA (cpu_p99_ns as the proxy of the launch/wait time: the GPU time per unit is not in the view), QUEUE_DL by PDSCH_DATA and QUEUE_UL by SRS
+ * (wait_p99_ns; waits do not add, the queue is charged the maximum over the admitted units). DM-RS units are inline (no queue). */
+
+typedef struct {
+  int n_cells; int pci[NR_SENSE_CELLS];
+  const nr_sense_unit_view_t *units[NR_SENSE_CELLS]; int n_units[NR_SENSE_CELLS]; /* per cell, from nr_sense_unit_snapshot (max 256 per cell, 2048 in all are considered) */
+  nr_sense_res_t res[NR_RES_N];
+  int min_prb; uint64_t now_ns;
+} nr_sense_sched_in_t;
+
+/* Kept between decisions by the caller (zero-initialised at start). st->enabled is the decision: the caller applies it with nr_sense_unit_set_enabled
+ * (cell, st->rnti[cell][slot], src) where it differs from the unit's view. */
+typedef struct {
+  uint8_t streak[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
+  bool enabled[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
+  uint16_t rnti[NR_SENSE_CELLS][NR_SENSE_SLOTS];
+  uint64_t last_pci_valid_wb_ns[NR_SENSE_CELLS];
+  bool known[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];     /* below: the violation baseline of the previous decision (re-baselined when the row generation changes) */
+  uint32_t gen[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], viol[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
+} nr_sense_sched_state_t;
+
+typedef struct { int enables, disables; nr_res_id_t binding; float value_last_admitted; } nr_sense_sched_out_t;
+
+void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *st, nr_sense_sched_out_t *out);
+
+/* exposed for tests */
+bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v, int min_prb);
+double nr_sense_age_boost(bool eligible, uint64_t last_valid_ns, uint64_t now_ns); /* 1 + (CAP-1) x min(1, age / FULL); exactly 1 when not eligible */
+
+#ifdef __cplusplus
+}
+#endif
 #endif

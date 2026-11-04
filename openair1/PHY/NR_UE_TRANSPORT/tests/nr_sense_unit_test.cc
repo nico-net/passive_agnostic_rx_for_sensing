@@ -32,6 +32,9 @@ TEST_F(Unit, BucketsAccumulate)
   EXPECT_EQ(nr_sense_unit_bucket_cpu(0, 0x4601, NR_UNIT_PDSCH_DATA, tb(6)), 1 * MS);
   EXPECT_EQ(nr_sense_unit_bucket_cpu(0, 0x4601, NR_UNIT_PDSCH_DMRS, tb(5)), 0u); /* the source is part of the key */
   EXPECT_EQ(nr_sense_unit_bucket_cpu(0, 0x4602, NR_UNIT_PDSCH_DATA, tb(5)), 0u); /* so is the RNTI */
+  nr_sense_unit_view_t vw[8];
+  ASSERT_GE(snap(0, tb(7), vw), 1);
+  EXPECT_EQ(vw[0].est_usable_prbs, 200); /* the latest usable PRBs are in the view (scheduler value) */
 }
 
 TEST_F(Unit, P99OverWindow)

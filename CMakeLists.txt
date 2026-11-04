@@ -1179,6 +1179,7 @@ add_library(nr_sense_api ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_api.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_records.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_quality.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_unit.c
+                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_sched.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_traffic_record.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_traffic_decode.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_traffic_cfg.c
@@ -2990,6 +2991,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_sense_unit PRIVATE nr_sense_api GTest::gtest GTest::gtest_main pthread m)
   add_dependencies(tests test_nr_sense_unit)
   add_test(NAME test_nr_sense_unit COMMAND ./test_nr_sense_unit)
+
+  add_executable(test_nr_sense_sched ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_sense_sched_test.cc)
+  target_include_directories(test_nr_sense_sched PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR})
+  target_link_libraries(test_nr_sense_sched PRIVATE nr_sense_api GTest::gtest GTest::gtest_main pthread m)
+  add_dependencies(tests test_nr_sense_sched)
+  add_test(NAME test_nr_sense_sched COMMAND ./test_nr_sense_sched)
 
   add_executable(test_nr_traffic_record ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_traffic_record_test.cc)
   target_include_directories(test_nr_traffic_record PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
