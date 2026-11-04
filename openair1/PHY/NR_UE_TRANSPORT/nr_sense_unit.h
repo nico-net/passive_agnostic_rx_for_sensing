@@ -28,12 +28,27 @@ typedef enum { NR_UNIT_PDSCH_DMRS = 0, NR_UNIT_PDSCH_DATA, NR_UNIT_PUSCH_DMRS, N
 void nr_sense_unit_job(nr_unit_src_t s, uint16_t rnti, uint64_t cpu_ns, uint64_t wait_ns, bool late, uint16_t est_usable_prbs, uint64_t t_ns);
 /* One exported CFR record of the unit (from the sense writer's emit_rs). */
 void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, float snr_db, uint64_t t_ns);
-void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti); /* a drop inside an enabled unit; never opens a row */
+void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti); /* a drop inside an ENABLED unit (counted only then); never opens a row. A drop of a disabled unit is not a violation */
 /* A message of a disabled unit, gated before work: counts as a (never produced) message with its usable PRBs, so a disabled unit keeps its (wideband) rate.
  * t_ns = nr_sense_now_ns(). Like job(), it opens a row only when est_usable_prbs >= sense_min_prb. */
 void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs, uint64_t t_ns);
-/* The scheduler's switch; units default to enabled. Creates the row. */
+/* The scheduler's switch. Creates the row. A row (RNTI) is created DISABLED in every source (S7): the scheduler enables it through its cold-unit path. */
 void nr_sense_unit_set_enabled(int cell, uint16_t rnti, nr_unit_src_t s, bool enabled);
+/* The gate of a unit (spec 5.6), lock-free, bounded (one scan of the 64 row keys), read by the cell of the calling thread. true = the work may run.
+ * Outside the SENSING mode, and for a source that is not a unit (SSB, CSI-RS: never gated), it is always true. A unit without a row is disabled. */
+bool nr_sense_unit_enabled(nr_unit_src_t s, uint16_t rnti);
+/* Gate site helper: true = run the work. false = the unit is disabled: the message is counted as a disabled skip (nr_sense_unit_skip, which needs est_usable_prbs,
+ * the usable PRBs of the message: it is what keeps the rate of a disabled unit and opens its row) and the caller must not start the work. SRS passes 0: a capture counts as
+ * one message of sense_min_prb PRBs. */
+bool nr_sense_unit_gate(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs);
+/* Per-cell totals for the metrics (cumulative since start; survive row eviction). */
+typedef struct {
+  uint64_t violations, skips;                 /* drops inside enabled units / messages gated off */
+  uint64_t wb_valid, wb_valid_prbs;           /* wideband CFR records (valid_cfr_prbs >= sense_min_prb) and the sum of their valid PRBs */
+  uint64_t gap_max_ns;                        /* longest time between two wideband CFR records of the cell */
+  uint32_t units_enabled;                     /* units enabled now */
+} nr_sense_unit_cell_stats_t;
+void nr_sense_unit_cell_stats(int cell, nr_sense_unit_cell_stats_t *out);
 /* CPU ns of cost-only calls that had no row (cumulative, per cell). */
 uint64_t nr_sense_unit_unattributed_ns(int cell);
 

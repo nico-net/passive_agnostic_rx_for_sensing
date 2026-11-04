@@ -98,6 +98,7 @@ TEST_F(Unit, LruEvictsIdle)
 TEST_F(Unit, ViolationAndSkipCounted)
 {
   nr_sense_unit_job(NR_UNIT_PDSCH_DATA, 9, MS, 0, false, 200, tb(1));
+  nr_sense_unit_set_enabled(0, 9, NR_UNIT_PDSCH_DATA, true); /* a new row starts disabled (S7); a drop counts only in an enabled unit */
   nr_sense_unit_violation(NR_UNIT_PDSCH_DATA, 9);
   nr_sense_unit_violation(NR_UNIT_PDSCH_DATA, 9);
   nr_sense_unit_skip(NR_UNIT_PDSCH_DATA, 9, 200, tb(1));
@@ -123,6 +124,7 @@ TEST_F(Unit, SnapshotPerCell)
   std::thread t([] {
     nr_cell_bind(1);
     nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, 6, 8 * MS, 0, true, 200, tb(1));
+    nr_sense_unit_set_enabled(1, 6, NR_UNIT_PDSCH_DMRS, true);
     nr_sense_unit_violation(NR_UNIT_PDSCH_DMRS, 6);
   });
   t.join();
@@ -294,6 +296,7 @@ static void evict_row_77()
 TEST_F(Unit, LateWriterCannotTouchTheSuccessor)
 {
   nr_sense_unit_job(NR_UNIT_PDSCH_DATA, 77, MS, 0, false, 200, tb(1)); /* oldest row */
+  nr_sense_unit_set_enabled(0, 77, NR_UNIT_PDSCH_DATA, true); /* enabled: a violation that reached it would count */
   nr_sense_unit_view_t v[256];
   ASSERT_EQ(snap(0, tb(2), v), 1);
   const uint32_t g_before = v[0].gen;

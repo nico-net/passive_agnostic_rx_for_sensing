@@ -228,6 +228,9 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
     if (fits(use, k->dem, budget, k->v->src, &over)) {
       add_use(use, k->dem);
       k->want = true;
+      if (out->n_admitted < NR_SENSE_ADMIT_LOG)
+        out->admitted[out->n_admitted] = (nr_sense_admit_t){.cell = k->cell, .rnti = k->v->rnti, .src = k->v->src, .val = (float)k->val};
+      out->n_admitted++;
       if (!out->value_last_admitted || k->val < out->value_last_admitted) out->value_last_admitted = (float)k->val;
       if (k->cold) cold_taken = true;
     } else if (!rejected) {

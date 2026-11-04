@@ -22,6 +22,7 @@
 /* Receiver-facing CFR export adapter. No sensing algorithms run here. */
 #include "nr_isac.h"
 #include "nr_sense_api.h"
+#include "nr_sense_unit.h"
 #include "nr_sense_records.h"
 #include "nr_passive_cfg_epoch.h"
 #include "common/utils/nr_cell.h"
@@ -405,8 +406,13 @@ extern "C" void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac
   const int dedicated = reconf ? int(nr_cfg_epoch_dedicated_current()) : -1;
   bool truncated=false;
   const int n_export_ant=std::min(nof_ant,cs().cfg.cfr_max_ant);
+  (void)nr_sense_take_ring_full(); // a flag left by another push of this thread is not this frame's
   const uint64_t frame_id=nr_sense_push_cfr_u32(source_map[source], n_export_ant, h, ant_stride_re, nof_re, k_abs, l_sym,
                     slot_idx, slot_frac, noise_var, stamp >> 32, (uint32_t)stamp, &truncated);
+  if (frame_id==0 && nr_sense_take_ring_full()) { /* the CFR frame was lost on the full ring: a drop inside the unit (counted only if the unit is enabled) */
+    const int us=nr_sense_unit_of_src(source_map[source]);
+    if (us>=0) nr_sense_unit_violation(nr_unit_src_t(us), detail ? detail->rnti : 0);
+  }
   nr_sense_rs_meta_t m{};
   m.rnti=0; m.start_rb=-1; m.nb_rb=-1; m.n_re=std::min(nof_re,cs().cfg.cfr_max_re);
   m.n_ant=n_export_ant; m.ports=-1; m.ssb_index=-1; m.k_ssb=-1;

@@ -11,6 +11,7 @@
  * links that module through its emitters and supplies the formatter. */
 __attribute__((weak)) int nr_sense_rs_to_json(nr_sense_src_t, const nr_sense_rs_meta_t *, uint64_t, char *, size_t);
 __attribute__((weak)) int nr_sense_dci_to_json(const nr_sense_dci_rec_t *, char *, size_t);
+static __thread bool tl_frame_ring_full; /* set by a CFR push dropped on a full frame ring, taken by the same thread (nr_sense_take_ring_full) */
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -279,8 +280,7 @@ static void *run_writer(void *arg)
         char *line=records+(size_t)at*RECORD_BYTES;
         if (!job_quality(job,i>0) ) { count=i; break; }   /* frame still queued: stop the batch, the frame stream runs next */
         if (job->meta.q_valid) { /* per-unit view of the record (sensing mode only: the call is a no-op otherwise) */
-          const int us=job->src==NR_SENSE_SRC_PDSCH_DMRS?NR_UNIT_PDSCH_DMRS:job->src==NR_SENSE_SRC_PDSCH_DATA?NR_UNIT_PDSCH_DATA:
-                       job->src==NR_SENSE_SRC_PUSCH_DMRS?NR_UNIT_PUSCH_DMRS:job->src==NR_SENSE_SRC_SRS?NR_UNIT_SRS:-1;
+          const int us=nr_sense_unit_of_src(job->src);
           if (us>=0) nr_sense_unit_cfr((nr_unit_src_t)us,(uint16_t)job->meta.rnti,job->meta.q.valid_cfr_prbs,job->meta.q.snr_db_p50,nr_sense_now_ns());
         }
         length=nr_sense_rs_to_json(job->src,&job->meta,job->frame_id,line,RECORD_BYTES-1);
@@ -484,7 +484,7 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
       if (((const uint32_t *)k_abs)[i]>UINT16_MAX || ((const uint32_t *)l_sym)[i]>UINT8_MAX) {
         stats.cfr_rejected++; pthread_mutex_unlock(&mu); return 0;
       }
-    next_id++; stats.cfr_dropped[src]++; pthread_mutex_unlock(&mu); return 0;
+    next_id++; stats.cfr_dropped[src]++; tl_frame_ring_full=true; pthread_mutex_unlock(&mu); return 0;
   }
   const uint32_t at=(frame_head+frame_count)%frame_cap;
   const uint64_t t_pack=nr_sense_now_ns();
@@ -571,7 +571,12 @@ int nr_sense_push_rs_binary(nr_sense_src_t src, const nr_sense_rs_meta_t *meta, 
   if (cslen>=256 || atlen>=256) return -1;
   pthread_mutex_lock(&mu);
   if (!opened) { pthread_mutex_unlock(&mu); return -1; }
-  if (no_sink || record_count==record_cap) { stats.rec_dropped++; pthread_mutex_unlock(&mu); return 0; }
+  if (no_sink || record_count==record_cap) {
+    const bool ring_full=!no_sink;
+    stats.rec_dropped++; pthread_mutex_unlock(&mu);
+    if (ring_full) { const int us=nr_sense_unit_of_src(src); if (us>=0) nr_sense_unit_violation((nr_unit_src_t)us,(uint16_t)meta->rnti); } /* a record of an enabled unit lost on the full ring */
+    return 0;
+  }
   const uint32_t at=(record_head+record_count)%record_cap;
   rs_job_t *job=&rs_jobs[at];
   job->meta=*meta; job->src=src; job->frame_id=frame_id;
@@ -602,6 +607,12 @@ int nr_sense_push_dci(const nr_sense_dci_rec_t *r)
   record_count++; stats.rec_pushed++; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return 1;
 }
+int nr_sense_unit_of_src(nr_sense_src_t src)
+{
+  return src==NR_SENSE_SRC_PDSCH_DMRS?NR_UNIT_PDSCH_DMRS:src==NR_SENSE_SRC_PDSCH_DATA?NR_UNIT_PDSCH_DATA:
+         src==NR_SENSE_SRC_PUSCH_DMRS?NR_UNIT_PUSCH_DMRS:src==NR_SENSE_SRC_SRS?NR_UNIT_SRS:-1;
+}
+bool nr_sense_take_ring_full(void) { const bool f=tl_frame_ring_full; tl_frame_ring_full=false; return f; }
 void nr_sense_async_note(nr_sense_src_t src, int queued)
 {
   if ((unsigned)src >= NR_SENSE_SRC_COUNT) return;

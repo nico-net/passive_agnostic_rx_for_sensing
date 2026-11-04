@@ -32,6 +32,8 @@
 #include "nr_sense_api.h"
 #include "PHY/TOOLS/nr_admit.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
+#include "nr_sense_unit.h"
+#include "nr_sense_sched_rt.h"
 #include "nr_pdcch_uss_prune.h"
 __attribute__((weak)) void nr_sense_stats(nr_sense_stats_t *out);
 __attribute__((weak)) void nr_prach_passive_diag(uint64_t *, uint64_t *, int *);
@@ -151,6 +153,17 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     m->has_retry_yield = 1;
   }
   if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) { m->has_traffic = 1; nr_traffic_stats_get(&m->traffic); }
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING) {
+    nr_sense_unit_cell_stats_t us;
+    nr_sense_unit_cell_stats(nr_cell_idx(), &us);
+    nr_sense_sched_stats_t ss;
+    nr_sense_sched_stats(&ss);
+    m->has_sense_sched = 1;
+    m->su_units_enabled = us.units_enabled; m->su_violations = us.violations; m->su_disabled_skips = us.skips;
+    m->su_wb_valid = us.wb_valid; m->su_wb_valid_prbs = us.wb_valid_prbs; m->su_gap_max_ms = us.gap_max_ns / 1000000ull;
+    m->ss_decisions = ss.decisions; m->ss_enables = ss.enables; m->ss_disables = ss.disables; m->ss_bad_cap = ss.bad_cap; m->ss_deferrals = ss.deferrals;
+    m->ss_binding = ss.decisions ? ss.binding : -1;
+  }
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
   if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped,
       &m->srs_pregate_skip,&m->srs_backoff_skip,&m->srs_budget_skip,&m->srs_idle_resets);

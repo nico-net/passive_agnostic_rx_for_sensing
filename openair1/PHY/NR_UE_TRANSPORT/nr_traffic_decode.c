@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_traffic_decode.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "common/utils/nr_cell.h"
 #include <pthread.h>
@@ -30,6 +31,10 @@ static td_ent_t *ent(td_tab_t *t, int dir, uint16_t rnti)
 bool nr_traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
                               uint64_t t_ns, bool hrv_alert)
 {
+  /* SENSING mode (plan S7): every grant is decoded, whatever the state of its RNTI's PDSCH_DATA unit. The decode is receiver work that feeds the payload and the CRC; the
+   * unit gate acts on the CFR tap that follows it (nr_sense_unit_gate), so an enabled unit sees every grant of its RNTI decoded to the end. The traffic policy below is
+   * for the traffic mode only. */
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING) return true;
   if (rnti_class != NR_BLIND_RNTI_CLASS_C) return true;
   if (dir == 0 && ls != NR_LAYOUT_SOLVED) return false; /* FIXED: layout known; CANDIDATE/UNSOLVED: the solver's probes work */
   if (dir != 0 && !ul_table_learned) return true;

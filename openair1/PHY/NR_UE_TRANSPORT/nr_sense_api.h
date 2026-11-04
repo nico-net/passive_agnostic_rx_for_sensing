@@ -74,6 +74,10 @@ typedef struct {
 } nr_sense_stats_t;
 /* A producer that moves its work off the decode-critical thread reports each hand-off: queued = 1 taken by the worker, 0 = dropped (counted per source, no lock, any thread of the cell). */
 void nr_sense_async_note(nr_sense_src_t src, int queued);
+/* Unit source (nr_unit_src_t) of a record source, -1 for the sources that are not units (SSB, CSI-RS, PRACH, PUSCH data). */
+int nr_sense_unit_of_src(nr_sense_src_t src);
+/* true once if the last nr_sense_push_cfr* of this thread was dropped because the CFR frame ring was full (not for a missing sink or a rejected frame); clears the flag. */
+bool nr_sense_take_ring_full(void);
 void nr_sense_recon_skip_note(void);
 void nr_sense_q_miss_note(void); /* an RS record that wanted quality was formatted without it outside the writer (JSON fallback) */
 void nr_sense_stats(nr_sense_stats_t *out);

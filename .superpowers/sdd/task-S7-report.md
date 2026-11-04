@@ -1,0 +1,31 @@
+# Task S7 report (scheduler wiring, gates, violations, metrics)
+
+Status: DONE (one sensing-bed limitation, see Concerns). Branch sense/s1fix, DGX aarch64. Evidence labels: [SIM VERIFIED] rfsim 106 PRB 4 RX, DGX; nothing calibrated on DEIB/OTA.
+
+## What was built
+- nr_sense_sched_rt.{c,h}: thread (SCHED_OTHER, no affinity, 2 MB stack), step() = sample resources, snapshot units, nr_sense_sched_decide, apply with nr_sense_unit_set_enabled, `SENSING: SENSE_SCHED` line per decision (enables, disables, bad_cap, binding, admitted set with per-unit value, enabled_now, violations, disabled_skips, ring_drops, pool cap/base). Started in nr-uesoftmodem.c before the N==1 / N>1 split (SENSING only, N>=1, independent of the core split), stopped first in mpci_stop_cell_sensing. Single PCI works (no scan suspension).
+- S5: rows are created DISABLED in every source (cold path); nr_sense_unit_enabled (lock-free, 64-key scan, no row = disabled; non-sensing and non-unit sources = true); nr_sense_unit_gate (enabled -> true, else skip with est PRBs and false); nr_sense_unit_violation counts only in an enabled unit; per-cell totals (violations, skips, wb_valid, wb_valid_prbs, gap_max, units_enabled).
+- Gate sites: PDSCH data in nr_isac_pdsch_data_aided_submit (:~202, not for the daBg worker = in-flight finishes) and _submit_async (once, before snapshot); PDSCH DM-RS per accepted grant in the blind monitor (dmrs_source_g / want_dmrs_g: no chest, extraction, hand-off); PUSCH DM-RS (want_est peek, extraction+submit gate once per grant; PUSCH-attributed SRS events unaffected); SRS in nr_srs_passive_capture (UL slot = one sense_min_prb message; worker job counts the same). SSB/CSI-RS untouched. Not changed: monitor want_data (5651) - the CFR tap is gated at submit, so skips are counted once per CRC-OK TB, not per variant.
+- Violations: da_shed (queue/pool/geom), PDSCH queue drop-oldest + stale + copy-fail (probes excluded), PUSCH drop-oldest + stale real grant, SRS queue full, sense ring (record ring full in push_rs_binary; CFR frame ring full via thread-local flag in push_cfr, routed in nr_isac_submit_cfr_multi_meta).
+- nr_traffic_decode_wanted: SENSING returns true for every grant (decode is receiver work, the gate acts on the tap; true for disabled units too, deliberately: "decode ALL grants").
+- Metrics (sensing only; has_sense_sched): sense_units_enabled, sense_violations, sense_disabled_skips, sense_wb_valid, sense_wb_valid_prbs, sense_gap_max_ms, sched_binding, sched_decisions/enables/disables/bad_cap/deferrals (process-wide, repeated per cell line, not summed). Legacy/traffic output byte-identical (test).
+- S6 out struct got the admitted list (n_admitted, admitted[16]).
+
+## VERIFIED resource fields
+POOL: cap = nr_pool_size(nr_pool_site()) x 50 ms; base = delta of nr_pool_stats_t.hold_ns_cell_cls[cell][SCAN|RETRY|DISC|HOUSE] (+ nr_sense_unit_unattributed_ns delta) per 50 ms bucket, MEAN over the 4 s period (no p99 history exists). QUEUE_DL/UL: cap = NR_UNIT_LATE_NS (20 ms), base 0 (no queue-wide wait histogram available). GPU: cap = 50 ms if nr_gpu_pass_active() else 0 (absent); the CELL_GPU source (nr_gpu_pass_dl_cell_counters) has calls/fallback only, no GPU time, so base 0. SENSE_RING: cap 50 ms; base = whole cap when rec_dropped (nr_sense_stats, per bound cell) grew in the period. First period only primes (counted as a deferral). All caps set.
+
+## Tests
+test_nr_sense_sched_rt 15/15 (gate table, DisabledUnitSkippedBeforeWork, InFlightFinishesAfterDisable, DropInEnabled/Disabled, SsbCsirsNeverGated, ColdUnitIsEnabledAfterTwoDecisions, ViolationRemovesTheUnitAtOnce, zero cap, deferral, counters, start/stop); test_nr_passive_metrics (SenseSchedKeysOnlyInSensingMode); test_nr_traffic_decode (+1); S5 unit tests adapted (rows start disabled). Red first (link/compile stubs absent), mutations all caught: skip without est (2 tests fail), violation not counted (2), rows created enabled (2), cap<=0 treated as absent for every resource (1).
+Full ctest -j4: 391 tests, 18 failures, all on the baseline list (uci x7 Not Run, ra0_qam256, ul_disc, nr_td_sim_test, ssb_rate_match_prod, iq_chan, gpu_pass_cells/geo/geo_discrete, dft_test, ldpc_cuda_pool_cpu, modulation). 24 .so. static_audit --check rc 0 (rows hand-added: sched_rt statics, tl_frame_ring_full; GLOBS + owner rule for nr_sense_sched_rt.c). Frozen check exit 0.
+
+## rfsim
+- Legacy 4-RX gate, one 420 s arm [SIM VERIFIED, DGX, flock -x td_measure + heavy]: PASS base_r1 [solver] n_solved=1 solve_ttc=4.51<=60 postsolve_crc=100.00 (51963 grants) resets_after=0 crc_floor=96.15>=93.4 drop_full=0.0039<=2.5 (mode auto chose solver; the postconv criteria are not evaluated in that mode). Evidence dir in scratchpad legacy_gate.
+- Sensing (.cfg tests/passive_rx/dgx/ue.passive.sensing.rfsim.s7.cfg: mode="sensing", sense_min_prb=20, 106 PRB 4 RX), 150 s and 100 s arms: scheduler started, 33 decisions/150 s, enables 4 / disables 4 (RNTI 0x4660 pdsch_data), bad_cap 0, deferrals 1 (priming), violations 0, ring_drops 0, disabled_skips ~10k, ~4.5k pdsch_data RS records + ssb + csirs + 15k grant records, each RS record carries estimated_usable_prbs / valid_cfr_prbs / valid_mask. Pool base 31-50 ms of 300 ms cap.
+
+## Concerns
+1. pdsch_data records in this rfsim bed have valid_cfr_prbs = 0 (estimated_usable 106): sense_wb_valid stays 0. S6 then (correctly) drops the unit by the valid-ratio rule and retries after the 16 s window, so the unit flaps on/off with a ~14-decision period. Reconstruction validity is a S2/S3 question (not looked into); likely to dominate on air too. PDSCH_DMRS units were not seen admitted in this bed (not investigated).
+2. SRS: a disabled unit's rate = UL capture opportunities, enabled = captures + exported records (double count of records); harmless to stability but approximate.
+3. Pool base is a mean, queue and GPU bases are 0: the scheduler is only as conservative as headroom 0.40 x (pool) + the violation path. Not calibrated.
+4. recon_skip (daBg backlog) is not counted as a violation; PDSCH queue epoch drops neither.
+5. Narrow carriers (< sense_min_prb): every unit stays gated (no rows); as specified.
+6. Sensing run writes ~15 MB/s of CFR frames (cfr_path): delete /tmp/passive_rx/s7_cfr.bin after runs.

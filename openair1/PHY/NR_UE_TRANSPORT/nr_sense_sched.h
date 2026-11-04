@@ -56,7 +56,12 @@ typedef struct {
   uint32_t gen[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], viol[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
 } nr_sense_sched_state_t;
 
-typedef struct { int enables, disables, bad_cap; nr_res_id_t binding; float value_last_admitted; /* value of the lowest-valued admitted unit */ } nr_sense_sched_out_t;
+#define NR_SENSE_ADMIT_LOG 16
+typedef struct { int cell; uint16_t rnti; nr_unit_src_t src; float val; } nr_sense_admit_t;
+typedef struct {
+  int enables, disables, bad_cap; nr_res_id_t binding; float value_last_admitted; /* value of the lowest-valued admitted unit */
+  int n_admitted; nr_sense_admit_t admitted[NR_SENSE_ADMIT_LOG]; /* the admitted set in rank order (n_admitted counts all, the list holds the first NR_SENSE_ADMIT_LOG) */
+} nr_sense_sched_out_t;
 
 void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *st, nr_sense_sched_out_t *out);
 

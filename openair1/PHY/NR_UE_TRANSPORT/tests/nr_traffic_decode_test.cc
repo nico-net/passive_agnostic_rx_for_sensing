@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_traffic_decode.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pdcch_blind_monitor.h"
 }
 namespace {
@@ -71,4 +72,16 @@ TEST(TrafficDecode, DirectionsAreIndependent)
   for (int i = 0; i < 3; i++) EXPECT_FALSE(nr_traffic_decode_result(0, 0x10a, 0, 15.f, false));
   EXPECT_FALSE(nr_traffic_decode_result(1, 0x10a, 0, 15.f, false));
   EXPECT_TRUE(nr_traffic_decode_result(0, 0x10a, 0, 15.f, false));
+}
+TEST(TrafficDecode, SensingModeDecodesEveryGrant)
+{
+  /* plan S7: in SENSING every grant is decoded to the end (the unit gate acts on the CFR tap, not on the decode) */
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  for (nr_layout_state_t ls : {NR_LAYOUT_FIXED, NR_LAYOUT_CANDIDATE, NR_LAYOUT_UNSOLVED, NR_LAYOUT_SOLVED})
+    for (int i = 0; i < 40; i++) {
+      EXPECT_TRUE(nr_traffic_decode_wanted(0, 0x10b, C, ls, false, S + i, false)) << ls << " " << i;
+      EXPECT_TRUE(nr_traffic_decode_wanted(1, 0x10b, C, ls, true, S + i, false)) << ls << " " << i;
+    }
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+  EXPECT_FALSE(nr_traffic_decode_wanted(0, 0x10c, C, NR_LAYOUT_FIXED, false, S, false)); /* the traffic policy is unchanged outside the sensing mode */
 }

@@ -264,3 +264,28 @@ TEST(PassiveMetrics, AdmitClassCountersOmittedUntilAttempted)
     EXPECT_NE(s.find(k), std::string::npos) << k;
   EXPECT_EQ(s.find("admit_dmrs_id"), std::string::npos);
 }
+
+TEST(PassiveMetrics, SenseSchedKeysOnlyInSensingMode)
+{
+  nr_passive_metrics_t base = {};
+  base.acq_state = "TRACKING";
+  base.ss_binding = -1;
+  char buf0[8192], buf1[8192];
+  ASSERT_GT(nr_passive_metrics_to_json(&base, buf0, sizeof(buf0)), 0);
+  /* values set but has_sense_sched = 0 (legacy / traffic): byte-identical to the unset line */
+  nr_passive_metrics_t m = base;
+  m.su_units_enabled = 3; m.su_violations = 9; m.ss_decisions = 4; m.ss_binding = 0;
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf1, sizeof(buf1)), 0);
+  EXPECT_STREQ(buf0, buf1);
+  EXPECT_EQ(std::string(buf0).find("sense_units_enabled"), std::string::npos);
+  m.has_sense_sched = 1;
+  m.su_disabled_skips = 11; m.su_wb_valid = 5; m.su_wb_valid_prbs = 700; m.su_gap_max_ms = 1200;
+  m.ss_enables = 2; m.ss_disables = 1; m.ss_bad_cap = 6; m.ss_deferrals = 1;
+  ASSERT_GT(nr_passive_metrics_to_json(&m, buf1, sizeof(buf1)), 0);
+  const std::string s(buf1);
+  for (const char *k : {"\"sense_units_enabled\":3", "\"sense_violations\":9", "\"sense_disabled_skips\":11", "\"sense_wb_valid\":5", "\"sense_wb_valid_prbs\":700",
+                        "\"sense_gap_max_ms\":1200", "\"sched_binding\":\"pool\"", "\"sched_decisions\":4", "\"sched_enables\":2", "\"sched_disables\":1",
+                        "\"sched_bad_cap\":6", "\"sched_deferrals\":1"})
+    EXPECT_NE(s.find(k), std::string::npos) << k;
+  EXPECT_EQ(s.back(), '}');
+}

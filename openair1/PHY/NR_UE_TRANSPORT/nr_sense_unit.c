@@ -36,6 +36,7 @@ typedef struct {
   _Atomic uint64_t row_last[NR_UNIT_ROWS];
   _Atomic uint32_t gen[NR_UNIT_ROWS];  /* bumped when the row is evicted (I-5) */
   _Atomic uint64_t unattributed_ns;    /* cost-only calls of an RNTI without a row (I-1) */
+  _Atomic uint64_t viol_total, skip_total, wb_valid, wb_valid_prbs, last_wb_ns, gap_max_ns; /* cell totals for the metrics (S7) */
   atomic_flag create_lock;
   unit_t u[NR_UNIT_ROWS][NR_UNIT_SRC_N];
 } unit_tab_t;
@@ -101,7 +102,10 @@ static int row_get(unit_tab_t *T, uint16_t rnti, bool create, uint64_t t_ns, uin
     }
     atomic_store_explicit(&T->key[v], 0, memory_order_release); /* readers stop finding the old RNTI before its history is cleared */
     atomic_fetch_add_explicit(&T->gen[v], 1, memory_order_acq_rel); /* writers that located the old RNTI drop their update */
-    for (int s = 0; s < NR_UNIT_SRC_N; s++) reset_unit(&T->u[v][s]);
+    for (int s = 0; s < NR_UNIT_SRC_N; s++) {
+      reset_unit(&T->u[v][s]);
+      atomic_store_explicit(&T->u[v][s].disabled, 1, memory_order_relaxed); /* a new RNTI starts disabled: the scheduler's cold-unit path enables it */
+    }
     atomic_store_explicit(&T->row_last[v], t_ns, memory_order_relaxed);
     if (g0) *g0 = atomic_load_explicit(&T->gen[v], memory_order_relaxed);
     atomic_store_explicit(&T->key[v], (uint32_t)rnti + 1u, memory_order_release);
@@ -251,6 +255,16 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
   if (s == NR_UNIT_SRS) /* SRS has no daBg/queue job to count the message: the exported record is the message */
     bucket_add(u, t_ns, 0, 0, 1, wideband_capable(valid_prbs) ? 1 : 0);
   if (wideband_capable(valid_prbs)) {
+    atomic_fetch_add_explicit(&T->wb_valid, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&T->wb_valid_prbs, valid_prbs, memory_order_relaxed);
+    {
+      uint64_t o = atomic_load_explicit(&T->last_wb_ns, memory_order_relaxed);
+      while (o < t_ns && !atomic_compare_exchange_weak_explicit(&T->last_wb_ns, &o, t_ns, memory_order_relaxed, memory_order_relaxed)) {}
+      if (o && t_ns > o) { /* o = the previous record (the CAS reloads it on failure; on success it is what we replaced) */
+        uint64_t g = atomic_load_explicit(&T->gap_max_ns, memory_order_relaxed);
+        while (g < t_ns - o && !atomic_compare_exchange_weak_explicit(&T->gap_max_ns, &g, t_ns - o, memory_order_relaxed, memory_order_relaxed)) {}
+      }
+    }
     uint64_t o = atomic_load_explicit(&u->last_valid_wb_ns, memory_order_relaxed);
     while (o < t_ns && !atomic_compare_exchange_weak_explicit(&u->last_valid_wb_ns, &o, t_ns, memory_order_relaxed, memory_order_relaxed)) {}
   }
@@ -265,8 +279,11 @@ void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti)
   unit_t *u = unit_get(T, s, rnti, false, t, &r); /* a drop never opens a row */
   if (!u)
     return;
+  if (atomic_load_explicit(&u->disabled, memory_order_relaxed))
+    return; /* a drop in a disabled unit is intentional shedding, not a violation */
   touch(T, r, u, t);
   atomic_fetch_add_explicit(&u->viol, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&T->viol_total, 1, memory_order_relaxed);
 }
 
 void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs, uint64_t t_ns)
@@ -279,6 +296,7 @@ void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs
     return;
   touch(T, r, u, t_ns);
   atomic_fetch_add_explicit(&u->skips, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&T->skip_total, 1, memory_order_relaxed);
   /* a gated message is still a message of the unit: its (wideband) rate is what lets the scheduler value the unit while it is off */
   if (est_usable_prbs)
     atomic_store_explicit(&u->est_last, est_usable_prbs, memory_order_relaxed);
@@ -301,6 +319,46 @@ void nr_sense_unit_set_enabled(int cell, uint16_t rnti, nr_unit_src_t s, bool en
   atomic_store_explicit(&u->disabled, enabled ? 0 : 1, memory_order_relaxed);
   uint64_t z = 0;
   atomic_compare_exchange_strong_explicit(&u->first_ns, &z, t, memory_order_relaxed, memory_order_relaxed);
+}
+
+bool nr_sense_unit_enabled(nr_unit_src_t s, uint16_t rnti)
+{
+  if ((unsigned)s >= NR_UNIT_SRC_N || nr_isac_mode() != NR_ISAC_MODE_SENSING)
+    return true;
+  unit_tab_t *T = tab_of(nr_cell_idx());
+  const int r = row_find(T, unit_rnti(s, rnti), NULL);
+  return r >= 0 && !atomic_load_explicit(&T->u[r][s].disabled, memory_order_relaxed);
+}
+
+bool nr_sense_unit_gate(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs)
+{
+  if (nr_sense_unit_enabled(s, rnti))
+    return true;
+  if (s == NR_UNIT_SRS && !est_usable_prbs)
+    est_usable_prbs = (uint16_t)nr_isac_sense_min_prb();
+  nr_sense_unit_skip(s, rnti, est_usable_prbs, now_ns());
+  return false;
+}
+
+void nr_sense_unit_cell_stats(int cell, nr_sense_unit_cell_stats_t *out)
+{
+  memset(out, 0, sizeof *out);
+  if (cell < 0 || cell >= NR_CELL_MAX)
+    return;
+  unit_tab_t *T = tab_of(cell);
+  out->violations = atomic_load_explicit(&T->viol_total, memory_order_relaxed);
+  out->skips = atomic_load_explicit(&T->skip_total, memory_order_relaxed);
+  out->wb_valid = atomic_load_explicit(&T->wb_valid, memory_order_relaxed);
+  out->wb_valid_prbs = atomic_load_explicit(&T->wb_valid_prbs, memory_order_relaxed);
+  out->gap_max_ns = atomic_load_explicit(&T->gap_max_ns, memory_order_relaxed);
+  for (int r = 0; r < NR_UNIT_ROWS; r++) {
+    const uint32_t k = atomic_load_explicit(&T->key[r], memory_order_acquire);
+    if (k == 0 || k == 0xFFFFFFFFu)
+      continue;
+    for (int s = 0; s < NR_UNIT_SRC_N; s++)
+      if (atomic_load_explicit(&T->u[r][s].live, memory_order_relaxed) && !atomic_load_explicit(&T->u[r][s].disabled, memory_order_relaxed))
+        out->units_enabled++;
+  }
 }
 
 uint64_t nr_sense_unit_unattributed_ns(int cell)
@@ -417,4 +475,10 @@ void nr_sense_unit_reset(int cell)
     for (int s = 0; s < NR_UNIT_SRC_N; s++) reset_unit(&T->u[r][s]);
   }
   atomic_store_explicit(&T->unattributed_ns, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->viol_total, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->skip_total, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->wb_valid, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->wb_valid_prbs, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->last_wb_ns, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->gap_max_ns, 0, memory_order_relaxed);
 }

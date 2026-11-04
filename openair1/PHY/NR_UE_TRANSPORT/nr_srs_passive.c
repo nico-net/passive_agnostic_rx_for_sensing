@@ -346,7 +346,7 @@ static void *srs_worker(void *arg)
     atomic_fetch_add(&sr.elapsed_us,elapsed_ns/1000);
     if(t_start) { /* per-unit cost: the thread-CPU pair above is reused; the blind search has no RNTI: unit rnti 0 */
       const uint64_t t_end=nr_sense_now_ns(),t_cap=job->meta.t_mono_ns;
-      nr_sense_unit_job(NR_UNIT_SRS,0,elapsed_ns,t_cap && t_start>t_cap?t_start-t_cap:0,t_cap && t_end>t_cap && t_end-t_cap>NR_UNIT_LATE_NS,0,t_end);
+      nr_sense_unit_job(NR_UNIT_SRS,0,elapsed_ns,t_cap && t_start>t_cap?t_start-t_cap:0,t_cap && t_end>t_cap && t_end-t_cap>NR_UNIT_LATE_NS,(uint16_t)nr_isac_sense_min_prb(),t_end); /* a processed capture is one message of sense_min_prb PRBs (symmetric with the gate skip) */
     }
     atomic_store(&sr.pregate_skip,sr.idle.pregate_skip);
     atomic_store(&sr.backoff_skip,sr.idle.backoff_skip);
@@ -440,8 +440,11 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
     for(int l=8;l<14;l++) if(sl->max_num_of_symbol_per_slot_list[l].slot_config==1) mask|=1u<<l;
   }
   if(!mask) {pthread_mutex_unlock(&srs_lock);return;}
+  /* SENSING mode unit gate (spec 5.6): the per-cell SRS unit disabled = no capture, no worker job; the UL slot counts as a disabled skip of one sense_min_prb message. A job already
+   * queued is finished by the worker (never re-gated). Lock-free, taken under srs_lock for microseconds only. */
+  if(!nr_sense_unit_gate(NR_UNIT_SRS,0,0)) {pthread_mutex_unlock(&srs_lock);return;}
   /* Only slots that carry UL symbols are eligible, so only they can be lost to a full queue (before: the full-queue test ran first and counted every slot of the frame). */
-  if(sr.count==SRS_DEPTH) {atomic_fetch_add(&sr.dropped,1);pthread_mutex_unlock(&srs_lock);return;}
+  if(sr.count==SRS_DEPTH) {atomic_fetch_add(&sr.dropped,1);nr_sense_unit_violation(NR_UNIT_SRS,0);pthread_mutex_unlock(&srs_lock);return;}
   /* The slot at `head` belongs to this thread until it is published (the worker only reads [tail, tail+count)); the 470 KB copy must not hold the lock: the event posters
    * (PDCCH / PUSCH monitors) use a try-lock and every post that met the held lock was counted as a dropped job. */
   srs_job_t *job=&sr.jobs[sr.head];job->mask=mask;

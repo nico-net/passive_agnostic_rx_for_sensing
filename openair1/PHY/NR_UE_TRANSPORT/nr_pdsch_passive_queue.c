@@ -624,6 +624,12 @@ NR_CELL_STATIC(_Atomic uint64_t, g_dropped_narrow);
 #define g_dropped_narrow NR_CELL_REF(g_dropped_narrow) /* budget: narrow grant refused while the ring was nearly full */
 NR_CELL_STATIC(_Atomic uint64_t, g_dropped_stale);
 #define g_dropped_stale NR_CELL_REF(g_dropped_stale)
+/* SENSING mode: a full-decode job dropped from the queue is a message of its RNTI's PDSCH_DATA unit; counted as a violation only if that unit is enabled (layout probes are not messages). */
+static inline void pdsch_unit_drop(const nr_pdsch_passive_job_t *j)
+{
+  if (!j->layout_probe)
+    nr_sense_unit_violation(NR_UNIT_PDSCH_DATA, j->rnti);
+}
 NR_CELL_STATIC(_Atomic uint64_t, g_stale_after_decode);
 #define g_stale_after_decode NR_CELL_REF(g_stale_after_decode) /* K33 */
 void nr_pdsch_passive_note_stale_after_decode(void)
@@ -1598,6 +1604,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       const int count = owned ? n_more + 1 : 1;
       atomic_fetch_add_explicit(&g_dropped_stale, count, memory_order_relaxed);
       if (owned) atomic_fetch_add(&g_drop_reason[prod < job.absolute_slot ? NR_PDSCH_DROP_FUTURE : NR_PDSCH_DROP_QUEUE], count);
+      pdsch_unit_drop(&job);
+      for (int k = 0; owned && k < n_more; k++) pdsch_unit_drop(&more[k]);
       release_solver(&job);
       for (int k = 0; owned && k < n_more; k++) release_solver(&more[k]);
       continue;
@@ -1621,6 +1629,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                             job.absolute_slot, slots_per_frame, queue_producer_slot, NULL)) {
         atomic_fetch_add(&g_dropped_stale, n_more + 1);
         atomic_fetch_add(&g_drop_reason[NR_PDSCH_DROP_COPY], n_more + 1);
+        pdsch_unit_drop(&job);
+        for (int k = 0; k < n_more; k++) pdsch_unit_drop(&more[k]);
         release_solver(&job);
         for (int k = 0; k < n_more; k++) release_solver(&more[k]);
         continue;
@@ -2957,6 +2967,7 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     while (victim < g_count && g_ring[(g_tail + victim) % g_depth].rnti != top_rnti) victim++;
     if (victim >= g_count) victim = 0;
     REAL_ADD(g_ring[(g_tail + victim) % g_depth], -1);
+    pdsch_unit_drop(&g_ring[(g_tail + victim) % g_depth]);
     release_solver(&g_ring[(g_tail + victim) % g_depth]);
     for (int i = victim; i > 0; i--) { /* shift the entries older than the victim up by one */
       g_ring[(g_tail + i) % g_depth] = g_ring[(g_tail + i - 1) % g_depth];

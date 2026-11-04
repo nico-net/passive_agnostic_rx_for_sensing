@@ -37,6 +37,7 @@ extern uint64_t *nr_ss_gpu_ptr(void);
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h"
+#include "nr_sense_unit.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci01_fdra_feedback
 
 #include <pthread.h>
@@ -351,7 +352,10 @@ static void *nr_pusch_passive_queue_thread(void *arg)
         || (held >= 0 && (!nr_pusch_queue_snapshot_fresh(prod, job.absolute_slot, slots_per_frame)
                           || ulq_wall_stale(job.absolute_slot, slots_per_frame)))) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
-      if (pick == 0) atomic_fetch_add_explicit(&g_stale_real, 1, memory_order_relaxed);
+      if (pick == 0) {
+        atomic_fetch_add_explicit(&g_stale_real, 1, memory_order_relaxed);
+        nr_sense_unit_violation(NR_UNIT_PUSCH_DMRS, job.grant.rnti); /* a stale real grant is a dropped message of its PUSCH_DMRS unit */
+      }
       continue;
     }
 
@@ -853,6 +857,7 @@ bool nr_pusch_passive_queue_enqueue(const nr_pusch_passive_job_t *job)
   /* DROP-OLDEST: the evicted entry is closest to IQ overwrite. A probe evicts only probes. */
   if(evicted>=0) {
     atomic_fetch_add_explicit(probe ? &g_full_probe : &g_dropped_full, 1, memory_order_relaxed);
+    if (!probe) nr_sense_unit_violation(NR_UNIT_PUSCH_DMRS, ring[evicted].grant.rnti); /* a real grant of an enabled PUSCH_DMRS unit was evicted (drop-oldest) */
     if (ring[evicted].snap_idx >= 0) g_pool_refs[ring[evicted].snap_idx]--;
   }
   ring[index] = *job;

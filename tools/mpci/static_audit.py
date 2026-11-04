@@ -61,6 +61,7 @@ GLOBS = [
     "openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c",       # CELLFEAT: sense-API session (per cell)
     "openair1/PHY/NR_UE_TRANSPORT/nr_sense_records.c",   # CELLFEAT: record formatters / session identity
     "openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c",      # CELLFEAT: per-unit cost accounting (per-cell table)
+    "openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c",  # CELLFEAT: sensing-mode scheduler thread (one per process)
     "openair1/PHY/NR_UE_ISAC/nr_isac.cc",                # CELLFEAT: sensing adapter (per-cell session, process configuration)
     "openair1/PHY/NR_UE_ISAC/nr_isac_stub.c",
     "common/utils/nr_dashboard.c",                       # CELLFEAT: dashboard launcher (process service)
@@ -667,6 +668,7 @@ OWNER_RULES = [
     ("*/nr_sense_api.c", "CELLFEAT"),
     ("*/nr_sense_records.c", "CELLFEAT"),
     ("*/nr_sense_unit.c", "CELLFEAT"),
+    ("*/nr_sense_sched_rt.c", "CELLFEAT"),
     ("openair1/PHY/NR_UE_ISAC/*", "CELLFEAT"),
     ("common/utils/nr_dashboard.c", "CELLFEAT"),
     ("*/nr_csirs_blind_rt.c", "DBG2"),
