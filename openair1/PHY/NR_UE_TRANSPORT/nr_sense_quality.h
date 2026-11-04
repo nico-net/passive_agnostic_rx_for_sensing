@@ -13,8 +13,8 @@ extern "C" {
  * there is no absolute agreement threshold. */
 #define NR_SENSE_PRB_RECON_ALPHA 1e-3
 /* Floor on the expected symbol DISagreement (expected agreement <= 1 - 1e-3): a general implementation-loss bound (transmitter EVM, phase noise,
- * ADC quantisation and interference put an SNR ceiling of ~30 dB on any receiver; 1e-3 is the QPSK..16QAM symbol error rate at that ceiling order
- * of magnitude), NOT tuned on any cell. Without it a high-SNR PRB with one real mismatch would fail. */
+ * ADC quantisation and interference put an effective SNR ceiling of ~30 dB on any receiver; 1e-3 is the order of the symbol error rate that
+ * ceiling gives for the densest constellations (~256QAM at 30 dB; QPSK and 16QAM are far below it, so there the floor is a conservative bound), NOT tuned on any cell. Without it a high-SNR PRB with one real mismatch would fail. */
 #define NR_SENSE_RECON_IMPL_LOSS 1e-3
 typedef struct {
   uint16_t allocated_prbs, estimated_usable_prbs, valid_cfr_prbs;

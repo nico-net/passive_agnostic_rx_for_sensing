@@ -382,16 +382,75 @@ TEST(SenseQualityRecon, ApplyReconAndsTheMaskAndRecounts)
   EXPECT_EQ(q.valid_cfr_prbs, 0);
 }
 
+/* false rejects of good PRBs (perfect model) at the production combined-SNR convention, delay 300 ns + CFO ramp 0.1 rad/symbol */
+static int false_rejects(int qm, float snr, int nseed, unsigned base, int *prbs)
+{
+  int fails = 0; *prbs = 0;
+  for (int s = 1; s <= nseed; s++) {
+    Da d = make_da(qm, 10, snr, {}, 300e-9, 30e3, 0.1, base + s);
+    run_da(d);
+    fails += d.nprb - n_ok(d); *prbs += d.nprb;
+  }
+  return fails;
+}
 TEST(SenseReconConf, FourRxCombinedSnrFalseRejectRateIsAlphaConsistent)
 {
-  int fails = 0, prbs = 0;
-  for (unsigned seed = 1; seed <= 100; seed++) {
-    Da d = make_da(2, 10, 0.f, {}, 300e-9, 30e3, 0.1, 5000 + seed);   /* QPSK, combined 0 dB, delay + CFO ramp */
-    run_da(d);
-    fails += d.nprb - n_ok(d); prbs += d.nprb;
+  struct C { int qm; float snr; unsigned base; } cases[] = {{2, 0.f, 5000}, {4, 8.f, 6000}, {6, 12.f, 7000}};
+  for (auto c : cases) {
+    int prbs, fails = false_rejects(c.qm, c.snr, 100, c.base, &prbs);
+    printf("S3_RECON 4RX combined-SNR qm=%d %.0f dB false rejects: %d/%d PRBs (%.2f %%)\n", c.qm, c.snr, fails, prbs, 100.0 * fails / prbs);
+    EXPECT_LE(fails, 2) << "qm " << c.qm << ": " << fails << "/" << prbs;   /* limit 2/1000 */
   }
-  printf("S3_RECON 4RX combined-SNR QPSK 0 dB false rejects: %d/%d PRBs (%.2f %%)\n", fails, prbs, 100.0 * fails / prbs);
-  EXPECT_LE(fails, 2) << fails << "/" << prbs;
+}
+TEST(SenseReconConf, ModelledAgreementMatchesMeasuredForQam)
+{
+  /* M1: the estimate-error cross term uses the constellation Es, so the modelled mean agreement tracks the measured one for 16/64QAM too */
+  struct C { int qm; float snr; } cases[] = {{4, 12.f}, {4, 14.f}, {6, 12.f}, {6, 16.f}};   /* lower 16QAM SNRs: the neglected gain bias of the equaliser, header, grows (0.017 at 8 dB) */
+  for (auto c : cases) {
+    double meas = 0, mod = 0; int cnt = 0;
+    for (unsigned seed = 1; seed <= 60; seed++) {
+      Da d = make_da(c.qm, 10, c.snr, {}, 300e-9, 30e3, 0.1, 8000 + seed);
+      float m = NAN;
+      const float a = nr_da_recon_x(d.h.data(), d.n, d.n_ant, d.k.data(), d.l.data(), d.n, d.x_rec.data(), d.qm, c.snr, d.ok, &d.scored, &m);
+      meas += a; mod += m; cnt++;
+    }
+    meas /= cnt; mod /= cnt;
+    printf("S3_RECON agreement qm=%d %.0f dB: measured %.4f modelled %.4f\n", c.qm, c.snr, meas, mod);
+    EXPECT_NEAR(meas, mod, 0.01) << "qm " << c.qm << " snr " << c.snr;
+  }
+}
+/* keep PRB `p` of d only where pred(symbol index 0..2, subcarrier in PRB) holds */
+template <class F> static void thin_prb(Da &d, int p, F pred)
+{
+  std::vector<int> keep;
+  for (int i = 0; i < d.n; i++) if (int(d.k[i] / 12) != p || pred(int(d.l[i]) - 5, int(d.k[i] % 12))) keep.push_back(i);
+  Da e = d; e.n = keep.size();
+  e.k.clear(); e.l.clear(); e.x_rec.clear(); e.h.assign(2 * d.n_ant * e.n, 0.f);
+  for (int j = 0; j < e.n; j++) {
+    const int i = keep[j];
+    e.k.push_back(d.k[i]); e.l.push_back(d.l[i]); e.x_rec.push_back(d.x_rec[2 * i]); e.x_rec.push_back(d.x_rec[2 * i + 1]);
+    for (int a = 0; a < d.n_ant; a++) { e.h[2 * (a * e.n + j)] = d.h[2 * (a * d.n + i)]; e.h[2 * (a * e.n + j) + 1] = d.h[2 * (a * d.n + i) + 1]; }
+  }
+  d = e;
+}
+TEST(SenseReconConf, PrbWithTwelveScoredResCanBeRejected)
+{
+  /* M2: deff = 1 + f W (header) is below 2 at moderate SNR, so a PRB with only 12 scored REs and a grossly wrong reconstruction (independent X)
+   * can fail; the old constant halving (deff 2) needed 2x the evidence. PRB 9 keeps the whole middle symbol and subcarriers 0 and 11 of the
+   * first/last symbol (the time pair of the two edge REs): exactly 12 scored. QPSK, combined SNR 6 dB / 9 dB; 300 PRBs each. */
+  auto thin = [](Da &d) { thin_prb(d, 9, [](int sy, int kk) { return sy == 1 || kk == 0 || kk == 11; }); };
+  const int N = 300;
+  int rej6 = 0, rej9 = 0, bad_good = 0;
+  for (int s = 1; s <= N; s++) {
+    Da w6 = make_da(2, 10, 6.f, {9}, 0, 0, 0, 9100 + s); thin(w6); run_da(w6); rej6 += !okbit(w6, 9);
+    if (s == 1) EXPECT_EQ(w6.scored - 9 * 32, 12u);
+    Da w9 = make_da(2, 10, 9.f, {9}, 0, 0, 0, 9500 + s); thin(w9); run_da(w9); rej9 += !okbit(w9, 9);
+    Da g = make_da(2, 10, 6.f, {}, 0, 0, 0, 9900 + s); thin(g); run_da(g); bad_good += !okbit(g, 9);
+  }
+  printf("S3_RECON 12-RE PRB, wrong model rejected: 6 dB %d/%d, 9 dB %d/%d; good PRB falsely rejected (6 dB) %d/%d\n", rej6, N, rej9, N, bad_good, N);
+  EXPECT_GE(rej6, 165);   /* 55 %: derived deff gives about 61 %, the constant deff 2 about 42 % */
+  EXPECT_GE(rej9, 285);   /* 95 % */
+  EXPECT_LE(bad_good, 2); /* alpha 1e-3 */
 }
 static int d_mid_offset(int nprb) { return 12 * nprb; }   /* RE index where the middle symbol starts */
 TEST(SenseReconConf, OneMismatchAtHighSnrDoesNotFailThePrb)
