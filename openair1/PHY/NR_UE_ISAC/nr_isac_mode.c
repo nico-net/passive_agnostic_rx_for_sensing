@@ -33,7 +33,7 @@ bool nr_isac_mode_resolve(const char *mode_str, unsigned explicit_sources, int e
   if (strcmp(mode_str, "sensing") == 0) {
     out->mode = NR_ISAC_MODE_SENSING;
     const unsigned allowed = SENSING_SET | SENSING_PRACH;
-    out->sources = explicit_sources ? explicit_sources & allowed : SENSING_SET;
+    out->sources = explicit_sources & allowed ? explicit_sources & allowed : SENSING_SET; /* nothing valid left (0 would read as "unset"): the default set, flagged narrowed below */
     out->pdsch_decode = explicit_pdsch_decode < 0 || explicit_pdsch_decode > 2 ? 2 : explicit_pdsch_decode;
     out->pusch_decode = explicit_pusch_decode < 0 || explicit_pusch_decode > 1 ? 1 : explicit_pusch_decode;
     out->narrowed = (explicit_sources & ~allowed) != 0 || explicit_pdsch_decode > 2 || explicit_pusch_decode > 1;

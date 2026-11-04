@@ -2881,7 +2881,7 @@ static void *janon_worker(void *arg)
       janon_item_t *b = malloc(sizeof *b);
       if (b) {
         *b = it;
-        nr_admit_skipq_push(NR_ADMIT_JANON, &g_janon_skipq, b, it.enq_ns + JANON_FRESH_NS, free);
+        nr_admit_skipq_push(NR_ADMIT_JANON, &g_janon_skipq, b, (it.enq_ns ? it.enq_ns : nr_admit_now_ns()) + JANON_FRESH_NS, free); /* enq_ns 0: stamped while admission was off */
       }
       continue;
     }
@@ -11009,6 +11009,7 @@ __attribute__((constructor)) static void isac_segv_bt_install(void)
 
 void nr_pdcch_blind_monitor_rt_final_stats(void)
 {
+  nr_admit_skipq_drain(NR_ADMIT_JANON, &g_janon_skipq, free); /* this cell's backlog (the caller is bound to it) */
   LOG_A(PHY, "SENSING: JOINT_ANON_ASYNC FINAL submitted=%llu done=%llu dropped=%llu hits=%llu\n", (unsigned long long)atomic_load(&g_janon_sub),
         (unsigned long long)atomic_load(&g_janon_done), (unsigned long long)atomic_load(&g_janon_drop), (unsigned long long)atomic_load(&g_janon_found));
   if (nr_admit_on()) { char as[640]; nr_admit_stats(as, sizeof as); LOG_A(PHY, "SENSING: %s (final)\n", as); }

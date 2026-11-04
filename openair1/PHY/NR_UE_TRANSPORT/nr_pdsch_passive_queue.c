@@ -1280,6 +1280,7 @@ static void cdmrs_obs_free(void *p)
   free(o->row);
   free(o);
 }
+void nr_pdsch_passive_queue_drain_skipq(void) { nr_admit_skipq_drain(NR_ADMIT_DMRS_ID, &g_cdmrs_skipq, cdmrs_obs_free); } /* shutdown, bound cell */
 static void cdmrs_run(void *arg)
 {
   cdmrs_obs_t *o = arg;
@@ -1295,7 +1296,9 @@ static void cdmrs_run(void *arg)
   /* replay one waiting observation (only while no tier is shed, checked by the pop), on this worker, behind the new one */
   cdmrs_obs_t *b = nr_admit_skipq_pop(NR_ADMIT_DMRS_ID, &g_cdmrs_skipq, nr_admit_now_ns(), cdmrs_obs_free);
   if (b) {
+    const uint64_t t_rep = nr_admit_now_ns();
     coreset_dmrs_observe(b, b->row, 1);
+    nr_admit_done(NR_ADMIT_DMRS_ID, nr_admit_now_ns() - t_rep);
     cdmrs_obs_free(b);
   }
   const uint64_t n = __atomic_load_n(&g_cdmrs_q.done, __ATOMIC_RELAXED) + 1;

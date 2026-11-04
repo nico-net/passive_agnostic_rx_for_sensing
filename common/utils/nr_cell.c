@@ -10,6 +10,7 @@ _Static_assert(NR_CELL_MAX == NR_POOL_MAX_CELLS, "NR_CELL_MAX must equal the cor
 
 __thread int nr_cell_tls_idx_ = 0;
 int nr_cell_count_ = 1;
+int nr_cell_idx_fn(void) { return nr_cell_tls_idx_; } /* out-of-line nr_cell_idx() for weak users (nr_admit.c) */
 static volatile int g_fence;
 
 static void nr_cell_fatal(const char *fmt, int v)

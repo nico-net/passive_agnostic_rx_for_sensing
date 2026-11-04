@@ -4180,5 +4180,5 @@ openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	136	g_retx_mu	file_static	pthre
 openair1/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c	226	nr_passive_metrics_to_json::an	func_static	const char *const[2]	CONST	A3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	2822	g_janon_skipq	file_static	nr_admit_skipq_t [converted]	PER_CELL	A4	converted: NR_CELL_STATIC; S1 skip backlog of the class worker of one cell
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1275	g_cdmrs_skipq	file_static	nr_admit_skipq_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC; S1 skip backlog of the class worker of one cell
-openair1/PHY/TOOLS/nr_admit.c	8	g_cls	file_static	struct {}[NR_ADMIT_N]	PROCESS	B3	S1 per-class admission counters (atomics, like the pool shed counters)
-openair1/PHY/TOOLS/nr_admit.c	113	nr_admit_stats::nm	func_static	const char *const[NR_ADMIT_N]	CONST	B3	auto
+openair1/PHY/TOOLS/nr_admit.c	11	g_cls	file_static	struct {}[ADMIT_CELLS][NR_ADMIT_N]	PER_CELL	B3	S1 per-class admission counters, one row per cell (cur_cell(), atomics)
+openair1/PHY/TOOLS/nr_admit.c	133	nr_admit_stats::nm	func_static	const char *const[NR_ADMIT_N]	CONST	B3	auto
