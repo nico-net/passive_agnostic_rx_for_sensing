@@ -2752,6 +2752,21 @@ int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_p
     r->px_c[i].det = 0;
     for (int j = 0; j <= i; j++) r->px_a[i][j] = r->px_a[j][i] = 0;   /* tracked from the next grant on: no counts yet, so it cannot lead */
   }
+  int fb = 0;
+  for (int i = 1; i < r->px_n; i++) if (r->px_c[i].det > r->px_c[fb].det) fb = i;
+  if (r->px_n && r->px_c[fb].det > 0 && (r->px_c[fb].det % 25) == 0) {   /* diagnostic: the sign test's state (tracked hypotheses, detections, the front one's worst rival) */
+    const int b = fb;
+    int wa = -1, wb = -1;
+    double wp = -1;
+    for (int j = 0; r->px_n && j < r->px_n; j++) {
+      if (j == b) continue;
+      const uint64_t A = r->px_a[b][j], B = r->px_a[j][b];
+      const double pv = A > B ? nbs_binom_sf(A, A + B, 0.5) : 1.0;
+      if (pv > wp) { wp = pv; wa = (int)A; wb = (int)B; }
+    }
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x phys sign test: tracked=%d front lid=%d add_pos=%u det=%u worst rival A=%d B=%d p=%.2e\n", rnti, r->px_n,
+          r->px_n ? r->px_c[b].lid : -1, r->px_n ? r->px_c[b].add_pos : 0, r->px_n ? r->px_c[b].det : 0, wa, wb, wp);
+  }
   int got = 0;
   for (int guard = 0; guard < PHYS_K; guard++) {
     const int lead = px_leader(r);

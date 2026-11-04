@@ -4897,20 +4897,37 @@ static bool e3_grid(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, int l0, u
     }
     t->done |= (uint16_t)(1u << l);
   }
-  if (!t->noise_ok) {   /* noise per RE and antenna: the lowest quartile of the PRB mean energies of the first DM-RS symbol x 1.15 (never under-estimated: a loaded slot only raises it) */
-    float e[NR_DL_MAX_PRB];
+  if (!t->noise_ok) {
+    /* Noise per RE and antenna, never under-estimated and not fooled by a loaded slot: the residual of the first DM-RS symbol's group-0 pilots of each PRB around their
+     * mean after removing the cell-identity DM-RS sequence (z_i = y_i conj(p_i), 6 per PRB and antenna, flat channel inside the PRB: noise ~ sum |z_i - mean|^2 / 5).
+     * A PRB that carries this DM-RS gives the noise, a PRB that does not gives at least the noise (its energy), so the lower quartile over the carrier is the noise (x 1.2 for
+     * the quartile's own bias) wherever some PRB carries the DM-RS or is idle. Another identity everywhere only raises it (conservative). */
     const int np = nsc / 12;
+    uint8_t *gold = malloc((size_t)12 * np);
+    float *e = malloc(sizeof(float) * (size_t)np);
+    if (!gold || !e) { free(gold); free(e); return false; }
+    nr_dmrs_scan_prb_gold(proc->nr_slot_rx, l0, sn, fp->Nid_cell, 0, 12 * np, gold);
     for (int p = 0; p < np; p++) {
-      double sum = 0;
+      double acc = 0;
       for (int a = 0; a < nant; a++) {
         const c16_t *y = &t->g[((size_t)a * sn + l0) * nsc + 12 * p];
-        for (int k = 0; k < 12; k++) sum += (double)y[k].r * y[k].r + (double)y[k].i * y[k].i;
+        double zr[6], zi[6], mr = 0, mi = 0;
+        for (int i = 0; i < 6; i++) {
+          const int m = 6 * p + i;
+          const double pr = (1 - 2 * gold[2 * m]) * 0.70710678, pi = (1 - 2 * gold[2 * m + 1]) * 0.70710678;
+          const double yr = y[2 * i].r, yi = y[2 * i].i;
+          zr[i] = yr * pr + yi * pi; zi[i] = yi * pr - yr * pi;   /* y conj(p) */
+          mr += zr[i]; mi += zi[i];
+        }
+        mr /= 6; mi /= 6;
+        for (int i = 0; i < 6; i++) acc += (zr[i] - mr) * (zr[i] - mr) + (zi[i] - mi) * (zi[i] - mi);
       }
-      e[p] = (float)(sum / (12.0 * nant));
+      e[p] = (float)(acc / (5.0 * nant));
     }
     qsort(e, (size_t)np, sizeof e[0], e3_cmp_f);
-    t->noise = e[np / 4] * 1.15f;
+    t->noise = e[np / 4] * 1.2f;
     t->noise_ok = true;
+    free(gold); free(e);
   }
   ob->rxF = t->ptr; ob->n_ant = nant; ob->n_sc = nsc; ob->symbols = sn; ob->noise_var = t->noise; ob->slot = proc->nr_slot_rx;
   return true;
@@ -5077,7 +5094,8 @@ static void e3_unsolved(const e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, 
   int *rg = malloc(sizeof(int) * E3_READINGS);
   if (!h || !feet || !rg) { free(h); free(feet); free(rg); return; }
   int nh = 0, nf = 0;
-  float frank[E3_READINGS];
+  float frank[E3_READINGS], fcoh[E3_READINGS];
+  int fns[E3_READINGS], fnc[E3_READINGS];
   bool fsig[E3_READINGS];
   int order[128], no = 0;
   for (int k = 0; k < in->nrd && no < 128; k++) if (in->rd[k].num_rb > 0 && in->rd[k].n_ids > 0) order[no++] = k;
@@ -5091,6 +5109,7 @@ static void e3_unsolved(const e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, 
     if (!e3_foot(in->cfg, fp, &in->rp[k], &feet[nf])) continue;
     nr_dl_score_t s;
     e3_score(&feet[nf], (uint32_t)fp->Nid_cell, am[0], 0, &ob, &s, &frank[nf], &fsig[nf]);
+    fcoh[nf] = s.coh; fns[nf] = s.n_signif; fnc[nf] = s.n_cells;
     nhyp++;
     rg[nf++] = k;
   }
@@ -5115,6 +5134,19 @@ static void e3_unsolved(const e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, 
       for (int k = 0; k < in->nrd && nh < E3_HYPS; k++)
         if (e3_same_foot(&in->rp[kb], &in->rp[k]) && in->rd[k].n_ids > 0) h[nh++] = (nr_pdsch_phys_hyp_t){in->rd[k].ids, in->rd[k].n_ids, -1, (uint8_t)a, rank, sig};
     }
+  }
+  { /* diagnostic: the first scored grants of the cell, then 1 in 200 (what the scorer sees: footprints, significant cells, noise) */
+    NR_CELL_STATIC(_Atomic uint32_t, s_e3d);
+#define s_e3d NR_CELL_REF(s_e3d)
+    const uint32_t q = atomic_fetch_add(&s_e3d, 1);
+    if (q < 8 || q % 200 == 0) {
+      int bi = 0;
+      for (int z = 1; z < nf; z++) if (frank[z] > frank[bi]) bi = z;
+      LOG_A(PHY, "SENSING: E3 rnti=0x%04x abs=%ld nrd=%d footprints=%d hyps=%d best: n_crb=%d type=%d cells=%d signif=%d coh=%.2f rank=%.2f sig=%d noise=%.1f\n", in->rnti,
+            (long)in->abs, in->nrd, nf, nh, nf ? feet[bi].h.n_crb : 0, nf ? feet[bi].h.dmrs_type : 0, nf ? fnc[bi] : 0, nf ? fns[bi] : 0, nf ? (double)fcoh[bi] : 0.0,
+            nf ? (double)frank[bi] : 0.0, nf ? (int)fsig[bi] : 0, (double)ob.noise_var);
+    }
+#undef s_e3d
   }
   t_e1_tdd_valid = false;
   ex.only = -1;
