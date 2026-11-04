@@ -406,6 +406,28 @@ TEST(Dci11Prove, ReopensOnViolations)
   EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s2));
 }
 
+TEST(Dci11Prove, BankConsistentWithAClassEvenFromOneDci)
+{
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  std::mt19937 rng(12);
+  Cfg a;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(a, &l, &o);
+  const nr_dci11_class_t kc = cls_of(l, o);
+  const uint16_t rnti = 0x4607;
+  EXPECT_TRUE(nr_dci11_bank_consistent(rnti, &kc, ul_dddsu)) << "no bank: nothing refuted";
+  const auto v = gen_stream(a, 64, rng);
+  nr_dci11_bank_feed(rnti, v[0].p, (uint16_t)o.total, v[0].slot, &FEED);
+  EXPECT_TRUE(nr_dci11_bank_consistent(rnti, &kc, ul_dddsu)) << "one DCI refutes nothing";
+  feed_all(rnti, v, o.total);
+  EXPECT_TRUE(nr_dci11_bank_consistent(rnti, &kc, ul_dddsu));
+  auto all_dl = [](int64_t, int *known) { *known = 1; return false; };   // a TDD pattern with no UL slot refutes every split
+  EXPECT_FALSE(nr_dci11_bank_consistent(rnti, &kc, all_dl));
+  EXPECT_FALSE(nr_dci11_bank_consistent(rnti, nullptr, ul_dddsu));
+  nr_dci11_bank_reset();
+}
+
 TEST(Dci11Prove, ProofStandsOnMoreOfTheSameAndEndsAtARival)
 {
   nr_cell_bind(0);

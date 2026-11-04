@@ -33,6 +33,11 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   nr_passive_obs_t o = r->o;
   if (nolayout) o.start_rb = o.nb_rb = o.start_sym = o.nb_sym = o.mcs = o.mcs_table = o.qm = o.nl = o.tbs =
       o.harq_pid = o.ndi = o.rv = -1;
+  /* E3: a layout solved by DM-RS physics knows neither S, L, nor the MCS table: those are null (qm, tbs follow the table) until a CRC pass lifts the evidence */
+  if (!nolayout && r->layout_evidence == NR_LAYOUT_EV_PHYS) {
+    o.start_sym = o.nb_sym = -1;
+    if (r->table_evidence < 2) o.mcs_table = o.qm = o.tbs = -1;
+  }
   char g[2048];
   if (nr_sense_grant_to_json(&o, &r->m, g, sizeof g) < 0) return -1;
   char *t = strstr(g, "\"type\":\"grant\"");
@@ -56,6 +61,9 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
     else tput(&j, ",\"layout_evidence\":null");
     if (r->fields_evidence >= 1 && r->fields_evidence <= 3) tput(&j, ",\"fields_evidence\":\"%s\"", ev[r->fields_evidence]);
     else tput(&j, ",\"fields_evidence\":null");
+    if (r->table_evidence == 1) tput(&j, ",\"table_evidence\":\"crc\"");
+    else if (r->table_evidence == 2) tput(&j, ",\"table_evidence\":\"qm_consensus\"");
+    else tput(&j, ",\"table_evidence\":null");
   }
   tput(&j, ",\"layout_checks_ok\":%u,\"layout_checks_fail\":%u", r->layout_checks_ok, r->layout_checks_fail);
   if (r->m.identity_gen < 0 || r->m.dedicated_epoch < 0) tput(&j, ",\"cfg_ref\":null");
@@ -123,6 +131,11 @@ void nr_traffic_count(int what)
   if (what >= 0 && what < NR_TRAFFIC_CNT_N) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
 }
 
+void nr_traffic_add(int what, uint64_t n)
+{
+  if (what >= 0 && what < NR_TRAFFIC_CNT_N) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], n, memory_order_relaxed);
+}
+
 static int cmp_u32(const void *a, const void *b) { const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return (x > y) - (x < y); }
 
 void nr_traffic_stats_get(nr_traffic_stats_t *s)
@@ -137,6 +150,11 @@ void nr_traffic_stats_get(nr_traffic_stats_t *s)
   s->e1_deferred = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_DEFERRED], memory_order_relaxed);
   s->e1_deferred_scoped = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_DEFERRED_SCOPED], memory_order_relaxed);
   for (int i = 0; i < 5; i++) s->e1_cls[i] = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_CLS_1 + i], memory_order_relaxed);
+#define LD(f, k) s->f = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_##k], memory_order_relaxed)
+  LD(e3_scored, E3_SCORED); LD(e3_hyps, E3_HYPS); LD(e3_ns, E3_NS); LD(e3_phys_solved, E3_PHYS_SOLVED); LD(e3_fam_accept, E3_FAM_ACCEPT);
+  LD(e3_fam_tried, E3_FAM_TRIED); LD(e3_reopen_score, E3_REOPEN_SCORE); LD(e3_reopen_e1, E3_REOPEN_E1); LD(e3_deferred, E3_DEFERRED);
+  LD(e3_skip, E3_SKIP); LD(e3_qm_calls, E3_QM_CALLS); LD(e3_qm_deferred, E3_QM_DEFERRED); LD(e3_qm_ns, E3_QM_NS);
+#undef LD
   s->traffic_skip = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_SKIP], memory_order_relaxed);
   s->check_dl = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK], memory_order_relaxed);
   s->check_ul = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK_UL], memory_order_relaxed);

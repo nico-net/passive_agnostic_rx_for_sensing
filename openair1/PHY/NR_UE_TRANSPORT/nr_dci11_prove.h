@@ -102,6 +102,9 @@ bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int n
 int nr_dci11_bank_alive(uint16_t rnti);
 /* Forget the count (the RNTI was reopened / its layout changed): unknown until the next unscoped look. */
 void nr_dci11_bank_alive_clear(uint16_t rnti);
+/* E3: is the RNTI's bank (even one DCI) consistent with this class, i.e. does at least one split of it survive every test the bank supports? A bank with no
+ * DCI of the class's length, or a class the prover cannot examine, refutes nothing (true). false = every split is refuted: the class cannot be this RNTI's. */
+bool nr_dci11_bank_consistent(uint16_t rnti, const nr_dci11_class_t *cls, nr_ul_slot_fn ul);
 /* The proven reading with the class it was proved in. */
 bool nr_dci11_bank_proven_any(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out);
 /* The same, only when its class reads like (l, o) (a solved RNTI's representative layout). */

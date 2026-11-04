@@ -259,6 +259,65 @@ void nr_probe_gate_release(nr_probe_gate_t *g, int *resv);
 typedef struct { uint64_t planned, probes, fulls, probe_ok, full_ok, candidates, solved, dropped; } nr_pdsch_solver_stats_t;
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);
 
+/* ---- E3 (traffic mode only): CRC-free SOLVED path from DM-RS physics, per-cell layout families, Qm ledger. Nothing here is called in legacy mode. ----
+ * The solver never computes a score: the monitor scores hypotheses with nr_dl_layout_score() (E2) on the scan consumer and passes the outcome in. */
+/** What proved the RNTI's layout: NR_LAYOUT_EV_NONE (not solved), NR_LAYOUT_EV_PHYS (solved by DM-RS physics, no full TB passed yet) or NR_LAYOUT_EV_CRC.
+ *  (NR_LAYOUT_EV_BITS is E1's and is never returned here.) */
+int nr_pdsch_solver_layout_evidence(uint16_t rnti);
+
+/** One scored hypothesis of a grant: the layouts of a reading (ids in any order), the scrambling hypothesis, the DM-RS additional position, and E2's outcome.
+ *  rank = nr_dl_score_rank() (-inf = declaration inconsistent); sig = the hypothesis is CONFIRMABLE: n_signif == n_cells > 0 and the allocation meets
+ *  E2's minimum PRB count. A hypothesis that is not sig can only lose. */
+typedef struct {
+  const uint16_t *ids;
+  int n_ids;
+  int32_t scr;
+  uint8_t add_pos;
+  float rank;
+  bool sig;
+} nr_pdsch_phys_hyp_t;
+/** E1 consistency of a reading for this RNTI (its bank refutes none of the reading's class): the monitor's callback; NULL = not asked. */
+typedef bool (*nr_pdsch_e1_fn)(void *ctx, const uint16_t *ids, int n_ids);
+/** Phys acceptance. One grant (signal slot abs_slot, a slot is counted once) of an unsolved RNTI with the E2 outcome of each hypothesis. Per RNTI a sequential
+ *  sign test runs between the tracked hypotheses (at most 16): a hypothesis is the winner when it was significant on >= 10 grants and, against EVERY other tracked
+ *  hypothesis, outranked it on significantly more grants than it was outranked (one-sided binomial, alpha NBS_SIGNIF_ALPHA / rivals); hypotheses with identical
+ *  rank are never separated, so footprint-twins keep the RNTI unsolved. The winner must also be E1-consistent. Then the RNTI is SOLVED with evidence PHYS:
+ *  layouts = the winner's reading, add_pos and scr as scored, table / S / L / rate matching unknown (learnt by CRC as for any solved RNTI), no cell seeding until a
+ *  full TB passes. Returns 1 when this call solved it. dci_len is the DCI length of the grant (families are per length). */
+int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_phys_hyp_t *h, int n, nr_pdsch_e1_fn e1, void *e1_ctx, uint16_t dci_len);
+/** Score-drop reopen. For an RNTI SOLVED by physics (no full TB passed yet): one look at its solution on a grant, scorable = E2 could confirm it (meets the
+ *  minimum PRB count), hit = it was confirmed. Over the last 16 scorable looks, misses with a binomial tail (p0 = 0.25) below alpha reopen the layout. Returns true
+ *  when it reopened. Other RNTIs: ignored. */
+bool nr_pdsch_solver_phys_check(uint16_t rnti, bool scorable, bool hit);
+/** True on every 16th call for an RNTI solved by physics (the cadence of the monitor's E1 re-check of its class); false otherwise. */
+bool nr_pdsch_solver_phys_tick(uint16_t rnti);
+/** The RNTI's current solution is phys-solved and not CRC-confirmed. */
+bool nr_pdsch_solver_phys_unconfirmed(uint16_t rnti);
+
+/** A layout family of the cell: the solution tuple of >= 1 CRC-confirmed promoted solved RNTIs whose DCIs have length dci_len, strongest (most members) first.
+ *  Phys-solved RNTIs are not members until a full TB passed (a family of unconfirmed layouts would confirm itself). Returns the count written (<= max). */
+typedef struct { int rep; uint8_t add_pos; int32_t scr; uint32_t members; } nr_pdsch_family_t;
+int nr_pdsch_solver_families(uint16_t dci_len, nr_pdsch_family_t *out, int max);
+/** A family exists for this DCI length and the RNTI is not solved: the monitor then checks E1 consistency and the first grant's E2 score. */
+bool nr_pdsch_solver_family_match(uint16_t rnti, nr_dci_bits_t payload, uint16_t len);
+/** Accept an unsolved RNTI as SOLVED (PHYS) on family f: ids = the reading of this DCI (any order) that contains f->rep, scr = the hypothesis E2 confirmed (same
+ *  identity form as the family's). Re-checks that the family still exists, the RNTI is unsolved and e1 (if given) agrees. The table is NOT inherited. 1 = accepted. */
+int nr_pdsch_solver_family_accept(uint16_t rnti, const nr_pdsch_family_t *f, const uint16_t *ids, int n_ids, int32_t scr, uint16_t dci_len, uint64_t abs_slot,
+                                  nr_pdsch_e1_fn e1, void *e1_ctx);
+
+/** The solution of a SOLVED RNTI as the monitor scores it: its scrambling hypothesis and DM-RS additional position. false when the RNTI is not solved. */
+bool nr_pdsch_solver_solution(uint16_t rnti, int32_t *scr, uint8_t *add_pos);
+
+/** Qm ledger (rank-1 grants of a SOLVED layout, distinct slots). qm = nr_qm_classify() (2/4/6/8); the caller passes only grants with n_signif == n_cells and
+ *  at least E2's minimum PRB count; qm = 0 is no vote. A grant is informative when the MCS tables disagree on its Qm. Per MCS table (0..2): agree = distinct-slot
+ *  grants whose (Qm of mcs in that table) equals qm, dissent = those where it does not. A Qm that no table gives marks the ledger poisoned for good. */
+void nr_pdsch_solver_qm_note(uint16_t rnti, uint64_t abs_slot, int mcs, int qm);
+/** The table the ledger fixes: exactly one table with >= 8 agreeing distinct-slot grants and ZERO dissent while every other table has dissent; else -1 (unknown).
+ *  A hint only: it is a field only together with a CRC pass (nr_pdsch_solver_table_evidence). */
+int nr_pdsch_solver_qm_table(uint16_t rnti);
+/** Evidence of the RNTI's MCS table: 0 unknown, 1 = learnt by a CRC pass, 2 = Qm consensus AND a CRC pass with that table. */
+int nr_pdsch_solver_table_evidence(uint16_t rnti);
+
 /** Traffic mode: drop rnti's solution exactly as the 256-grant reopen does (search restarts). */
 void nr_pdsch_solver_reopen(uint16_t rnti);
 /** SOLVED / CANDIDATE / UNSOLVED (never FIXED); checks_ok / checks_fail (either may be NULL) = full-TB CRC passes / failures. */

@@ -69,6 +69,24 @@ TEST(TrafficRecord, UnsolvedNullsLayoutFields)
        "\"rnti\":4660","\"al\":4","\"layout_state\":\"unsolved\""})
     EXPECT_TRUE(has(d,k)) << k;
 }
+TEST(TrafficRecord, PhysLayoutNullsWhatPhysicsCannotKnow)
+{
+  auto r = fixture(NR_LAYOUT_SOLVED);
+  r.layout_evidence = NR_LAYOUT_EV_PHYS;
+  std::string d = json(r);
+  for (const char *k : {"\"start_sym\":null", "\"nb_sym\":null", "\"mcs_table\":null", "\"qm\":null", "\"tbs\":null", "\"table_evidence\":null"})
+    EXPECT_TRUE(has(d, k)) << k;
+  for (const char *k : {"\"mcs\":9", "\"nb_rb\":20", "\"start_rb\":10", "\"k1\":4"}) EXPECT_TRUE(has(d, k)) << k;   // the layout's fields stay
+  r.table_evidence = 2;   // Qm consensus with a CRC pass of that table: the table, qm and tbs print, S and L still do not
+  d = json(r);
+  EXPECT_TRUE(has(d, "\"table_evidence\":\"qm_consensus\""));
+  EXPECT_TRUE(has(d, "\"mcs_table\":1"));
+  EXPECT_TRUE(has(d, "\"start_sym\":null"));
+  r.layout_evidence = NR_LAYOUT_EV_CRC; r.table_evidence = 1;   // CRC: nothing is nulled
+  d = json(r);
+  EXPECT_TRUE(has(d, "\"table_evidence\":\"crc\""));
+  EXPECT_TRUE(has(d, "\"start_sym\":2")); EXPECT_TRUE(has(d, "\"nb_sym\":12")); EXPECT_TRUE(has(d, "\"tbs\":1000"));
+}
 TEST(TrafficRecord, LayoutEvidenceLabels)
 {
   auto r = fixture(NR_LAYOUT_SOLVED);

@@ -193,7 +193,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
     snprintf(discovery, sizeof(discovery), ",\"csirs_disc_readmit_skipped\":%" PRIu64,
              m->csirs_disc_readmit_skipped);
   /* tail keys: own bounded buffer, appended after every pre-existing key */
-  char tail[4096];
+  char tail[6144];
   int t = snprintf(tail, sizeof(tail), ",\"t_real_ns\":%" PRIu64 ",\"proc_utime_us\":%" PRIu64 ",\"proc_stime_us\":%" PRIu64
                    ",\"proc_maxrss_kb\":%" PRIu64 ",\"proc_minflt\":%" PRIu64 ",\"proc_majflt\":%" PRIu64,
                    m->t_real_ns, m->proc_utime_us, m->proc_stime_us, m->proc_maxrss_kb, m->proc_minflt, m->proc_majflt);
@@ -217,12 +217,17 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
                   ",\"dci_rec_generated\":%" PRIu64 ",\"dci_rec_persisted\":%" PRIu64 ",\"dci_rec_lost\":%" PRIu64
                   ",\"dci_dup\":%" PRIu64 ",\"traffic_skip\":%" PRIu64 ",\"check_decodes\":%" PRIu64 ",\"check_fail\":%" PRIu64
                   ",\"probe_decodes\":%" PRIu64 ",\"reopens\":%" PRIu64 ",\"reopens_ul\":%" PRIu64 ",\"dci_emit_us_p50\":%" PRIu64 ",\"dci_emit_us_p99\":%" PRIu64 ",\"e1_changes\":%" PRIu64 ",\"e1_skip_classes\":%" PRIu64 ",\"e1_unfed\":%" PRIu64 ",\"e1_prove_deferred\":%" PRIu64 ",\"e1_prove_deferred_scoped\":%" PRIu64 ",\"e1_cls_1\":%" PRIu64 ",\"e1_cls_2_4\":%" PRIu64 ",\"e1_cls_5_16\":%" PRIu64 ",\"e1_cls_17_64\":%" PRIu64 ",\"e1_cls_gt64\":%" PRIu64 ",\"check_dl\":%" PRIu64 ",\"check_ul\":%" PRIu64 ",\"probe_dl\":%" PRIu64 ",\"probe_ul\":%" PRIu64
-                  ",\"probe_skip\":%" PRIu64 ",\"ul_decode_skip\":%" PRIu64,
+                  ",\"probe_skip\":%" PRIu64 ",\"ul_decode_skip\":%" PRIu64
+                  ",\"e3_scored\":%" PRIu64 ",\"e3_hyps\":%" PRIu64 ",\"e3_ns\":%" PRIu64 ",\"e3_phys_solved\":%" PRIu64 ",\"e3_fam_accept\":%" PRIu64 ",\"e3_fam_tried\":%" PRIu64
+                  ",\"e3_reopen_score\":%" PRIu64 ",\"e3_reopen_e1\":%" PRIu64 ",\"e3_deferred\":%" PRIu64 ",\"e3_skip\":%" PRIu64
+                  ",\"e3_qm_calls\":%" PRIu64 ",\"e3_qm_deferred\":%" PRIu64 ",\"e3_qm_ns\":%" PRIu64,
                   tr->accepted[NR_DCI_REC_FMT_10], tr->accepted[NR_DCI_REC_FMT_11], tr->accepted[NR_DCI_REC_FMT_00], tr->accepted[NR_DCI_REC_FMT_01],
                   tr->state[NR_LAYOUT_FIXED], tr->state[NR_LAYOUT_SOLVED], tr->state[NR_LAYOUT_CANDIDATE], tr->state[NR_LAYOUT_UNSOLVED],
                   m->dci_rec_generated, m->dci_rec_persisted, m->dci_rec_lost, tr->dup, tr->traffic_skip, tr->check_decodes,
                   tr->check_fail, tr->probe_decodes, tr->reopens, tr->reopens_ul, tr->emit_us_p50, tr->emit_us_p99, tr->e1_changes, tr->e1_skip_classes, tr->e1_unfed, tr->e1_deferred, tr->e1_deferred_scoped, tr->e1_cls[0], tr->e1_cls[1], tr->e1_cls[2], tr->e1_cls[3], tr->e1_cls[4],
-                  tr->check_dl, tr->check_ul, tr->probe_dl, tr->probe_ul, tr->probe_skip, tr->ul_decode_skip);
+                  tr->check_dl, tr->check_ul, tr->probe_dl, tr->probe_ul, tr->probe_skip, tr->ul_decode_skip,
+                  tr->e3_scored, tr->e3_hyps, tr->e3_ns, tr->e3_phys_solved, tr->e3_fam_accept, tr->e3_fam_tried, tr->e3_reopen_score, tr->e3_reopen_e1,
+                  tr->e3_deferred, tr->e3_skip, tr->e3_qm_calls, tr->e3_qm_deferred, tr->e3_qm_ns);
   }
   for (int i = 0; i < 2 && t > 0 && (size_t)t < sizeof(tail); i++) {
     static const char *const an[2] = {"janon", "dmrs_id"};

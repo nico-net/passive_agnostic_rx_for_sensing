@@ -101,6 +101,8 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "nr_traffic_record.h"
 #include "nr_traffic_cfg.h"
 #include "nr_traffic_decode.h"
+#include "nr_dl_layout_score.h"
+#include "nr_dci11_prove.h"
 #include "nr_traffic_dci_fields.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_sense_unit.h"
@@ -148,24 +150,35 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
  * readings carried an own identity (-1 = not scored). */
 /* dmrs_sym_rx: the type-A DM-RS symbol of this slot in the frequency domain, per antenna: one FEP per antenna and slot (per-thread
  * cache shared by the reading filter and the DM-RS fit). Returns the antenna count, 0 when the symbol cannot be read. */
+/* E3: the per-thread slot buffer is shared by every symbol a scorer needs: one FEP per (antenna, symbol) and slot, whichever caller asks first. */
+static __thread c16_t *t_slotbuf;
+static __thread int64_t t_slotbuf_key = -1;
+static __thread uint16_t t_slotbuf_done;   /* bit l = symbol l of the keyed slot is in the buffer */
+static c16_t *slot_fep_sym(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, int nant, int sym)
+{
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  if (nant > 8 || nant < 1 || sym < 0 || sym >= fp->symbols_per_slot || sym >= 16) return NULL;
+  if (t_slotbuf == NULL) {
+    t_slotbuf = aligned_alloc(64, ((sizeof(c16_t) * (size_t)nant * fp->samples_per_slot_wCP + 63) / 64) * 64);
+    if (t_slotbuf == NULL) return NULL;
+  }
+  const int64_t key = (int64_t)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx;
+  if (t_slotbuf_key != key) { t_slotbuf_key = key; t_slotbuf_done = 0; }
+  if (!((t_slotbuf_done >> sym) & 1)) {
+    for (int a = 0; a < nant; a++)
+      nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, sym, a, (c16_t(*)[fp->samples_per_slot_wCP])t_slotbuf, link_type_dl, 0,
+                      nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
+    t_slotbuf_done |= (uint16_t)(1u << sym);
+  }
+  return t_slotbuf;
+}
 static int dmrs_sym_rx(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdcch_blind_monitor_cfg_t *cfg, const int16_t **rx)
 {
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int sym = cfg->dmrs_typeA_position + 2, nant = fp->nb_antennas_rx;
   if (nant > 8 || nant < 1 || sym >= fp->symbols_per_slot || cfg->bwp_size == 0) return 0;
-  static __thread c16_t *buf;
-  static __thread int64_t buf_key = -1;
-  if (buf == NULL) {
-    buf = aligned_alloc(64, ((sizeof(c16_t) * (size_t)nant * fp->samples_per_slot_wCP + 63) / 64) * 64);
-    if (buf == NULL) return 0;
-  }
-  const int64_t key = (int64_t)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx;
-  if (buf_key != key) {
-    for (int a = 0; a < nant; a++)
-      nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, sym, a, (c16_t(*)[fp->samples_per_slot_wCP])buf, link_type_dl, 0,
-                      nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
-    buf_key = key;
-  }
+  const c16_t *buf = slot_fep_sym(ue, proc, nant, sym);
+  if (buf == NULL) return 0;
   for (int a = 0; a < nant; a++) rx[a] = (const int16_t *)&buf[(size_t)a * fp->samples_per_slot_wCP + (size_t)sym * fp->ofdm_symbol_size];
   return nant;
 }
@@ -4743,8 +4756,10 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
     }
     if (e1) nr_dci11_harq_fields_proven(*payload, dci_len, &pc.l, &pc.o, &ps, &hf);
     else if (have_rep) nr_dci11_harq_fields(*payload, dci_len, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep], &hf);
-    r.layout_evidence = ls == NR_LAYOUT_SOLVED ? NR_LAYOUT_EV_CRC : e1 ? NR_LAYOUT_EV_BITS : NR_LAYOUT_EV_NONE;
-    r.fields_evidence = e1 ? NR_LAYOUT_EV_BITS : (ls == NR_LAYOUT_SOLVED && hf.k1 + hf.dai + hf.tpc + hf.pri > -4) ? NR_LAYOUT_EV_CRC : NR_LAYOUT_EV_NONE;
+    const int sev = ls == NR_LAYOUT_SOLVED ? nr_pdsch_solver_layout_evidence(out->rnti) : NR_LAYOUT_EV_NONE;   /* PHYS until a full TB passed, else CRC */
+    r.layout_evidence = ls == NR_LAYOUT_SOLVED ? (sev == NR_LAYOUT_EV_PHYS ? NR_LAYOUT_EV_PHYS : NR_LAYOUT_EV_CRC) : e1 ? NR_LAYOUT_EV_BITS : NR_LAYOUT_EV_NONE;
+    r.fields_evidence = e1 ? NR_LAYOUT_EV_BITS : (ls == NR_LAYOUT_SOLVED && hf.k1 + hf.dai + hf.tpc + hf.pri > -4) ? (uint8_t)r.layout_evidence : NR_LAYOUT_EV_NONE;
+    if (ls == NR_LAYOUT_SOLVED) r.table_evidence = (uint8_t)nr_pdsch_solver_table_evidence(out->rnti);
   }
   r.dai = hf.dai; r.tpc = hf.tpc; r.pri = hf.pri; r.k1 = hf.k1;
   r.retx = no_harq ? -1 : (int8_t)nr_traffic_retx(0, out->rnti, out->harq_pid, out->ndi);
@@ -4804,6 +4819,386 @@ static void traffic_emit_ul(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
   traffic_cfg_ref(&r, &sn, cfg, u->bwp_start, u->bwp_size);
   nr_sense_emit_dci(&r);
   nr_traffic_count_dci(r.dci_format, ls, btim_now_ns() - t0);
+}
+
+/* ================= E3 (traffic mode, scan consumer only): CRC-free SOLVED via DM-RS physics. =================
+ * For a C-RNTI DCI 1_1 the readings the solver already built (rparsed / rd) become E2 hypotheses (nr_dl_layout_score on the cached slot FEP). An unsolved RNTI
+ * feeds the solver's sign test (nr_pdsch_solver_phys_note) or, when the cell has a layout family of this DCI length, is tested against the family on its first
+ * grant; a phys-solved RNTI is re-scored (score-drop reopen, E1 re-check) and, rate-limited, its Qm is looked at. Everything runs inside two explicit per-cell CPU
+ * budgets (scoring, Qm); a grant held back is counted. The scorer sees the first DM-RS symbol and, for the additional-position hypotheses, the other DM-RS symbols of a
+ * full 14-symbol slot (mask nr_pdsch_solver_dmrs_mask(l0, 1, 13, add_pos)): grants in a slot the TDD pattern says is mixed are not scored (their DM-RS mask is unknown). */
+#define E3_BUDGET_NS 20000000ull      /* scoring: 20 ms per second of wall time per cell = 2 % of a core (the E1 prove budget's bound) */
+#define E3_QM_BUDGET_NS 10000000ull   /* the Qm classifier, ~3 ms a call: 10 ms per second per cell */
+#define E3_WINDOW_NS 1000000000ull
+#define E3_RNTI_SLOTS 512
+#define E3_READINGS 12                /* distinct footprints scored per grant */
+#define E3_HYPS 160
+#define E3_QM_EVERY_SLOTS 640         /* one Qm look per RNTI per 16 frames at most (30 kHz: 0.32 s) */
+typedef struct { uint64_t w_start[2], spent[2]; struct { uint16_t rnti; int64_t last, last_qm; } rt[E3_RNTI_SLOTS]; } e3_cell_t;
+NR_CELL_STATIC(e3_cell_t, g_e3)
+#define g_e3 NR_CELL_REF(g_e3)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_e3_mu, PTHREAD_MUTEX_INITIALIZER)
+#define g_e3_mu NR_CELL_REF(g_e3_mu)
+static bool e3_budget_ok(uint64_t now, int k)
+{
+  pthread_mutex_lock(&g_e3_mu);
+  if (now - g_e3.w_start[k] >= E3_WINDOW_NS || now < g_e3.w_start[k]) { g_e3.w_start[k] = now; g_e3.spent[k] = 0; }
+  const bool ok = g_e3.spent[k] < (k ? E3_QM_BUDGET_NS : E3_BUDGET_NS);
+  pthread_mutex_unlock(&g_e3_mu);
+  return ok;
+}
+static void e3_charge(uint64_t ns, int k) { pthread_mutex_lock(&g_e3_mu); g_e3.spent[k] += ns; pthread_mutex_unlock(&g_e3_mu); }
+/* at most one look per RNTI per `every` slots (qm: its own clock); a backwards slot (new run) is due */
+static bool e3_rnti_due(uint16_t rnti, int64_t slot, int64_t every, bool qm)
+{
+  pthread_mutex_lock(&g_e3_mu);
+  typeof(g_e3.rt[0]) *e = &g_e3.rt[rnti % E3_RNTI_SLOTS];
+  if (e->rnti != rnti) { memset(e, 0, sizeof *e); e->rnti = rnti; e->last = e->last_qm = INT64_MIN / 2; }
+  int64_t *l = qm ? &e->last_qm : &e->last;
+  const bool due = slot < *l || slot - *l >= every;
+  if (due) *l = slot;
+  pthread_mutex_unlock(&g_e3_mu);
+  return due;
+}
+
+/* the cached carrier grid of the slot: rxF[(a * symbols + l)] = n_sc contiguous subcarriers from CRB 0 (the FFT buffer wraps at the carrier edge) */
+typedef struct { c16_t *g; size_t cap; int nant, nsc, symbols; int64_t key; uint16_t done; float noise; bool noise_ok; const c16_t *ptr[NR_DL_MAX_ANT * 16]; } e3_grid_t;
+static __thread e3_grid_t t_e3g;
+static int e3_cmp_f(const void *a, const void *b) { const float x = *(const float *)a, y = *(const float *)b; return (x > y) - (x < y); }
+static bool e3_grid(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, int l0, uint16_t mask, nr_dl_obs_t *ob)
+{
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const int nant = fp->nb_antennas_rx, sn = fp->symbols_per_slot, nsc = fp->N_RB_DL * 12;
+  if (nant < 1 || nant > NR_DL_MAX_ANT || sn > 14 || nsc <= 0 || nsc > NR_DL_MAX_PRB * 12 || l0 < 0 || l0 >= sn) return false;
+  e3_grid_t *t = &t_e3g;
+  const size_t need = (size_t)nant * (size_t)sn * (size_t)nsc;
+  if (t->cap < need) {
+    free(t->g);
+    t->g = malloc(need * sizeof(c16_t));
+    t->cap = t->g ? need : 0;
+    t->key = -1;
+    if (!t->g) return false;
+  }
+  const int64_t key = (int64_t)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx;
+  if (t->key != key || t->nant != nant || t->nsc != nsc || t->symbols != sn) {
+    t->key = key; t->nant = nant; t->nsc = nsc; t->symbols = sn; t->done = 0; t->noise_ok = false;
+    memset(t->ptr, 0, sizeof t->ptr);
+  }
+  mask |= (uint16_t)(1u << l0);
+  for (int l = 0; l < sn; l++) {
+    if (!((mask >> l) & 1) || ((t->done >> l) & 1)) continue;
+    const c16_t *buf = slot_fep_sym(ue, proc, nant, l);
+    if (buf == NULL) return false;
+    for (int a = 0; a < nant; a++) {
+      const c16_t *src = &buf[(size_t)a * fp->samples_per_slot_wCP + (size_t)l * fp->ofdm_symbol_size];
+      c16_t *dst = &t->g[((size_t)a * sn + l) * nsc];
+      for (int k = 0; k < nsc; k++) dst[k] = src[(fp->first_carrier_offset + k) % fp->ofdm_symbol_size];
+      t->ptr[a * sn + l] = dst;
+    }
+    t->done |= (uint16_t)(1u << l);
+  }
+  if (!t->noise_ok) {   /* noise per RE and antenna: the lowest quartile of the PRB mean energies of the first DM-RS symbol x 1.15 (never under-estimated: a loaded slot only raises it) */
+    float e[NR_DL_MAX_PRB];
+    const int np = nsc / 12;
+    for (int p = 0; p < np; p++) {
+      double sum = 0;
+      for (int a = 0; a < nant; a++) {
+        const c16_t *y = &t->g[((size_t)a * sn + l0) * nsc + 12 * p];
+        for (int k = 0; k < 12; k++) sum += (double)y[k].r * y[k].r + (double)y[k].i * y[k].i;
+      }
+      e[p] = (float)(sum / (12.0 * nant));
+    }
+    qsort(e, (size_t)np, sizeof e[0], e3_cmp_f);
+    t->noise = e[np / 4] * 1.15f;
+    t->noise_ok = true;
+  }
+  ob->rxF = t->ptr; ob->n_ant = nant; ob->n_sc = nsc; ob->symbols = sn; ob->noise_var = t->noise; ob->slot = proc->nr_slot_rx;
+  return true;
+}
+
+typedef struct { uint16_t crb[NR_DL_MAX_PRB]; nr_dl_hyp_t h; } e3_foot_t;
+/* The PRBs / DM-RS ports of a reading as an E2 hypothesis (nid, masks filled by the caller); false when it has none. */
+static bool e3_foot(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL_FRAME_PARMS *fp, const nr_pdcch_blind_result_t *pr, e3_foot_t *f)
+{
+  int n = 0;
+  uint16_t rel[NR_PRB_SET_MAX];
+  int nr_rel = 0;
+  if (pr->ra_type0) nr_rel = nr_ra_type0_prbs(pr->rbg_bitmap, pr->rbg_bwp_start, cfg->bwp_size, pr->rbg_size, rel, NR_PRB_SET_MAX);
+  else for (int q = 0; q < pr->num_rb && nr_rel < NR_PRB_SET_MAX; q++) rel[nr_rel++] = (uint16_t)(pr->start_rb + q);
+  for (int q = 0; q < nr_rel && n < NR_DL_MAX_PRB; q++) {
+    const int c = cfg->bwp_start + rel[q];
+    if (c < fp->N_RB_DL) f->crb[n++] = (uint16_t)c;
+  }
+  const int type = pr->dmrs_config_type ? 2 : 1;
+  unsigned gm = 0;
+  if (type == 1) { gm |= (pr->dmrs_ports & 0x33) ? 1u : 0u; gm |= (pr->dmrs_ports & 0xcc) ? 2u : 0u; }
+  else { gm |= (pr->dmrs_ports & 0x0c3) ? 1u : 0u; gm |= (pr->dmrs_ports & 0x30c) ? 2u : 0u; gm |= (pr->dmrs_ports & 0xc30) ? 4u : 0u; }
+  if (n <= 0 || gm == 0) return false;
+  memset(&f->h, 0, sizeof f->h);
+  f->h.crb = f->crb; f->h.n_crb = n; f->h.dmrs_type = (uint8_t)type; f->h.cdm_groups_mask = (uint8_t)gm; f->h.cdm_no_data = pr->n_dmrs_cdm_groups;
+  f->h.nscid = pr->nscid & 1;
+  return true;
+}
+/* E2 outcome of one hypothesis. sig = confirmable: every claimed (DM-RS symbol, CDM group) cell significant, the allocation at least E2's practical minimum PRB count (type 1: 6, type 2: 11),
+ * a finite rank. */
+static void e3_score(const e3_foot_t *f, uint32_t nid, uint16_t dmrs_mask, uint16_t data_mask, const nr_dl_obs_t *ob, nr_dl_score_t *s, float *rank, bool *sig)
+{
+  nr_dl_hyp_t h = f->h;
+  h.nid = nid; h.dmrs_sym_mask = dmrs_mask; h.data_sym_mask = data_mask;
+  nr_dl_layout_score(&h, ob, s);
+  *rank = nr_dl_score_rank(&h, s);
+  *sig = s->n_cells > 0 && s->n_signif == s->n_cells && h.n_crb >= (h.dmrs_type == 1 ? 6 : 11) && isfinite(*rank);
+}
+
+typedef struct { uint16_t rnti; const nr_dci11_resolver_t *R; int only; } e3_e1_ctx_t;   /* only >= 0: that layout's class, else any class of the reading */
+static bool e3_e1_cb(void *c, const uint16_t *ids, int n)
+{
+  const e3_e1_ctx_t *x = c;
+  const int nh = __atomic_load_n(&x->R->n_hyp, __ATOMIC_ACQUIRE);
+  nr_dci11_class_t seen[8];
+  int ns = 0;
+  for (int q = 0; q < n; q++) {
+    const int i = x->only >= 0 ? x->only : ids[q];
+    if (i < 0 || i >= nh) { if (x->only >= 0) return false; continue; }
+    nr_dci11_class_t k = {x->R->hyp[i], x->R->off[i]};
+    bool dup = false;
+    for (int z = 0; z < ns && !dup; z++) dup = nr_dci11_class_same(&seen[z].l, &seen[z].o, &k.l, &k.o);
+    if (!dup && ns < 8) {
+      seen[ns++] = k;
+      if (nr_dci11_bank_consistent(x->rnti, &k, e1_ul_capable)) return true;   /* a reading holds layouts of several classes: one not refuted keeps it */
+    }
+    if (x->only >= 0) break;
+  }
+  return false;
+}
+
+typedef struct {
+  PHY_VARS_NR_UE *ue;
+  const UE_nr_rxtx_proc_t *proc;
+  const nr_pdcch_blind_monitor_cfg_t *cfg;
+  const nr_dci11_resolver_t *R;
+  uint16_t rnti, dlen;
+  int rep;
+  int64_t abs;
+  nr_pdcch_blind_result_t *rp;
+  nr_pdsch_solver_reading_t *rd;
+  int nrd;
+  const uint8_t *gid;   /* layout -> reading index (0xff none) */
+} e3_in_t;
+static bool e3_has(const nr_pdsch_solver_reading_t *r, int id)
+{
+  for (int i = 0; i < r->n_ids; i++) if (r->ids[i] == id) return true;
+  return false;
+}
+static bool e3_same_foot(const nr_pdcch_blind_result_t *a, const nr_pdcch_blind_result_t *b)
+{
+  return nr_dci11_same_alloc(a, b) && a->dmrs_ports == b->dmrs_ports && a->dmrs_config_type == b->dmrs_config_type && a->n_dmrs_cdm_groups == b->n_dmrs_cdm_groups;
+}
+
+static void e3_unsolved(const e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, uint64_t t0)
+{
+  nr_dl_obs_t ob;
+  const int add_max = 3;
+  uint16_t am[4];
+  for (int a = 0; a <= add_max; a++) am[a] = nr_pdsch_solver_dmrs_mask(l0, 1, 13, a);
+  uint16_t need = 0;
+  for (int a = 0; a <= add_max; a++) need |= am[a];
+  if (!e3_grid(in->ue, in->proc, l0, need, &ob)) { nr_traffic_count(NR_TRAFFIC_CNT_E3_SKIP); return; }
+  nr_traffic_count(NR_TRAFFIC_CNT_E3_SCORED);
+  e3_e1_ctx_t ex = {in->rnti, in->R, -1};
+  int nhyp = 0;
+  /* ---- layout families of this DCI length: the first grant of a new RNTI, no probe ---- */
+  nr_pdsch_family_t fam[2];
+  const int nfam = nr_pdsch_solver_families(in->dlen, fam, 2);
+  for (int fi = 0; fi < nfam; fi++) {
+    int g = -1;
+    for (int k = 0; k < in->nrd && g < 0; k++) if (e3_has(&in->rd[k], fam[fi].rep)) g = k;
+    if (g < 0 || fam[fi].rep >= __atomic_load_n(&in->R->n_hyp, __ATOMIC_ACQUIRE)) continue;
+    nr_traffic_count(NR_TRAFFIC_CNT_E3_FAM_TRIED);
+    const int form = fam[fi].scr < 0 ? -1 : (fam[fi].scr >> 16);
+    int32_t scr_c[3];
+    int nsc_c = 0;
+    if (form < 0) scr_c[nsc_c++] = -1;
+    else {
+      int own[2];
+      int nown = nr_dmrs_scan_rnti_ids(in->rnti, own, 2);
+      if (nown < 0) nown = 0;
+      const int32_t fnid = fam[fi].scr & 0xFFFF;
+      int ids_c[3] = {fnid, nown > 0 ? own[0] : -1, nown > 1 ? own[1] : -1};
+      for (int q = 0; q < 3; q++) {
+        if (ids_c[q] < 0 || ids_c[q] > 65535) continue;
+        bool dup = false;
+        for (int z = 0; z < q && !dup; z++) dup = ids_c[z] == ids_c[q];
+        if (!dup) scr_c[nsc_c++] = form == 0 ? (int32_t)ids_c[q] : (int32_t)((uint32_t)ids_c[q] | ((uint32_t)form << 16));
+      }
+    }
+    e3_foot_t *ff = malloc(sizeof *ff);
+    if (!ff) return;
+    if (e3_foot(in->cfg, fp, &in->rp[g], ff)) {
+      const uint16_t dm = am[fam[fi].add_pos & 3];
+      for (int c = 0; c < nsc_c; c++) {
+        const uint32_t nid = scr_c[c] < 0 ? (uint32_t)fp->Nid_cell : (uint32_t)(scr_c[c] & 0xFFFF);
+        nr_dl_score_t s;
+        float rank;
+        bool sig;
+        e3_score(ff, nid, dm, 0, &ob, &s, &rank, &sig);
+        nhyp++;
+        if (!sig) continue;
+        /* no other reading of this DCI may explain the slot better: the family's footprint must be the best (or a twin of the best) */
+        bool beaten = false;
+        int scored = 0;
+        e3_foot_t *of = malloc(sizeof *of);
+        for (int k = 0; of && k < in->nrd && !beaten && scored < 24; k++) {
+          if (k == g || e3_same_foot(&in->rp[k], &in->rp[g]) || in->rd[k].num_rb <= 0) continue;
+          if (!e3_foot(in->cfg, fp, &in->rp[k], of)) continue;
+          nr_dl_score_t s2; float r2; bool g2;
+          e3_score(of, nid, dm, 0, &ob, &s2, &r2, &g2);
+          nhyp++; scored++;
+          beaten = r2 > rank;
+        }
+        free(of);
+        if (beaten) continue;
+        ex.only = fam[fi].rep;
+        t_e1_tdd_valid = false;
+        if (nr_pdsch_solver_family_accept(in->rnti, &fam[fi], in->rd[g].ids, in->rd[g].n_ids, scr_c[c], in->dlen, (uint64_t)in->abs, e3_e1_cb, &ex)) {
+          nr_traffic_count(NR_TRAFFIC_CNT_E3_FAM_ACCEPT);
+          free(ff);
+          nr_traffic_add(NR_TRAFFIC_CNT_E3_HYPS, (uint64_t)nhyp);
+          nr_traffic_add(NR_TRAFFIC_CNT_E3_NS, btim_now_ns() - t0);
+          return;
+        }
+      }
+    }
+    free(ff);
+  }
+  /* ---- the sign test: the best distinct footprints of this DCI under the cell's PCI identity at add_pos 0, then the best three at the other positions ---- */
+  nr_pdsch_phys_hyp_t *h = malloc(sizeof *h * E3_HYPS);
+  e3_foot_t *feet = malloc(sizeof *feet * E3_READINGS);
+  int *rg = malloc(sizeof(int) * E3_READINGS);
+  if (!h || !feet || !rg) { free(h); free(feet); free(rg); return; }
+  int nh = 0, nf = 0;
+  float frank[E3_READINGS];
+  bool fsig[E3_READINGS];
+  int order[128], no = 0;
+  for (int k = 0; k < in->nrd && no < 128; k++) if (in->rd[k].num_rb > 0 && in->rd[k].n_ids > 0) order[no++] = k;
+  for (int a = 1; a < no; a++)   /* best DM-RS fit first; unknown fits last; stable */
+    for (int b = a; b > 0 && in->rd[order[b]].fit > in->rd[order[b - 1]].fit; b--) { const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t; }
+  for (int q = 0; q < no && nf < E3_READINGS; q++) {
+    const int k = order[q];
+    bool twin = false;
+    for (int z = 0; z < nf && !twin; z++) twin = e3_same_foot(&in->rp[rg[z]], &in->rp[k]);
+    if (twin) continue;   /* its twins are added below with the same score */
+    if (!e3_foot(in->cfg, fp, &in->rp[k], &feet[nf])) continue;
+    nr_dl_score_t s;
+    e3_score(&feet[nf], (uint32_t)fp->Nid_cell, am[0], 0, &ob, &s, &frank[nf], &fsig[nf]);
+    nhyp++;
+    rg[nf++] = k;
+  }
+  for (int z = 0; z < nf; z++)   /* every reading with this footprint (footprint twins stay tied for the solver) */
+    for (int k = 0; k < in->nrd && nh < E3_HYPS; k++)
+      if (e3_same_foot(&in->rp[rg[z]], &in->rp[k]) && in->rd[k].n_ids > 0)
+        h[nh++] = (nr_pdsch_phys_hyp_t){in->rd[k].ids, in->rd[k].n_ids, -1, 0, frank[z], fsig[z]};
+  bool taken[E3_READINGS] = {false};
+  for (int e = 0; e < 3; e++) {   /* the best three significant footprints at the additional positions 1..3 */
+    int best = -1;
+    for (int z = 0; z < nf; z++)
+      if (fsig[z] && !taken[z] && (best < 0 || frank[z] > frank[best])) best = z;
+    if (best < 0) break;
+    taken[best] = true;
+    const int kb = rg[best];
+    for (int a = 1; a <= add_max; a++) {
+      nr_dl_score_t s;
+      float rank;
+      bool sig;
+      e3_score(&feet[best], (uint32_t)fp->Nid_cell, am[a], 0, &ob, &s, &rank, &sig);
+      nhyp++;
+      for (int k = 0; k < in->nrd && nh < E3_HYPS; k++)
+        if (e3_same_foot(&in->rp[kb], &in->rp[k]) && in->rd[k].n_ids > 0) h[nh++] = (nr_pdsch_phys_hyp_t){in->rd[k].ids, in->rd[k].n_ids, -1, (uint8_t)a, rank, sig};
+    }
+  }
+  t_e1_tdd_valid = false;
+  ex.only = -1;
+  if (nr_pdsch_solver_phys_note(in->rnti, (uint64_t)in->abs, h, nh, e3_e1_cb, &ex, in->dlen)) nr_traffic_count(NR_TRAFFIC_CNT_E3_PHYS_SOLVED);
+  free(h); free(feet); free(rg);
+  nr_traffic_add(NR_TRAFFIC_CNT_E3_HYPS, (uint64_t)nhyp);
+  nr_traffic_add(NR_TRAFFIC_CNT_E3_NS, btim_now_ns() - t0);
+}
+
+static void e3_solved(const e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, bool phys, uint64_t t0)
+{
+  const int g = in->gid[in->rep];
+  int32_t scr;
+  uint8_t add;
+  if (g == 0xff || !nr_pdsch_solver_solution(in->rnti, &scr, &add)) return;
+  const nr_pdcch_blind_result_t *pr = &in->rp[g];
+  const bool qm_ok = pr->rv == 0 && pr->mcs <= 27 && __builtin_popcount((unsigned)pr->dmrs_ports) == 1 && nr_pdsch_solver_table_evidence(in->rnti) == 0;
+  const bool qm_budget = e3_budget_ok(t0, 1);
+  if (qm_ok && !qm_budget) nr_traffic_count(NR_TRAFFIC_CNT_E3_QM_DEFERRED);
+  const bool want_qm = qm_ok && qm_budget && e3_rnti_due(in->rnti, in->abs, E3_QM_EVERY_SLOTS, true);
+  const uint16_t dm = nr_pdsch_solver_dmrs_mask(l0, 1, 13, add & 3);
+  if (l0 + 1 >= fp->symbols_per_slot) return;
+  nr_dl_obs_t ob;
+  if (!e3_grid(in->ue, in->proc, l0, (uint16_t)(dm | (want_qm ? 1u << (l0 + 1) : 0u)), &ob)) { nr_traffic_count(NR_TRAFFIC_CNT_E3_SKIP); return; }
+  e3_foot_t *ff = malloc(sizeof *ff);
+  if (!ff) return;
+  if (e3_foot(in->cfg, fp, pr, ff)) {
+    const uint32_t nid = scr < 0 ? (uint32_t)fp->Nid_cell : (uint32_t)(scr & 0xFFFF);
+    nr_dl_score_t s;
+    float rank;
+    bool sig;
+    e3_score(ff, nid, dm, 0, &ob, &s, &rank, &sig);
+    nr_traffic_count(NR_TRAFFIC_CNT_E3_SCORED);
+    nr_traffic_add(NR_TRAFFIC_CNT_E3_HYPS, 1);
+    if (phys) {
+      const bool scorable = ff->h.n_crb >= (ff->h.dmrs_type == 1 ? 6 : 11);
+      if (nr_pdsch_solver_phys_check(in->rnti, scorable, sig)) { nr_traffic_count(NR_TRAFFIC_CNT_E3_REOPEN_SCORE); nr_dci11_bank_alive_clear(in->rnti); }
+    }
+    if (want_qm && sig) {
+      const uint64_t q0 = btim_now_ns();
+      e3_score(ff, nid, dm, (uint16_t)(1u << (l0 + 1)), &ob, &s, &rank, &sig);
+      e3_charge(btim_now_ns() - q0, 1);
+      nr_traffic_count(NR_TRAFFIC_CNT_E3_QM_CALLS);
+      nr_traffic_add(NR_TRAFFIC_CNT_E3_QM_NS, btim_now_ns() - q0);
+      if (sig && s.qm) nr_pdsch_solver_qm_note(in->rnti, (uint64_t)in->abs, pr->mcs, s.qm);
+    }
+  }
+  free(ff);
+  nr_traffic_add(NR_TRAFFIC_CNT_E3_NS, btim_now_ns() - t0);
+}
+
+/* One DCI 1_1 grant (traffic mode, scan consumer). Cheap tests first; nothing here touches the receive thread. */
+static void e3_grant(const e3_in_t *in)
+{
+  if (in->abs < 0 || in->R == NULL) return;
+  const NR_DL_FRAME_PARMS *fp = &in->ue->frame_parms;
+  const int l0 = in->cfg->dmrs_typeA_position + 2, spf = fp->slots_per_frame;
+  const uint64_t t0 = btim_now_ns();
+  bool phys = false, solved = false;
+  if (in->rep >= 0) {
+    phys = nr_pdsch_solver_phys_unconfirmed(in->rnti);
+    solved = true;
+    if (phys && in->rep < (int)__atomic_load_n(&in->R->n_hyp, __ATOMIC_ACQUIRE) && nr_pdsch_solver_phys_tick(in->rnti)) {
+      /* E1 violation: the RNTI's bank no longer fits the class of its phys-solved layout */
+      const nr_dci11_class_t k = {in->R->hyp[in->rep], in->R->off[in->rep]};
+      t_e1_tdd_valid = false;
+      if (!nr_dci11_bank_consistent(in->rnti, &k, e1_ul_capable)) {
+        nr_pdsch_solver_reopen(in->rnti);
+        nr_dci11_bank_alive_clear(in->rnti);
+        nr_traffic_count(NR_TRAFFIC_CNT_E3_REOPEN_E1);
+        return;
+      }
+    }
+    if (!phys && nr_pdsch_solver_table_evidence(in->rnti) != 0) return;   /* CRC-solved with a known table: nothing for E3 to look at */
+  }
+  if (!e3_rnti_due(in->rnti, in->abs, spf > 0 ? spf : 20, false)) return;   /* one scored grant per RNTI per radio frame */
+  if (!e3_budget_ok(t0, 0)) { nr_traffic_count(NR_TRAFFIC_CNT_E3_DEFERRED); return; }
+  /* the slot must be in the ring and a full DL slot: no waiting here (the DM-RS fit already waited for an unsolved RNTI) */
+  if (!nr_slot_gate_is_complete(&nr_slot_gate, (long)in->abs)) { nr_traffic_count(NR_TRAFFIC_CNT_E3_SKIP); return; }
+  { int8_t last = -1;
+    if (nr_passive_acq_tdd_pdsch_last_symbols((uint32_t)in->abs, (int)fp->numerology_index, 1, &last) && last < fp->symbols_per_slot - 1) { nr_traffic_count(NR_TRAFFIC_CNT_E3_SKIP); return; } }
+  if (solved) e3_solved(in, fp, l0, phys, t0);
+  else e3_unsolved(in, fp, l0, t0);
+  e3_charge(btim_now_ns() - t0, 0);
 }
 
 /* The decode gate of a non-probe C-RNTI job (see nr_traffic_decode.h); other RNTI classes are always decoded. */
@@ -9801,6 +10196,11 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
 #undef s_weak
       if (nrd <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_NOREAD);
       else if (sv_budget <= 0 && !sv_weak) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_BUDGET0);
+      /* E3 (traffic mode only): CRC-free layout evidence from the DM-RS on this scan consumer; may solve the RNTI, reopen it, or note its Qm */
+      if (tw >= 0 && nrd > 0 && out.rnti_class == NR_BLIND_RNTI_CLASS_C) {
+        const e3_in_t e3in = {ue, proc, cfg, R, out.rnti, dlen, rep, (int64_t)source_absolute_slot, rparsed, rd, nrd, s_gid};
+        e3_grant(&e3in);
+      }
       /* E4: the first DCI of a C-RNTI (traffic mode) is planned with the solver's seeded variants only; the full search starts at the second */
       nr_pdsch_solver_set_seeded_only(tw >= 0 && out.rnti_class == NR_BLIND_RNTI_CLASS_C && t_seen < 2);
       const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
@@ -9819,7 +10219,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
             float tsnr = -100.f;
             if (!nr_pdsch_solver_snr(out.rnti, &tsnr)) tsnr = -100.f;
             const int na = nr_dci11_bank_alive(out.rnti);
-            tprobe = nr_traffic_probe_wanted(0, out.rnti, 0, t_seen, na < 0 ? 1 : na, t_seen < 2 /* seeded variants only: like a family match */, tsnr, (int)o->mcs, (int)var[v].table) ? 1 : 0;
+            tprobe = nr_traffic_probe_wanted(0, out.rnti, 0, t_seen, na < 0 ? 1 : na, nr_pdsch_solver_family_match(out.rnti, rw->payload, dlen), tsnr, (int)o->mcs, (int)var[v].table) ? 1 : 0;
           }
           if (tprobe == 0) {
             nr_traffic_count(NR_TRAFFIC_CNT_PROBE_SKIP);

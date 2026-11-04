@@ -27,6 +27,7 @@ typedef struct {
   nr_layout_state_t layout_state; uint32_t layout_checks_ok, layout_checks_fail;
   uint8_t layout_evidence;       /* NR_LAYOUT_EV_*: what proved the layout (0 = unknown, the memset default) */
   uint8_t fields_evidence;       /* NR_LAYOUT_EV_*: what proved the HARQ-ACK fields (k1, dai, tpc, pri) printed here: BITS = the E1 split proof, CRC = the CRC-solved layout */
+  uint8_t table_evidence;        /* E3: what fixed the MCS table behind mcs_table / qm / tbs: 0 unknown (null), 1 = a CRC pass, 2 = Qm consensus with a CRC pass of that table. A PHYS layout prints S, L, table, qm and tbs only with a table evidence of 2 (S and L: never, they are CRC-learnt) */
   uint32_t cfg_ref_ver;          /* with m.identity_gen + m.dedicated_epoch = cfg_ref */
   int16_t bwp_start, bwp_size, start_rb_bwp;  /* -1 unknown */
   int8_t vrb_prb, tda_index, k0, k1, dai, tpc, pri, srs_req, csi_req, ulsch_ind, cbgti, retx; /* -1 unknown */
@@ -46,13 +47,19 @@ typedef struct {
   uint64_t e1_deferred_scoped;   /* the same, of a solved RNTI's own-class (scoped) looks */
   uint64_t e1_deferred;   /* E1 looks held back by the per-cell prove budget (20 ms per s), once per RNTI episode */
   uint64_t e1_cls[5];   /* histogram of alive layout classes per prove attempt of an UNSOLVED RNTI: 1, 2-4, 5-16, 17-64, >64 */   /* E1 prover: proven-state changes; rounds skipped (more than NR_DCI11_CLASS_MAX layout classes, or an incomplete resolver set); C-RNTI 1_1 accepts of tasks that keep no payload (never fed) */
+  uint64_t e3_scored, e3_hyps, e3_ns, e3_phys_solved, e3_fam_accept, e3_fam_tried, e3_reopen_score, e3_reopen_e1, e3_deferred, e3_skip;   /* E3: grants scored on the scan consumer, hypotheses scored, their CPU (ns), RNTIs solved by physics, by a family (accepted / tried), reopened by the score / by E1, grants held back by the per-cell budget, skipped (slot not ready, TDD mixed slot, no grid) */
+  uint64_t e3_qm_calls, e3_qm_deferred, e3_qm_ns;   /* Qm classifier looks (each ~ms), held back by the Qm budget, their CPU (ns) */
   uint64_t emit_us_p50, emit_us_p99;
 } nr_traffic_stats_t;
 void nr_traffic_count_dci(int fmt, nr_layout_state_t ls, uint64_t emit_ns);   /* one emitted DCI record + its fill+emit time */
 void nr_traffic_count(int what);   /* NR_TRAFFIC_CNT_* */
+void nr_traffic_add(int what, uint64_t n);   /* the same, by n */
 enum { NR_TRAFFIC_CNT_DUP, NR_TRAFFIC_CNT_SKIP, NR_TRAFFIC_CNT_CHECK, NR_TRAFFIC_CNT_CHECK_FAIL, NR_TRAFFIC_CNT_PROBE, NR_TRAFFIC_CNT_REOPEN, NR_TRAFFIC_CNT_REOPEN_UL, NR_TRAFFIC_CNT_E1_CHANGE, NR_TRAFFIC_CNT_E1_SKIP, NR_TRAFFIC_CNT_E1_UNFED,
        NR_TRAFFIC_CNT_E1_CLS_1, NR_TRAFFIC_CNT_E1_CLS_2_4, NR_TRAFFIC_CNT_E1_CLS_5_16, NR_TRAFFIC_CNT_E1_CLS_17_64, NR_TRAFFIC_CNT_E1_CLS_GT64, NR_TRAFFIC_CNT_E1_DEFERRED, NR_TRAFFIC_CNT_E1_DEFERRED_SCOPED,
-       NR_TRAFFIC_CNT_CHECK_UL, NR_TRAFFIC_CNT_PROBE_UL, NR_TRAFFIC_CNT_PROBE_SKIP, NR_TRAFFIC_CNT_UL_SKIP, NR_TRAFFIC_CNT_N };   /* CHECK/PROBE = DL */
+       NR_TRAFFIC_CNT_CHECK_UL, NR_TRAFFIC_CNT_PROBE_UL, NR_TRAFFIC_CNT_PROBE_SKIP, NR_TRAFFIC_CNT_UL_SKIP,
+       NR_TRAFFIC_CNT_E3_SCORED, NR_TRAFFIC_CNT_E3_HYPS, NR_TRAFFIC_CNT_E3_NS, NR_TRAFFIC_CNT_E3_PHYS_SOLVED, NR_TRAFFIC_CNT_E3_FAM_ACCEPT, NR_TRAFFIC_CNT_E3_FAM_TRIED,
+       NR_TRAFFIC_CNT_E3_REOPEN_SCORE, NR_TRAFFIC_CNT_E3_REOPEN_E1, NR_TRAFFIC_CNT_E3_DEFERRED, NR_TRAFFIC_CNT_E3_SKIP, NR_TRAFFIC_CNT_E3_QM_CALLS,
+       NR_TRAFFIC_CNT_E3_QM_DEFERRED, NR_TRAFFIC_CNT_E3_QM_NS, NR_TRAFFIC_CNT_N };   /* CHECK/PROBE = DL */
 void nr_traffic_stats_get(nr_traffic_stats_t *s);
 /* Traffic mode: one decode outcome (probe or full decode, crc < 0 = no verdict) -> the "decode" record, the check/probe counters and the
  * reopen decision. Returns true after K consecutive counted failures. dir 0: the caller then calls nr_pdsch_solver_reopen (reopens). dir 1: the

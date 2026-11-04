@@ -540,6 +540,24 @@ int nr_dci11_bank_alive(uint16_t rnti)
   return a;
 }
 
+bool nr_dci11_bank_consistent(uint16_t rnti, const nr_dci11_class_t *cls, nr_ul_slot_fn ul)
+{
+  if (!cls) return false;
+  nr_dci11_obs_t snap[NR_DCI11_BANK];
+  int n = 0;
+  pthread_mutex_lock(&g_bank_mu);
+  const bank_t *b = bank_find(rnti);
+  if (b) {
+    n = b->cnt;
+    for (int i = 0; i < n; i++) snap[i] = b->obs[(b->head + NR_DCI11_BANK - n + i) % NR_DCI11_BANK];
+  }
+  pthread_mutex_unlock(&g_bank_mu);
+  if (n == 0) return true;
+  nr_dci11_split_t alive[NR_DCI11_CORE_MAX];
+  double cp[NR_DCI11_CORE_MAX];
+  return nr_dci11_prove(&cls->l, &cls->o, snap, n, ul, alive, cp, NR_DCI11_CORE_MAX) != 0;   /* -1 (bad arguments / not examinable) is not a refutation */
+}
+
 bool nr_dci11_bank_proven_any(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out)
 {
   return nr_dci11_bank_proven_scope(rnti, cls, out, NULL);

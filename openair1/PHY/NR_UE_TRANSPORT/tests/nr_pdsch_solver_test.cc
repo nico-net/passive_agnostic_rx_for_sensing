@@ -2070,3 +2070,351 @@ TEST(PdschSolverRvc, HrvAlertFiresOncePerNewViolation)
   nr_pdsch_solver_set_hq_fn(nullptr, nullptr);
   nr_pdsch_solver_reset();
 }
+
+// ---- E3: CRC-free SOLVED path (DM-RS physics), layout families, Qm ledger. The scores are synthetic: the solver only sees E2's outcome. ----
+#include <cmath>
+extern "C" {
+#include "common/utils/nr_cell.h"
+#include "nr_pdsch_cell_prealloc.h"
+}
+namespace {
+std::vector<uint16_t> Ids(int a, int b) { std::vector<uint16_t> v; for (int i = a; i < b; i++) v.push_back((uint16_t)i); return v; }
+struct E3Hyps {
+  std::vector<uint16_t> truth = Ids(10, 15), over = Ids(20, 30), under = Ids(40, 44);
+  // truth: complete footprint; over: claims empty cells; under: omits real cells
+  std::vector<nr_pdsch_phys_hyp_t> make(float rt, float ro, float ru, bool sig_t = true, bool sig_o = true, bool sig_u = true) const
+  {
+    return {{truth.data(), (int)truth.size(), -1, 1, rt, sig_t}, {over.data(), (int)over.size(), -1, 1, ro, sig_o},
+            {under.data(), (int)under.size(), -1, 1, ru, sig_u}};
+  }
+};
+int PhysGrants(uint16_t rnti, const E3Hyps &e, int n, uint64_t t0, nr_pdsch_e1_fn e1 = nullptr, std::mt19937 *rng = nullptr, float p_truth = 1.f)
+{
+  int solved_at = -1;
+  for (int g = 0; g < n; g++) {
+    float rt = 1.8f, ro = 1.2f, ru = 1.0f;
+    if (rng && std::uniform_real_distribution<float>(0, 1)(*rng) > p_truth) rt = 1.1f;   // this grant the truth is outranked by `over`
+    auto h = e.make(rt, ro, ru);
+    if (nr_pdsch_solver_phys_note(rnti, t0 + (uint64_t)g, h.data(), (int)h.size(), e1, nullptr, 49) && solved_at < 0) solved_at = g + 1;
+  }
+  return solved_at;
+}
+void E3Setup()
+{
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr);
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+}
+// a CRC-confirmed, promoted solved RNTI: the cell's one family (layout 10..14, add_pos 2, scr -1, DCI length 49)
+void MakeFamily(uint16_t rnti, std::mt19937 &rng)
+{
+  Cell c;
+  c.add_pos = 2;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  ASSERT_GT(RunCell(c, rnti, -1, 400, rng), 0);
+  FullDecodes(rnti, c, 20, true, rng);
+}
+}   // namespace
+
+TEST(E3Phys, PhysSolvesWithoutCrc)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e01;
+  EXPECT_EQ(nr_pdsch_solver_layout_evidence(r), NR_LAYOUT_EV_NONE);
+  const int at = PhysGrants(r, e, 60, 1000);
+  ASSERT_GT(at, 0) << "a consistent winner must solve";
+  EXPECT_GE(at, 10) << "fewer than 10 detections can never reach alpha";
+  uint32_t ok = 7, fail = 7;
+  EXPECT_EQ(nr_pdsch_solver_layout_state(r, &ok, &fail), NR_LAYOUT_SOLVED);
+  EXPECT_EQ(ok, 0u);   // zero CRC feedback was given
+  EXPECT_EQ(nr_pdsch_solver_layout_evidence(r), NR_LAYOUT_EV_PHYS);
+  const int rep = nr_pdsch_solver_rep(r);
+  EXPECT_TRUE(rep >= 10 && rep < 15) << rep;
+  uint16_t ids[16];
+  EXPECT_EQ(nr_pdsch_solver_layouts(r, ids, 16), 5);
+  EXPECT_EQ(nr_pdsch_solver_table_evidence(r), 0) << "the MCS table is unknown until CRC";
+  EXPECT_TRUE(nr_pdsch_solver_phys_unconfirmed(r));
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Phys, NoSolveBeforeTheSequentialTestIsSignificant)
+{
+  E3Setup();
+  E3Hyps e;
+  EXPECT_LT(PhysGrants(0x4e02, e, 9, 1000), 0) << "9 grants cannot reach alpha = 1e-3";
+  EXPECT_EQ(nr_pdsch_solver_layout_state(0x4e02, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  // the truth wins only 65 % of the grants: the sign test against `over` stays below significance for a long time, never a certain answer in 25 grants
+  std::mt19937 rng(5);
+  EXPECT_LT(PhysGrants(0x4e03, e, 25, 1000, nullptr, &rng, 0.65f), 0);
+  EXPECT_EQ(nr_pdsch_solver_layout_state(0x4e03, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Phys, FootprintTwinsNeverSolve)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e04;
+  for (int g = 0; g < 200; g++) {
+    auto h = e.make(1.8f, 1.8f, 0.5f);   // truth and `over` score identically
+    EXPECT_EQ(nr_pdsch_solver_phys_note(r, 2000 + (uint64_t)g, h.data(), (int)h.size(), nullptr, nullptr, 49), 0);
+  }
+  EXPECT_EQ(nr_pdsch_solver_layout_state(r, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Phys, UnconfirmableHypothesesNeverWin)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e05;
+  for (int g = 0; g < 60; g++) {
+    auto h = e.make(1.8f, 1.2f, 1.0f, false, false, false);   // n_signif < n_cells everywhere / too few PRBs: cannot confirm
+    EXPECT_EQ(nr_pdsch_solver_phys_note(r, 3000 + (uint64_t)g, h.data(), (int)h.size(), nullptr, nullptr, 49), 0);
+  }
+  EXPECT_EQ(nr_pdsch_solver_layout_state(r, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Phys, SameSlotCountsOnce)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e06;
+  auto h = e.make(1.8f, 1.2f, 1.0f);
+  for (int g = 0; g < 100; g++) nr_pdsch_solver_phys_note(r, 4000, h.data(), (int)h.size(), nullptr, nullptr, 49);
+  EXPECT_EQ(nr_pdsch_solver_layout_state(r, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Phys, E1InconsistentWinnerIsNotAccepted)
+{
+  E3Setup();
+  E3Hyps e;
+  static bool asked;
+  asked = false;
+  EXPECT_LT(PhysGrants(0x4e07, e, 80, 1000, [](void *, const uint16_t *, int) { asked = true; return false; }), 0);
+  EXPECT_TRUE(asked);
+  EXPECT_EQ(nr_pdsch_solver_layout_state(0x4e07, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Phys, CrcStillConfirms)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e08;
+  ASSERT_GT(PhysGrants(r, e, 60, 1000), 0);
+  ASSERT_EQ(nr_pdsch_solver_layout_evidence(r), NR_LAYOUT_EV_PHYS);
+  // full decodes of the phys-solved layout: one CRC pass upgrades the evidence
+  Cell c;
+  c.add_pos = 1;
+  c.truth = e.truth;
+  c.wrong = e.over;
+  std::mt19937 rng(8);
+  nr_pdsch_solver_reading_t rd[1] = {{c.truth.data(), (int)c.truth.size(), 16}};
+  bool upgraded = false;
+  for (int g = 0; g < 200 && !upgraded; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(r, p, 49, 0, 2, rd, 1, 8, v);
+    for (int i = 0; i < n; i++)   // the S probes learn S from CRC; the full decodes that follow pass
+      nr_pdsch_solver_feedback(v[i].token, v[i].S == c.S_true[p.w[0] & 1] && v[i].add_pos == c.add_pos && v[i].table == c.table, true);
+    upgraded = nr_pdsch_solver_layout_evidence(r) == NR_LAYOUT_EV_CRC;
+  }
+  EXPECT_TRUE(upgraded);
+  EXPECT_FALSE(nr_pdsch_solver_phys_unconfirmed(r));
+  // a CRC-confirmed solution is not touched by the score-drop rule
+  for (int k = 0; k < 40; k++) EXPECT_FALSE(nr_pdsch_solver_phys_check(r, true, false));
+  EXPECT_EQ(nr_pdsch_solver_layout_state(r, nullptr, nullptr), NR_LAYOUT_SOLVED);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Phys, ReopensOnScoreDrop)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e09;
+  ASSERT_GT(PhysGrants(r, e, 60, 1000), 0);
+  // 16 looks with a few misses (low SNR): stays
+  for (int k = 0; k < 16; k++) EXPECT_FALSE(nr_pdsch_solver_phys_check(r, true, k % 5 != 0));
+  EXPECT_EQ(nr_pdsch_solver_layout_state(r, nullptr, nullptr), NR_LAYOUT_SOLVED);
+  // grants that cannot be confirmed (too few PRBs) are neither hit nor miss
+  for (int k = 0; k < 64; k++) EXPECT_FALSE(nr_pdsch_solver_phys_check(r, false, false));
+  EXPECT_EQ(nr_pdsch_solver_layout_state(r, nullptr, nullptr), NR_LAYOUT_SOLVED);
+  // the layout changes (RRC reconfiguration): the solution stops scoring
+  bool reopened = false;
+  for (int k = 0; k < 16 && !reopened; k++) reopened = nr_pdsch_solver_phys_check(r, true, false);
+  EXPECT_TRUE(reopened);
+  EXPECT_EQ(nr_pdsch_solver_layout_state(r, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  EXPECT_EQ(nr_pdsch_solver_layout_evidence(r), NR_LAYOUT_EV_NONE);
+  // and it can be solved again from scratch
+  EXPECT_GT(PhysGrants(r, e, 80, 9000), 0);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Family, AcceptsNewRntiOneDci)
+{
+  E3Setup();
+  std::mt19937 rng(61);
+  MakeFamily(0x00a1, rng);
+  nr_pdsch_family_t f[4];
+  ASSERT_EQ(nr_pdsch_solver_families(49, f, 4), 1);
+  EXPECT_EQ(f[0].add_pos, 2);
+  EXPECT_EQ(f[0].members, 1u);
+  EXPECT_TRUE(f[0].rep >= 10 && f[0].rep < 15);
+  const uint16_t nr = 0x4f01;
+  nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+  EXPECT_TRUE(nr_pdsch_solver_family_match(nr, p, 49));
+  EXPECT_FALSE(nr_pdsch_solver_family_match(nr, p, 51)) << "families are per DCI length";
+  const std::vector<uint16_t> ids = Ids(10, 15);
+  EXPECT_EQ(nr_pdsch_solver_family_accept(nr, &f[0], ids.data(), (int)ids.size(), -1, 49, 7000, nullptr, nullptr), 1);
+  EXPECT_EQ(nr_pdsch_solver_layout_state(nr, nullptr, nullptr), NR_LAYOUT_SOLVED);
+  EXPECT_EQ(nr_pdsch_solver_layout_evidence(nr), NR_LAYOUT_EV_PHYS);
+  EXPECT_EQ(nr_pdsch_solver_table_evidence(nr), 0) << "the MCS table is not inherited";
+  EXPECT_FALSE(nr_pdsch_solver_family_match(nr, p, 49)) << "already solved";
+  // the accepted RNTI is not a family member until a full TB passes
+  ASSERT_EQ(nr_pdsch_solver_families(49, f, 4), 1);
+  EXPECT_EQ(f[0].members, 1u);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Family, RejectsInconsistentBitsAndForeignReadings)
+{
+  E3Setup();
+  std::mt19937 rng(62);
+  MakeFamily(0x00a1, rng);
+  nr_pdsch_family_t f[4];
+  ASSERT_EQ(nr_pdsch_solver_families(49, f, 4), 1);
+  const std::vector<uint16_t> ids = Ids(10, 15), other = Ids(40, 44);
+  EXPECT_EQ(nr_pdsch_solver_family_accept(0x4f02, &f[0], ids.data(), (int)ids.size(), -1, 49, 7000,
+                                           [](void *, const uint16_t *, int) { return false; }, nullptr), 0)
+      << "the RNTI's E1 bank refutes the family's class";
+  EXPECT_EQ(nr_pdsch_solver_layout_state(0x4f02, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  EXPECT_EQ(nr_pdsch_solver_family_accept(0x4f03, &f[0], other.data(), (int)other.size(), -1, 49, 7000, nullptr, nullptr), 0)
+      << "the reading does not contain the family's layout";
+  nr_pdsch_family_t bogus = f[0];
+  bogus.add_pos = 0;
+  EXPECT_EQ(nr_pdsch_solver_family_accept(0x4f04, &bogus, ids.data(), (int)ids.size(), -1, 49, 7000, nullptr, nullptr), 0) << "no such family";
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Family, FamiliesPerCell)
+{
+  nr_cell_bind(0);
+  nr_pdsch_solver_cell_prealloc(0);
+  nr_pdsch_solver_cell_prealloc(1);
+  E3Setup();
+  nr_cell_bind(1);
+  E3Setup();
+  nr_cell_bind(0);
+  std::mt19937 rng(63);
+  MakeFamily(0x00a1, rng);
+  nr_pdsch_family_t f[4];
+  EXPECT_EQ(nr_pdsch_solver_families(49, f, 4), 1);
+  nr_cell_bind(1);
+  EXPECT_EQ(nr_pdsch_solver_families(49, f, 4), 0) << "cell 0's family must not leak into cell 1";
+  nr_dci_bits_t p = {{1, 0, 0}};
+  EXPECT_FALSE(nr_pdsch_solver_family_match(0x4f05, p, 49));
+  nr_cell_bind(0);
+  EXPECT_TRUE(nr_pdsch_solver_family_match(0x4f05, p, 49));
+  nr_pdsch_solver_reset();
+  nr_cell_bind(1);
+  nr_pdsch_solver_reset();
+  nr_cell_bind(0);
+}
+
+TEST(E3Family, ResetOnIdentityChange)
+{
+  E3Setup();
+  std::mt19937 rng(64);
+  MakeFamily(0x00a1, rng);
+  nr_pdsch_family_t f[4];
+  ASSERT_EQ(nr_pdsch_solver_families(49, f, 4), 1);
+  nr_pdsch_solver_reset();   // what the epoch listener calls
+  EXPECT_EQ(nr_pdsch_solver_families(49, f, 4), 0);
+}
+
+TEST(E3Qm, ConsensusNeedsDistinctSlotsAndZeroDissent)
+{
+  E3Setup();
+  const uint16_t r = 0x4e20;
+  // MCS 12: table 0 -> Qm 4, table 1 -> 6, table 2 -> 2: all three differ
+  int q0, q1, q2, r2;
+  ASSERT_TRUE(nr_pdsch_solver_mcs_qr(0, 12, &q0, &r2)); ASSERT_TRUE(nr_pdsch_solver_mcs_qr(1, 12, &q1, &r2)); ASSERT_TRUE(nr_pdsch_solver_mcs_qr(2, 12, &q2, &r2));
+  ASSERT_TRUE(q0 != q1 && q1 != q2 && q0 != q2);
+  // the first grants make a Solved layout: qm only counts for a SOLVED layout
+  nr_pdsch_solver_qm_note(r, 100, 12, q1);
+  EXPECT_EQ(nr_pdsch_solver_qm_table(r), -1);
+  E3Hyps e;
+  ASSERT_GT(PhysGrants(r, e, 60, 1000), 0);
+  for (int k = 0; k < 7; k++) nr_pdsch_solver_qm_note(r, 200 + (uint64_t)k, 12, q1);
+  EXPECT_EQ(nr_pdsch_solver_qm_table(r), -1) << "7 grants are not a consensus";
+  nr_pdsch_solver_qm_note(r, 206, 12, q1);   // the same slot again: still 7
+  EXPECT_EQ(nr_pdsch_solver_qm_table(r), -1);
+  nr_pdsch_solver_qm_note(r, 207, 12, q1);
+  EXPECT_EQ(nr_pdsch_solver_qm_table(r), 1);
+  EXPECT_EQ(nr_pdsch_solver_table_evidence(r), 0) << "consensus alone is never a field: it needs a CRC pass with that table";
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Qm, OneDissentMakesItUnknown)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e21;
+  ASSERT_GT(PhysGrants(r, e, 60, 1000), 0);
+  int q1, r2, q0;
+  ASSERT_TRUE(nr_pdsch_solver_mcs_qr(1, 12, &q1, &r2)); ASSERT_TRUE(nr_pdsch_solver_mcs_qr(0, 12, &q0, &r2));
+  for (int k = 0; k < 30; k++) nr_pdsch_solver_qm_note(r, 200 + (uint64_t)k, 12, q1);
+  ASSERT_EQ(nr_pdsch_solver_qm_table(r), 1);
+  nr_pdsch_solver_qm_note(r, 300, 12, q0);   // one grant reads the other table's Qm
+  EXPECT_EQ(nr_pdsch_solver_qm_table(r), -1) << "any dissent makes the field UNKNOWN";
+  for (int k = 0; k < 30; k++) nr_pdsch_solver_qm_note(r, 400 + (uint64_t)k, 12, q1);
+  EXPECT_EQ(nr_pdsch_solver_qm_table(r), -1) << "and it stays unknown";
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Qm, UninformativeAndImpossibleGrants)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e22;
+  ASSERT_GT(PhysGrants(r, e, 60, 1000), 0);
+  // MCS 0 is QPSK in every table: no information, no vote
+  for (int k = 0; k < 40; k++) nr_pdsch_solver_qm_note(r, 200 + (uint64_t)k, 0, 2);
+  EXPECT_EQ(nr_pdsch_solver_qm_table(r), -1);
+  // a Qm that no table gives for this MCS poisons the ledger for good
+  int q1, r2;
+  ASSERT_TRUE(nr_pdsch_solver_mcs_qr(1, 12, &q1, &r2));
+  nr_pdsch_solver_qm_note(r, 300, 12, 8 /* no table: MCS 12 is 4, 6 or 2 */);
+  for (int k = 0; k < 40; k++) nr_pdsch_solver_qm_note(r, 400 + (uint64_t)k, 12, q1);
+  EXPECT_EQ(nr_pdsch_solver_qm_table(r), -1);
+  nr_pdsch_solver_qm_note(r, 999, 12, 0);   // qm 0 = undecided: not a vote
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Qm, TableEvidenceIsQmConsensusOnlyWithCrcOfTheSameTable)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e23;
+  ASSERT_GT(PhysGrants(r, e, 60, 1000), 0);
+  int q1, r2;
+  ASSERT_TRUE(nr_pdsch_solver_mcs_qr(1, 12, &q1, &r2));
+  for (int k = 0; k < 20; k++) nr_pdsch_solver_qm_note(r, 200 + (uint64_t)k, 12, q1);
+  ASSERT_EQ(nr_pdsch_solver_qm_table(r), 1);
+  // a full-decode CRC pass that learns table 1 (the consensus table)
+  std::vector<uint16_t> ids = e.truth;
+  nr_pdsch_solver_reading_t rd[1] = {{ids.data(), (int)ids.size(), 16, 1, 1, 12}};
+  std::mt19937 rng(9);
+  for (int g = 0; g < 400 && nr_pdsch_solver_table_evidence(r) == 0; g++) {
+    nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+    nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+    const int n = nr_pdsch_solver_plan(r, p, 49, 12, 2, rd, 1, 8, v);
+    for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, v[i].table == 1, true);
+  }
+  EXPECT_EQ(nr_pdsch_solver_table_evidence(r), 2);
+  nr_pdsch_solver_reset();
+}

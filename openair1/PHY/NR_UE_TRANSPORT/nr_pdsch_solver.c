@@ -24,6 +24,7 @@
 #define SOLVER_CAND_TRIES 96      /* confirmation probes before an unconfirmed candidate is dropped */
 #define BM_BYTES (NR_PDSCH_SOLVER_MAX_LAYOUTS / 8)
 #define HQ_RING 64
+#define PHYS_K 16                 /* E3: hypotheses tracked per RNTI by the sign test */
 
 typedef struct { uint64_t key; uint32_t count; } coverage_entry_t;
 /* internal diagnostic reasons, after the caller-side NR_PDSCH_SOLVER_WHY_* ones */
@@ -87,6 +88,19 @@ typedef struct {
   uint32_t hq_bad_prev;    /*   violations seen at the last re-selection (the alert fires when the count rises) */
   bool hrv_alert;          /*   traffic mode: a HARQ/RV violation was counted (nr_pdsch_solver_take_hrv_alert) */
   bool mcs_pos, promoted;  /*   a CRC pass at MCS > 0 happened; the solution has been allowed to seed the cell */
+  /* E3 (traffic mode): the solution came from DM-RS physics (phys) or a family (fam); the sign test between hypotheses; the score ring; the Qm ledger */
+  bool phys, fam;
+  uint16_t dlen;           /*   DCI length of the last planned grant (families are per length) */
+  uint8_t tick;
+  uint8_t ring_n;          /*   scorable looks kept in ring (<= 16), bit set = miss */
+  uint16_t ring;
+  uint8_t px_n;
+  uint64_t px_last_abs;
+  struct { int32_t lid, scr; uint8_t add_pos; uint16_t det; } px_c[PHYS_K];
+  uint16_t px_a[PHYS_K][PHYS_K]; /* px_a[i][j]: grants where i was significant and outranked j */
+  uint64_t qm_last;
+  uint16_t qm_agree[3], qm_dis[3];
+  bool qm_poison;
 } solver_rnti_t;
 
 typedef struct {
@@ -937,13 +951,14 @@ static bool seed_same(const solver_rnti_t *a, const solver_rnti_t *b)
   return true;
 }
 static bool seed_eligible(const solver_rnti_t *q) { return q->used && q->solved && q->rep >= 0 && q->full_ok >= 1 && q->promoted; }
-static int seed_tuples(seed_t *top)
+/* E3: len != 0 keeps only the RNTIs whose DCIs have that length (a layout family is per cell and DCI length); `max` tuples are returned. len = 0, max = SEED_MAX: the legacy call. */
+static int seed_tuples_f(seed_t *top, int max, int len)
 {
   seed_t g[SOLVER_RNTIS];
   int ng = 0;
   for (int k = 0; k < SOLVER_RNTIS; k++) {
     const solver_rnti_t *q = &g_r[k];
-    if (!seed_eligible(q)) continue;
+    if (!seed_eligible(q) || (len && q->dlen != len)) continue;
     int j = 0;
     while (j < ng && !seed_same(g[j].src, q)) j++;
     if (j == ng) { g[ng].src = q; g[ng].n = 0; g[ng].ok = 0; ng++; }
@@ -955,13 +970,14 @@ static int seed_tuples(seed_t *top)
   for (int j = 0; j < ng; j++) {
     int pos = nt;
     while (pos > 0 && (top[pos - 1].n < g[j].n || (top[pos - 1].n == g[j].n && top[pos - 1].ok < g[j].ok))) pos--;
-    if (pos >= SEED_MAX) continue;
-    for (int z = (nt < SEED_MAX ? nt : SEED_MAX - 1); z > pos; z--) top[z] = top[z - 1];
+    if (pos >= max) continue;
+    for (int z = (nt < max ? nt : max - 1); z > pos; z--) top[z] = top[z - 1];
     top[pos] = g[j];
-    if (nt < SEED_MAX) nt++;
+    if (nt < max) nt++;
   }
   return nt;
 }
+static int seed_tuples(seed_t *top) { return seed_tuples_f(top, SEED_MAX, 0); }
 /* seed_cellwide: whether most solved members of tuple `t` that sit in CORESET `key` use one scrambling (a cell-wide / per-CORESET
  * identity); that scrambling is then *scr. 1 = cell-wide (>= 2 members share it, a majority); 0 = per UE (PCI 923: the members'
  * identities differ, a new RNTI's is not any of theirs); -1 = a single member, no evidence of sharing either way; -2 = no member in this
@@ -1326,7 +1342,6 @@ int nr_pdsch_solver_plan(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uin
 int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, uint8_t mcs, int l0, bool csirs_slot,
                               const nr_pdsch_solver_reading_t *rd, int n_rd, int budget, nr_pdsch_solver_var_t *out)
 {
-  (void)len;
   if (!nr_pdsch_solver_enabled() || rd == NULL || n_rd <= 0 || out == NULL || budget <= 0)
     return 0;
   if (budget > NR_PDSCH_SOLVER_MAX_VAR)
@@ -1345,6 +1360,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
   if (r->key == ctx->key && r->alt_hash != ctx->hash) r->n_probe = 0; /* new hypotheses on ITS CORESET: search again */
   r->alt_hash = ctx->hash;
   r->key = ctx->key;
+  r->dlen = len;
   r->grants++;
   /* DCI11-RESOLVER: no width limit and no modulation preference -- every reading is a candidate, ordered and weighted by the DM-RS
    * fit (plan_coverage) and decided by CRC. The former 48-RB / BWP-width search cap and the one-layer-QPSK preference were priors
@@ -1790,6 +1806,7 @@ static void make_cand(solver_rnti_t *r, const pending_t *p)
 static void solve_now(solver_rnti_t *r, const pending_t *p, int kept)
 {
   r->solved = true;
+  r->phys = r->fam = false; /* E3: a CRC-solved layout */
   memset(r->S_by_tda, -1, sizeof(r->S_by_tda));
   memset(r->L_by_tda, -1, sizeof(r->L_by_tda));
   bool refuted = false;
@@ -2576,6 +2593,344 @@ void nr_pdsch_solver_cell_prealloc(int cell)
   NR_CELL_HEAP_PREALLOC(g_r_arr_t, g_r, cell);
 }
 
+/* ================= E3 (traffic mode): CRC-free SOLVED path from DM-RS physics, layout families, Qm ledger ================= */
+#define PHYS_MIN_DET 10      /* ceil(log2(1 / NBS_SIGNIF_ALPHA)): a one-sided sign test cannot reach alpha with fewer detections, whatever the rivals */
+#define PHYS_ADMIT 3         /* new hypotheses admitted per grant (the best significant ones not tracked yet) */
+#define PHYS_RING 16         /* looks of the score-drop rule */
+#define PHYS_P0 0.25         /* a layout that is right is not confirmed on up to this share of its scorable looks (low SNR, a neighbour's DM-RS) */
+#define QM_MIN 8             /* distinct-slot informative grants of a Qm consensus */
+
+/* phys_forget: clears every E3 state of an unsolved / reopened RNTI (the sign test, the score ring, the phys flags; the Qm ledger stays with the RNTI's life). */
+static void phys_forget(solver_rnti_t *r)
+{
+  r->phys = r->fam = false;
+  r->px_n = 0;
+  r->px_last_abs = 0;
+  memset(r->px_c, 0, sizeof r->px_c);
+  memset(r->px_a, 0, sizeof r->px_a);
+  r->ring = 0;
+  r->ring_n = 0;
+  r->tick = 0;
+}
+
+int nr_pdsch_solver_layout_evidence(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  const int ev = !r || !r->solved ? NR_LAYOUT_EV_NONE : (r->phys && r->full_ok == 0) ? NR_LAYOUT_EV_PHYS : NR_LAYOUT_EV_CRC;
+  pthread_mutex_unlock(&g_mu);
+  return ev;
+}
+
+bool nr_pdsch_solver_phys_unconfirmed(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  const bool u = r && r->solved && r->phys && r->full_ok == 0;
+  pthread_mutex_unlock(&g_mu);
+  return u;
+}
+
+/* the ids of a reading are in no particular order (the monitor appends them per FDRA class); a reading holds the layouts of one DCI, a few dozen to a few thousand */
+static bool ids_has(const uint16_t *ids, int n, int id)
+{
+  for (int i = 0; i < n; i++)
+    if (ids[i] == id) return true;
+  return false;
+}
+
+/* phys_solve: the RNTI becomes SOLVED on the reading `ids` (add_pos, scr as scored). No CRC evidence exists: table, S, L and rate matching are unknown and are
+ * learnt by CRC like any solved RNTI's; the solution does not seed the cell until a full TB passes (seed_eligible). Under g_mu. Returns false when the
+ * HARQ/RV readings refute every layout of the reading. */
+static bool phys_solve(solver_rnti_t *r, const uint16_t *ids, int n_ids, int32_t scr, uint8_t add_pos, uint64_t abs_slot, bool fam)
+{
+  if (r->cand_bm == NULL) r->cand_bm = calloc(1, BM_BYTES);
+  if (r->cand_bm == NULL) return false;
+  memset(r->cand_bm, 0, BM_BYTES);
+  for (int i = 0; i < n_ids; i++) r->cand_bm[ids[i] >> 3] |= (uint8_t)(1u << (ids[i] & 7));
+  r->solved = true;
+  r->has_cand = false;
+  memset(r->S_by_tda, -1, sizeof(r->S_by_tda));
+  memset(r->L_by_tda, -1, sizeof(r->L_by_tda));
+  r->n_ev = 0;
+  bool refuted = false;
+  r->rep = choose_rep(r, true, &refuted);
+  if (refuted) {
+    r->solved = false;
+    g_st.dropped++;
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x phys solve REFUSED: all layouts of the reading violate HARQ/RV rules\n", r->rnti);
+    return false;
+  }
+  if (r->rep < 0) r->rep = lowest(r->cand_bm);
+  r->add_pos = add_pos;
+  r->scr = scr;
+  r->table = -1;
+  r->phys = true;
+  r->fam = fam;
+  r->px_n = 0;
+  memset(r->px_c, 0, sizeof r->px_c);
+  memset(r->px_a, 0, sizeof r->px_a);
+  r->ring = 0;
+  r->ring_n = 0;
+  r->tick = 0;
+  r->solved_abs = abs_slot;
+  memset(r->comb_try, 0, sizeof(r->comb_try));
+  memset(r->comb_ok, 0, sizeof(r->comb_ok));
+  LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by DM-RS physics (%s, no CRC): layout %d (%d in the reading) add_pos=%u scr=%d\n", r->rnti,
+        fam ? "family" : "sign test", r->rep, n_ids, r->add_pos, (int)r->scr);
+  return true;
+}
+
+static void px_drop(solver_rnti_t *r, int i)
+{
+  const int n = r->px_n;
+  for (int a = i; a + 1 < n; a++) r->px_c[a] = r->px_c[a + 1];
+  for (int a = 0; a < n; a++)
+    for (int b = i; b + 1 < n; b++) r->px_a[a][b] = r->px_a[a][b + 1];
+  for (int a = i; a + 1 < n; a++) memcpy(r->px_a[a], r->px_a[a + 1], sizeof r->px_a[a]);
+  r->px_n--;
+}
+
+/* px_leader: the tracked hypothesis that was significant on >= PHYS_MIN_DET grants and beats every other tracked one significantly, else -1. A tie (identical
+ * rank on every grant: A = B = 0) is never a win: footprint-twins keep the RNTI unsolved. */
+static int px_leader(const solver_rnti_t *r)
+{
+  const int n = r->px_n;
+  for (int i = 0; i < n; i++) {
+    if (r->px_c[i].det < PHYS_MIN_DET) continue;
+    bool ok = true;
+    for (int j = 0; j < n && ok; j++) {
+      if (j == i) continue;
+      const uint64_t A = r->px_a[i][j], B = r->px_a[j][i];
+      ok = A > B && nbs_binom_sf(A, A + B, 0.5) < NBS_SIGNIF_ALPHA / (double)(n - 1);
+    }
+    if (ok) return i;
+  }
+  return -1;
+}
+
+int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_phys_hyp_t *h, int n, nr_pdsch_e1_fn e1, void *e1_ctx, uint16_t dci_len)
+{
+  if (!h || n <= 0) return 0;
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, true, NULL);
+  if (r == NULL || r->solved || (abs_slot != 0 && abs_slot == r->px_last_abs)) { pthread_mutex_unlock(&g_mu); return 0; }
+  r->px_last_abs = abs_slot;
+  r->dlen = dci_len;
+  int hi[PHYS_K];
+  for (int i = 0; i < r->px_n; i++) {   /* this grant's hypothesis of each tracked one */
+    hi[i] = -1;
+    for (int k = 0; k < n && hi[i] < 0; k++)
+      if (h[k].scr == r->px_c[i].scr && h[k].add_pos == r->px_c[i].add_pos && ids_has(h[k].ids, h[k].n_ids, r->px_c[i].lid)) hi[i] = k;
+  }
+  for (int i = 0; i < r->px_n; i++) {
+    if (hi[i] < 0 || !h[hi[i]].sig) continue;
+    if (r->px_c[i].det < UINT16_MAX) r->px_c[i].det++;
+    for (int j = 0; j < r->px_n; j++)
+      if (j != i && hi[j] >= 0 && h[hi[i]].rank > h[hi[j]].rank && r->px_a[i][j] < UINT16_MAX) r->px_a[i][j]++;
+  }
+  /* admit the best significant hypotheses that are not tracked yet; room is made by dropping the weakest (fewest detections), never the one in front */
+  for (int e = 0; e < PHYS_ADMIT; e++) {
+    int best = -1;
+    for (int k = 0; k < n; k++) {
+      if (!h[k].sig || h[k].n_ids <= 0) continue;
+      bool tracked = false;
+      for (int i = 0; i < r->px_n && !tracked; i++)
+        tracked = h[k].scr == r->px_c[i].scr && h[k].add_pos == r->px_c[i].add_pos && ids_has(h[k].ids, h[k].n_ids, r->px_c[i].lid);
+      if (!tracked && (best < 0 || h[k].rank > h[best].rank)) best = k;
+    }
+    if (best < 0) break;
+    if (r->px_n == PHYS_K) {
+      int w = 0;
+      for (int i = 1; i < r->px_n; i++) if (r->px_c[i].det < r->px_c[w].det) w = i;
+      px_drop(r, w);
+    }
+    const int i = r->px_n++;
+    r->px_c[i].lid = h[best].ids[0];   /* any member names the reading: a later DCI reads this layout into the reading it belongs to there */
+    r->px_c[i].scr = h[best].scr;
+    r->px_c[i].add_pos = h[best].add_pos;
+    r->px_c[i].det = 0;
+    for (int j = 0; j <= i; j++) r->px_a[i][j] = r->px_a[j][i] = 0;   /* tracked from the next grant on: no counts yet, so it cannot lead */
+  }
+  int got = 0;
+  for (int guard = 0; guard < PHYS_K; guard++) {
+    const int lead = px_leader(r);
+    if (lead < 0) break;
+    int k = -1;
+    for (int q = 0; q < n && k < 0; q++)
+      if (h[q].scr == r->px_c[lead].scr && h[q].add_pos == r->px_c[lead].add_pos && ids_has(h[q].ids, h[q].n_ids, r->px_c[lead].lid)) k = q;
+    if (k < 0) break;   /* the winner's reading is absent from this grant: decide on a grant that has it */
+    if (e1 && !e1(e1_ctx, h[k].ids, h[k].n_ids)) { px_drop(r, lead); continue; }   /* its E1 bank refutes the class */
+    got = phys_solve(r, h[k].ids, h[k].n_ids, h[k].scr, h[k].add_pos, abs_slot, false) ? 1 : 0;
+    if (!got) px_drop(r, lead);
+    break;
+  }
+  pthread_mutex_unlock(&g_mu);
+  return got;
+}
+
+bool nr_pdsch_solver_phys_check(uint16_t rnti, bool scorable, bool hit)
+{
+  if (!scorable) return false;
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  bool reopened = false;
+  if (r && r->solved && r->phys && r->full_ok == 0) {
+    r->ring = (uint16_t)((r->ring << 1) | (hit ? 0u : 1u));
+    if (r->ring_n < PHYS_RING) r->ring_n++;
+    if (r->ring_n == PHYS_RING) {
+      const int miss = __builtin_popcount(r->ring);
+      if (miss > 0 && binom_tail(PHYS_RING, miss, PHYS_P0, false) < NBS_SIGNIF_ALPHA) {
+        LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x DM-RS score of the solved layout %d dropped (%d misses in the last %d scorable grants): reopening\n",
+              r->rnti, r->rep, miss, PHYS_RING);
+        r->solved = false;
+        r->has_cand = false;
+        g_st.dropped++;
+        phys_forget(r);
+        reopened = true;
+      }
+    }
+  }
+  pthread_mutex_unlock(&g_mu);
+  return reopened;
+}
+
+bool nr_pdsch_solver_solution(uint16_t rnti, int32_t *scr, uint8_t *add_pos)
+{
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  const bool ok = r && r->solved;
+  if (ok) { if (scr) *scr = r->scr; if (add_pos) *add_pos = r->add_pos; }
+  pthread_mutex_unlock(&g_mu);
+  return ok;
+}
+
+bool nr_pdsch_solver_phys_tick(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  const bool t = r && r->solved && r->phys && r->full_ok == 0 && (++r->tick % 16u) == 0;
+  pthread_mutex_unlock(&g_mu);
+  return t;
+}
+
+int nr_pdsch_solver_families(uint16_t dci_len, nr_pdsch_family_t *out, int max)
+{
+  if (!out || max <= 0 || dci_len == 0) return 0;
+  seed_t top[8];
+  pthread_mutex_lock(&g_mu);
+  const int nt = seed_tuples_f(top, max < 8 ? max : 8, dci_len);
+  for (int i = 0; i < nt; i++) {
+    out[i].rep = top[i].src->rep;
+    out[i].add_pos = top[i].src->add_pos;
+    out[i].scr = top[i].src->scr;
+    out[i].members = top[i].n;
+  }
+  pthread_mutex_unlock(&g_mu);
+  return nt;
+}
+
+bool nr_pdsch_solver_family_match(uint16_t rnti, nr_dci_bits_t payload, uint16_t len)
+{
+  (void)payload;   /* what the payload must satisfy is the monitor's: the family layout's reading of it, E1 and E2 */
+  nr_pdsch_family_t f;
+  if (nr_pdsch_solver_families(len, &f, 1) < 1) return false;
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  const bool unsolved = !r || !r->solved;
+  pthread_mutex_unlock(&g_mu);
+  return unsolved;
+}
+
+int nr_pdsch_solver_family_accept(uint16_t rnti, const nr_pdsch_family_t *f, const uint16_t *ids, int n_ids, int32_t scr, uint16_t dci_len, uint64_t abs_slot,
+                                  nr_pdsch_e1_fn e1, void *e1_ctx)
+{
+  if (!f || !ids || n_ids <= 0 || !ids_has(ids, n_ids, f->rep)) return 0;
+  seed_t top[8];
+  pthread_mutex_lock(&g_mu);
+  bool exists = false;
+  const int nt = seed_tuples_f(top, 8, dci_len);
+  for (int i = 0; i < nt && !exists; i++)
+    exists = top[i].src->rep == f->rep && top[i].src->add_pos == f->add_pos && scr_form(top[i].src->scr) == scr_form(scr)
+             && scr_form(f->scr) == scr_form(scr);
+  solver_rnti_t *r = exists ? slot_of(rnti, true, NULL) : NULL;
+  int ok = 0;
+  if (r && !r->solved && (!e1 || e1(e1_ctx, ids, n_ids))) {
+    r->dlen = dci_len;
+    ok = phys_solve(r, ids, n_ids, scr, f->add_pos, abs_slot, true) ? 1 : 0;
+  }
+  pthread_mutex_unlock(&g_mu);
+  return ok;
+}
+
+/* ---- Qm ledger ---- */
+void nr_pdsch_solver_qm_note(uint16_t rnti, uint64_t abs_slot, int mcs, int qm)
+{
+  if (qm != 2 && qm != 4 && qm != 6 && qm != 8) return;   /* 0 = undecided: no vote */
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (r && r->solved && !r->qm_poison && (abs_slot == 0 || abs_slot != r->qm_last)) {
+    int q[3] = {0, 0, 0};
+    bool valid[3];
+    int nvalid = 0, distinct = 0, match = 0;
+    for (int t = 0; t < 3; t++) {
+      int rr;
+      valid[t] = nr_pdsch_solver_mcs_qr(t, mcs, &q[t], &rr);
+      if (!valid[t]) continue;
+      nvalid++;
+      match += q[t] == qm;
+      bool seen = false;
+      for (int u = 0; u < t && !seen; u++) seen = valid[u] && q[u] == q[t];
+      distinct += !seen;
+    }
+    if (nvalid > 0 && match == 0) {
+      r->qm_poison = true;   /* a confident Qm that no table gives for this MCS: the classifier or the layout is wrong for this RNTI */
+    } else if (distinct > 1) {   /* informative: the tables disagree about this MCS */
+      r->qm_last = abs_slot;
+      for (int t = 0; t < 3; t++) {
+        if (!valid[t]) continue;
+        uint16_t *c = (q[t] == qm) ? &r->qm_agree[t] : &r->qm_dis[t];
+        if (*c < UINT16_MAX) (*c)++;
+      }
+    }
+  }
+  pthread_mutex_unlock(&g_mu);
+}
+
+static int qm_table_locked(const solver_rnti_t *r)
+{
+  if (!r->solved || r->qm_poison) return -1;
+  int win = -1;
+  for (int t = 0; t < 3; t++)
+    if (r->qm_dis[t] == 0 && r->qm_agree[t] >= QM_MIN) {
+      if (win >= 0) return -1;   /* two tables fit every vote: not decided */
+      win = t;
+    }
+  if (win < 0) return -1;
+  for (int t = 0; t < 3; t++)
+    if (t != win && r->qm_dis[t] == 0) return -1;   /* a table the data never contradicted is still open */
+  return win;
+}
+
+int nr_pdsch_solver_qm_table(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  const int t = r ? qm_table_locked(r) : -1;
+  pthread_mutex_unlock(&g_mu);
+  return t;
+}
+
+int nr_pdsch_solver_table_evidence(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  int ev = 0;
+  if (r && r->solved && r->table >= 0) ev = qm_table_locked(r) == r->table ? 2 : 1;
+  pthread_mutex_unlock(&g_mu);
+  return ev;
+}
+
 void nr_pdsch_solver_reopen(uint16_t rnti)
 {
   pthread_mutex_lock(&g_mu);
@@ -2583,6 +2938,7 @@ void nr_pdsch_solver_reopen(uint16_t rnti)
   if (r != NULL && r->solved) {
     r->solved = false; r->has_cand = false; g_st.dropped++;
   }
+  if (r != NULL) phys_forget(r);
   pthread_mutex_unlock(&g_mu);
 }
 nr_layout_state_t nr_pdsch_solver_layout_state(uint16_t rnti, uint32_t *checks_ok, uint32_t *checks_fail)
@@ -2604,3 +2960,4 @@ bool nr_pdsch_solver_take_hrv_alert(uint16_t rnti)
   pthread_mutex_unlock(&g_mu);
   return a;
 }
+
