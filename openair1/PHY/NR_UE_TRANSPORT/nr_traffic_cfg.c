@@ -50,10 +50,14 @@ static void emit_config(uint16_t rnti, uint8_t fmt, uint32_t ver, const nr_traff
   cput(&j, ",\"identity_gen\":%u,\"dedicated_epoch\":%u", s->identity_gen, s->dedicated_epoch);
   cint(&j, "coreset_id", s->coreset_id); cint(&j, "coreset_start_rb", s->coreset_start_rb);
   cint(&j, "coreset_n_rb", s->coreset_n_rb); cint(&j, "coreset_dur", s->coreset_dur);
-  cint(&j, "bwp_start", s->bwp_start); cint(&j, "bwp_size", s->bwp_size); cint(&j, "layout_rep", s->layout_rep);
+  cint(&j, "bwp_start", s->bwp_start); cint(&j, "bwp_size", s->bwp_size);
+  if (s->layout_unproven) cput(&j, ",\"layout_rep\":null,\"layout\":null,\"layout_evidence\":\"phys\"");
+  else {
+  cint(&j, "layout_rep", s->layout_rep);
   cput(&j, ",\"layout\":{\"bwp_ind\":%u,\"pre_mcs\":%u,\"pre_ant\":%u,\"ant_ports\":%u,\"post_ant\":%u,\"dmrs_type\":%u,"
            "\"fdra_mode\":%u,\"n_rbg\":%u,\"tail\":%u}",
        l->bwp_ind, l->pre_mcs, l->pre_ant, l->ant_ports, l->post_ant, l->dmrs_type, l->fdra_mode, l->n_rbg, l->tail);
+  }
   carr(&j, "s_by_tda", s->s_by_tda); carr(&j, "l_by_tda", s->l_by_tda);
   cint(&j, "dmrs_add_pos", s->dmrs_add_pos); cint(&j, "mcs_table", s->mcs_table); cint(&j, "rm_set", s->rm_set);
   cput(&j, "}");

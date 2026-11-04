@@ -4711,6 +4711,7 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
   if (out->rnti_class == NR_BLIND_RNTI_CLASS_SI) r.si_ind = (int8_t)out->si_indicator;
   if (out->rnti_class == NR_BLIND_RNTI_CLASS_P) { r.short_msg_ind = (int8_t)out->short_messages_ind; r.short_msg = out->short_messages; }
   if (out->rnti_class == NR_BLIND_RNTI_CLASS_RA || out->rnti_class == NR_BLIND_RNTI_CLASS_P) r.tb_scaling = (int8_t)out->tb_scaling;
+  bool layout_unproven = false;   /* E3: PHYS and not hq_trusted: the config record must not present the representative */
   nr_dci_harq_fields_t hf = {-1, -1, -1, -1};
   if (is10 && payload && (out->rnti_class == NR_BLIND_RNTI_CLASS_C || out->rnti_class == NR_BLIND_RNTI_CLASS_TC))
     nr_dci10_harq_fields(*payload, dci_len, (uint16_t)traffic_fdra_bits(c10->n_rb_riv), &hf);
@@ -4760,7 +4761,8 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
     else if (have_rep) nr_dci11_harq_fields(*payload, dci_len, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep], &hf);
     const int sev = ls == NR_LAYOUT_SOLVED ? nr_pdsch_solver_layout_evidence(out->rnti) : NR_LAYOUT_EV_NONE;   /* PHYS until a full TB passed, else CRC */
     r.layout_evidence = ls == NR_LAYOUT_SOLVED ? (sev == NR_LAYOUT_EV_PHYS ? NR_LAYOUT_EV_PHYS : NR_LAYOUT_EV_CRC) : e1 ? NR_LAYOUT_EV_BITS : NR_LAYOUT_EV_NONE;
-    const bool gp = sev == NR_LAYOUT_EV_PHYS && !nr_pdsch_solver_phys_fields_ok(out->rnti);   /* PHYS and neither hq_verified nor CRC-confirmed */
+    const bool gp = sev == NR_LAYOUT_EV_PHYS && !nr_pdsch_solver_phys_fields_ok(out->rnti);
+    layout_unproven = gp;   /* PHYS and neither hq_verified nor CRC-confirmed */
     r.grant_unproven = gp ? 1 : 0;
     r.fields_evidence = e1 ? NR_LAYOUT_EV_BITS : (ls == NR_LAYOUT_SOLVED && !gp && hf.k1 + hf.dai + hf.tpc + hf.pri > -4) ? (uint8_t)r.layout_evidence : NR_LAYOUT_EV_NONE;
     if (ls == NR_LAYOUT_SOLVED) r.table_evidence = (uint8_t)nr_pdsch_solver_table_evidence(out->rnti);
@@ -4776,7 +4778,8 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
   nr_traffic_cfg_snap_t sn;
   memset(&sn, 0, sizeof sn);
   sn.layout_rep = (int16_t)(!is10 ? rep : -1);
-  if (sn.layout_rep >= 0 && g_dci11_resolver != NULL) sn.layout = g_dci11_resolver->hyp[rep];
+  if (layout_unproven) sn.layout_unproven = 1;
+  if (sn.layout_rep >= 0 && g_dci11_resolver != NULL && !layout_unproven) sn.layout = g_dci11_resolver->hyp[rep];
   const bool common = is10 && c10->ss_type == NR_BLIND_SS_COMMON && cfg->extract.tda_common_count > 0;
   traffic_tda_lists(&sn, common ? cfg->extract.tda_common_count : cfg->extract.tda_count,
                     common ? cfg->extract.tda_common_start : cfg->extract.tda_start, common ? cfg->extract.tda_common_length : cfg->extract.tda_length);

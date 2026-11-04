@@ -37,20 +37,12 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   /* E3: a layout solved by DM-RS physics knows neither S, L, nor the MCS table: those are null (qm, tbs follow the table) until a CRC pass lifts the evidence */
   if (!nolayout && r->layout_evidence == NR_LAYOUT_EV_PHYS) {
     o.start_sym = o.nb_sym = -1;
+    o.dmrs_symb_pos_unknown = true;   /* S and L are never proven by physics */
     if (r->table_evidence < 2) o.mcs_table = o.qm = o.tbs = -1;
-    if (r->grant_unproven) o.mcs = o.harq_pid = o.ndi = o.rv = -1;
+    if (r->grant_unproven) o.mcs = o.harq_pid = o.ndi = o.rv = o.start_rb = o.nb_rb = -1;   /* N5: the RB range is the RIV of the unproven layout */
   }
   char g[2048];
   if (nr_sense_grant_to_json(&o, &r->m, g, sizeof g) < 0) return -1;
-  if (!nolayout && r->layout_evidence == NR_LAYOUT_EV_PHYS) {   /* the DM-RS symbols come from S and L, which physics never proves: the unsigned field prints null */
-    char *d = strstr(g, "\"dmrs_symb_pos\":");
-    if (d) {
-      char *v = d + 16, *e = v;
-      while (*e >= '0' && *e <= '9') e++;
-      memmove(v + 4, e, strlen(e) + 1);
-      memcpy(v, "null", 4);
-    }
-  }
   char *t = strstr(g, "\"type\":\"grant\"");
   const size_t gl = strlen(g);
   if (!t || gl < 2) return -1;
@@ -79,7 +71,7 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   tput(&j, ",\"layout_checks_ok\":%u,\"layout_checks_fail\":%u", r->layout_checks_ok, r->layout_checks_fail);
   if (r->m.identity_gen < 0 || r->m.dedicated_epoch < 0) tput(&j, ",\"cfg_ref\":null");
   else tput(&j, ",\"cfg_ref\":\"%d.%d.%u\"", r->m.identity_gen, r->m.dedicated_epoch, r->cfg_ref_ver);
-  tint(&j, "bwp_start", r->bwp_start); tint(&j, "bwp_size", r->bwp_size); tint(&j, "start_rb_bwp", r->start_rb_bwp);
+  tint(&j, "bwp_start", r->bwp_start); tint(&j, "bwp_size", r->bwp_size); tint(&j, "start_rb_bwp", unproven ? -1 : r->start_rb_bwp);
 #define L(k, f) tint(&j, k, (nolayout || unproven) ? -1 : r->f)
   L("vrb_prb", vrb_prb); L("tda_index", tda_index); L("k0", k0);
 #undef L

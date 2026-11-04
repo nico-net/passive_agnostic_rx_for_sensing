@@ -94,6 +94,7 @@ typedef struct {
   int8_t start_sym, nb_sym;
   int8_t mcs, mcs_table, qm, nl; // nl = layers (rank)
   uint16_t dmrs_symb_pos;        // bitmap
+  bool dmrs_symb_pos_unknown;    // E3: serialized as null (a layout solved by DM-RS physics does not know S and L); false (zero) everywhere else
   int32_t dmrs_scrambling_id;    // -1 unknown
   int32_t tbs;                   // BITS, -1 unknown
   int8_t harq_pid, rv, ndi;      // -1 unknown/absent

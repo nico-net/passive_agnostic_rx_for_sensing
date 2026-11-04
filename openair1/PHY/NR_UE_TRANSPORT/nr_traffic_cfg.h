@@ -15,6 +15,7 @@ typedef struct {
   int16_t layout_rep;              /* nr_pdsch_solver_rep(); -1 none */
   nr_dci11_layout_t layout;        /* zero when layout_rep < 0 */
   int8_t s_by_tda[16], l_by_tda[16], dmrs_add_pos, mcs_table, rm_set;
+  int8_t layout_unproven;          /* E3: the representative is a layout solved by DM-RS physics and not hq_trusted / CRC-confirmed: layout_rep and layout print null with layout_evidence "phys" */
 } nr_traffic_cfg_snap_t;
 /* Per cell, per (RNTI, dci_format) (rnti 0 = cell-wide). Returns the version for this snapshot: a per-cell monotonic counter value (first = 1),
  * so (rnti, cfg_ref) is unique within a cell identity. On change takes a new version and emits one

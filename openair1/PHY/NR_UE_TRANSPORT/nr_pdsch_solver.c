@@ -518,7 +518,7 @@ static bool seed_ok(const solver_rnti_t *r)
   if (!g_hq_fn || r->mcs_pos) return true;
   int n, bad;
   hq_score(r, r->rep, &n, &bad);
-  return nr_pdsch_solver_hq_verified(n, bad);
+  return nr_pdsch_solver_hq_trusted(n, bad);   /* N8: a 20-30 % layout must not seed the cell */
 }
 
 /* promote: makes a solved RNTI's solution the cell prior (if none yet) and its scrambling its CORESET's (if none yet). Under g_mu. */

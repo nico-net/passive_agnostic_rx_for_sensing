@@ -106,3 +106,24 @@ TEST(Dedupe, WrappedSlotAliasIsNotDup)
   EXPECT_FALSE(nr_dedupe_probe(tab, &w, 100, 100 + 1024 * 20, 0xFFFF, 2)); // 1024 frames (20 slots/frame) later
   EXPECT_FALSE(nr_dedupe_probe(tab, &w, 100, 100, 0xFFFF, 1));             // other direction
 }
+
+// N6: the representative of a layout solved by DM-RS physics (not trusted) is not presented; a proven one (CRC) prints as before.
+TEST(TrafficCfg, UnprovenPhysLayoutIsNotPresented)
+{
+  Sink k;
+  auto s = snap();
+  s.layout_rep = 208; s.layout.pre_ant = 9; s.layout.ant_ports = 31;
+  const uint32_t a = nr_traffic_cfg_ref(0x4602, 0, &s);   // CRC-solved: unchanged
+  s.layout_unproven = 1;
+  const uint32_t b = nr_traffic_cfg_ref(0x4602, 0, &s);   // phys, unproven
+  s.layout_unproven = 0;
+  const uint32_t c = nr_traffic_cfg_ref(0x4603, 0, &s);
+  EXPECT_NE(a, b);
+  (void)c;
+  auto l = k.lines();
+  ASSERT_EQ(l.size(), 3u);
+  EXPECT_TRUE(has(l[0], "\"layout_rep\":208")); EXPECT_TRUE(has(l[0], "\"pre_ant\":9")); EXPECT_FALSE(has(l[0], "layout_evidence"));
+  EXPECT_TRUE(has(l[1], "\"layout_rep\":null,\"layout\":null,\"layout_evidence\":\"phys\""));
+  EXPECT_FALSE(has(l[1], "pre_ant"));
+  EXPECT_TRUE(has(l[2], "\"layout_rep\":208"));
+}

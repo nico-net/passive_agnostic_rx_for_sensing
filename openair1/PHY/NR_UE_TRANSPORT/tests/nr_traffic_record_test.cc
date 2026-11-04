@@ -76,6 +76,7 @@ TEST(TrafficRecord, PhysLayoutNullsWhatPhysicsCannotKnow)
   r.srs_req = 3; r.cbgti = 1; r.csi_req = 2; r.o.dmrs_symb_pos = 0x804;
   std::string d = json(r);
   EXPECT_TRUE(has(d, "\"dmrs_symb_pos\":null")) << "S and L are never proven by physics: the DM-RS symbols print null";
+  EXPECT_FALSE(has(d, "nullnull")); { size_t c = 0, pos = 0; while ((pos = d.find("\"dmrs_symb_pos\"", pos)) != std::string::npos) { c++; pos++; } EXPECT_EQ(c, 1u) << "one dmrs_symb_pos key, written structurally"; }
   for (const char *k : {"\"start_sym\":null", "\"nb_sym\":null", "\"mcs_table\":null", "\"qm\":null", "\"tbs\":null", "\"table_evidence\":null"})
     EXPECT_TRUE(has(d, k)) << k;
   for (const char *k : {"\"mcs\":9", "\"nb_rb\":20", "\"start_rb\":10", "\"k1\":4"}) EXPECT_TRUE(has(d, k)) << k;   // the layout's fields stay
@@ -86,14 +87,15 @@ TEST(TrafficRecord, PhysLayoutNullsWhatPhysicsCannotKnow)
   EXPECT_TRUE(has(d, "\"start_sym\":null"));
   r.table_evidence = 0; r.grant_unproven = 1;   // C3: PHYS layout without hq / CRC proof: the grant fields are null too
   d = json(r);
-  for (const char *k : {"\"mcs\":null", "\"harq_pid\":null", "\"ndi\":null", "\"rv\":null", "\"retx\":null", "\"k1\":null", "\"dai\":null", "\"nb_rb\":20", "\"tda_index\":null", "\"srs_req\":null", "\"cbgti\":null",
+  EXPECT_TRUE(has(d, "\"start_rb\":null")) << "N5: unproven layout, RB range null"; EXPECT_TRUE(has(d, "\"nb_rb\":null")); EXPECT_TRUE(has(d, "\"start_rb_bwp\":null"));
+  for (const char *k : {"\"mcs\":null", "\"harq_pid\":null", "\"ndi\":null", "\"rv\":null", "\"retx\":null", "\"k1\":null", "\"dai\":null", "\"tda_index\":null", "\"srs_req\":null", "\"cbgti\":null",
                         "\"csi_req\":null", "\"vrb_prb\":null", "\"k0\":null", "\"pdsch_abs_slot\":null", "\"harq_fb_abs_slot\":null"})
     EXPECT_TRUE(has(d, k)) << k;
   r.fields_evidence = NR_LAYOUT_EV_BITS;   // E1 proved the HARQ-ACK split: those print, the grant fields still do not
   d = json(r);
   EXPECT_TRUE(has(d, "\"k1\":4")); EXPECT_TRUE(has(d, "\"mcs\":null"));
   r.grant_unproven = 0; r.fields_evidence = NR_LAYOUT_EV_NONE;
-  EXPECT_TRUE(has(json(r), "\"tda_index\":2")) << "verified: the layout fields print again"; EXPECT_TRUE(has(json(r), "\"srs_req\":3"));
+  EXPECT_TRUE(has(json(r), "\"tda_index\":2")) << "verified: the layout fields print again"; EXPECT_TRUE(has(json(r), "\"nb_rb\":20")); EXPECT_TRUE(has(json(r), "\"start_rb_bwp\":10")); EXPECT_TRUE(has(json(r), "\"srs_req\":3"));
   EXPECT_TRUE(has(json(r), "\"dmrs_symb_pos\":null")) << "still PHYS";
   r.layout_evidence = NR_LAYOUT_EV_CRC; r.table_evidence = 1;   // CRC: nothing is nulled
   d = json(r);

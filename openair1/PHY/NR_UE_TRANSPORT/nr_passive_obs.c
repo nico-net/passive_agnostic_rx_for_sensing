@@ -133,7 +133,8 @@ int nr_passive_obs_to_json(const nr_passive_obs_t *o, char *buf, size_t n)
   jb_int(&j, "mcs_table", o->mcs_table);
   jb_int(&j, "qm", o->qm);
   jb_int(&j, "nl", o->nl);
-  jb_put(&j, ",\"dmrs_symb_pos\":%u", (unsigned)o->dmrs_symb_pos);
+  if (o->dmrs_symb_pos_unknown) jb_put(&j, ",\"dmrs_symb_pos\":null");
+  else jb_put(&j, ",\"dmrs_symb_pos\":%u", (unsigned)o->dmrs_symb_pos);
   jb_int(&j, "dmrs_scrambling_id", o->dmrs_scrambling_id);
   jb_int(&j, "tbs", o->tbs);
   jb_int(&j, "harq_pid", o->harq_pid);
