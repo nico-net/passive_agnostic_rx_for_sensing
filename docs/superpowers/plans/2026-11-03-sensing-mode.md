@@ -71,39 +71,49 @@ past its operator checkpoint. From it this plan uses:
 
 ---
 
-### Task S1: Sensing mode resolution, `sense_min_prb`, discovery protection
+### Task S1: Sensing mode resolution, `sense_min_prb`, discovery skip recovery
 
 **Files:**
 - Modify: `openair1/PHY/NR_UE_ISAC/nr_isac_mode.c/.h` (traffic plan Task 1), `nr_isac.cc` (`sense_min_prb` key)
-- Modify: `openair1/PHY/TOOLS/nr_admit.c:22-30` (shed tiers)
-- Test: `openair1/PHY/NR_UE_ISAC/tests/nr_isac_mode_test.cc`, `openair1/PHY/TOOLS/tests/` (or wherever nr_admit is
-  tested today: grep `nr_admit_try` under tests; if there is no test, create `nr_admit_test.cc`)
+- Modify: `openair1/PHY/TOOLS/nr_admit.{c,h}` (attempt counter, backlog), the JANON site
+  (`nr_pdcch_blind_monitor_rt.c` janon_should_run / janon_worker) and the DMRS_ID site (`nr_pdsch_passive_queue.c` cdmrs_run)
+- Test: `openair1/PHY/NR_UE_ISAC/tests/nr_isac_mode_test.cc`; `nr_admit_test.cc` (create it if no nr_admit test exists)
 
 **Interfaces:**
 - Produces:
   - `nr_isac_mode_cfg_t` gains `int min_prb`;
   - `int nr_isac_sense_min_prb(void)` (default 128);
-  - `bool nr_admit_protect_discovery(void)`, true in TRAFFIC and SENSING mode.
+  - per-class counters: attempts, skipped, recovered, expired (in `nr_admit_stats` and ISAC_METRICS, all modes).
 - Sensing resolution (spec §4.1):
   - `sources = ssb | csi_rs | pdsch_dmrs | pdsch_data | pusch_dmrs | srs`, plus `prach` only when explicitly set.
   - `pdsch_decode = 2` (data-aided export).
   - `pusch_decode = 1`.
   - An explicit key can narrow this, never widen it.
-- **Decision (spec §8.3, resolved here)**: in TRAFFIC and SENSING mode, `nr_admit` never sheds the discovery classes
-  CSIRS, NID, JANON or UL_DISC, because discovery is protected. LEGACY keeps today's tiers. Report this at the
-  checkpoint: it can raise pool load in pairs.
+- **Decision (operator 2026-11-04, replaces "never shed outside legacy")**: every mode keeps today's cumulative
+  shed tiers, unchanged. In addition:
+  - Count attempts per class, so the skip *rate* is visible (today only skips are counted).
+  - JANON and DMRS_ID items that are skipped are not freed. They go into a bounded per-cell backlog (small fixed
+    depth; when it is full, drop the oldest and count it as expired). The backlog is replayed when
+    `nr_pool_site_shed_tiers()` is 0 (no overload). An item past its age limit is dropped and counted as expired;
+    JANON uses its existing JANON_FRESH_NS (1 s), DMRS_ID uses the same 1 s unless the code shows a tighter validity.
+    Replay never runs while shedding, so it adds no CPU under overload.
+  - NID: no change (acquisition is never shed; only rechecks are, and those are superseded by newer samples).
+  - CSI-RS: VERIFY whether the `deferred` path in `nr_csirs_disc_feed.c` keeps the drained data on a skip. If it
+    drops it, report this and do not change it in S1.
+  - Single-PCI behaviour is unchanged (admission is off below 2 active cells).
 
 - [ ] **Step 1: Write the failing tests**:
   - `SensingDefaults`: `resolve("sensing", 0, -1, -1)` gives the sources mask above, pdsch 2, pusch 1, min_prb 128.
   - `SensingNarrowedByExplicitSources`: an explicit `ssb|pdsch_dmrs` stays exactly that.
   - `MinPrbKey`: 64 is kept, and 0 or a negative value falls back to 128 with an error.
-  - `AdmitProtectsDiscoveryOutsideLegacy`: in TRAFFIC and SENSING `nr_admit_try(NR_ADMIT_CSIRS, ...)` always admits;
-    in LEGACY the old tier behaviour is unchanged.
+  - `AdmitTiersUnchanged`: the tier table and cumulative shedding are the same as before, in every mode.
+  - `AdmitCountsAttempts`: attempts include admitted and skipped calls.
+  - `BacklogReplaysWhenIdle`: a skipped item is replayed once shedding is 0 and counted as recovered.
+  - `BacklogExpiresOld`: an item older than its limit is dropped and counted as expired; a full backlog drops the oldest.
 - [ ] **Step 2: Run them to verify they fail.**
-- [ ] **Step 3: Implement it.** The sensing branch of the resolver, the key parse, and a mode check in nr_admit's tier
-  lookup.
+- [ ] **Step 3: Implement it.** The sensing branch of the resolver, the key parse, the counters, and the backlog with replay.
 - [ ] **Step 4: Run the tests, then the full build and ctest.** Expected: only the known ARM failures.
-- [ ] **Step 5: Commit** with the message `feat(sense): mode=sensing resolution, sense_min_prb key, discovery never shed outside legacy`.
+- [ ] **Step 5: Commit** with the message `feat(sense): mode=sensing resolution, sense_min_prb key, discovery skip backlog and counters`.
 
 ### Task S2: CFR quality (pure)
 
@@ -462,6 +472,6 @@ past its operator checkpoint. From it this plan uses:
 - Types are consistent: `nr_unit_src_t` (S5) is used by S6 and S7; `nr_sense_quality_t` (S2) by S3; resolver fields
   extend traffic Task 1.
 - Conflicts for the operator:
-  - S1: discovery is never shed outside legacy, which may raise pair load.
+  - S1: resolved 2026-11-04 (keep shedding, add attempt counter and skip backlog).
   - S2: provisional validity thresholds.
   - S7: VERIFY on the pool and GPU stat field names.
