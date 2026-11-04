@@ -130,6 +130,7 @@ typedef struct {
   uint64_t now_abs;
   bool decided;
   bool own; /* TIM-PDSCH: ids are this RNTI's own (nr_pdsch_solver_set_alt_scr32) */
+  bool seeded_only; /* E4: plan only the seeded variants (candidate confirmation, cell prior / solved tuples), no coverage search */
   int8_t last_dl; /* SOLVERTDDEND: last DL symbol of the grant's slot from the broadcast TDD pattern (-1 = unknown) */
   int32_t pool[NR_PDSCH_SOLVER_POOL_MAX]; /* A3: DM-RS ids already seen in the cell (nr_dmrs_scan pool), most frequent first; this grant's RNTI has none of its own */
   int np;
@@ -780,6 +781,14 @@ void nr_pdsch_solver_set_now(uint64_t abs_slot)
 void nr_pdsch_solver_set_slot_last(int last)
 {
   plan_ctx()->last_dl = (int8_t)(last >= 0 && last <= 13 ? last : -1);
+}
+
+/* nr_pdsch_solver_set_seeded_only: E4 traffic triage of a first DCI. While set (per scan consumer thread; the caller sets it for every grant), an
+ *   unsolved RNTI is planned with steps 1-2 only (candidate confirmation, the cell's seeded tuples / prior); the coverage search (step 3) is skipped.
+ *   A cell without a seed or prior then plans nothing for it. */
+void nr_pdsch_solver_set_seeded_only(bool on)
+{
+  plan_ctx()->seeded_only = on;
 }
 
 /* nr_pdsch_solver_owns: reports whether the solver takes over the grants of this RNTI; currently it is simply the global enable flag.
@@ -1612,7 +1621,7 @@ int nr_pdsch_solver_plan_slot(uint16_t rnti, nr_dci_bits_t payload, uint16_t len
         const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t;
       }
     if (no == 0 && !thin) r->why[W_WIDE]++;
-    if (no > 0 && !thin) /* (S, add_pos) tiers over the readings: every reading gets all S in one go, because the true S changes from grant to grant with the TDA index */
+    if (no > 0 && !thin && !ctx->seeded_only) /* (S, add_pos) tiers over the readings: every reading gets all S in one go, because the true S changes from grant to grant with the TDA index */
       plan_coverage(r, out, &n, budget, slot, rd, order, no, l0, dci, payload);
   }
   if (r->solved && r->nse.parked && !nse_due(&r->nse, r->grants)) { /* PARK: a solved RNTI whose DM-RS vanished keeps its full decodes, drops its probes */

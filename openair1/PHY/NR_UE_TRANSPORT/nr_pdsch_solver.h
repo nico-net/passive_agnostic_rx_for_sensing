@@ -76,6 +76,8 @@ int nr_pdsch_solver_phase_period(void);
 bool nr_pdsch_solver_reopen_layouts(uint16_t rnti);
 /** True while an RNTI is unsolved: the caller sends this RNTI's grants to the solver instead of Technique D. */
 bool nr_pdsch_solver_owns(uint16_t rnti);
+/** E4 (traffic first DCI): while on, unsolved RNTIs are planned with the seeded variants only (no coverage search). Per thread; set for every grant. */
+void nr_pdsch_solver_set_seeded_only(bool on);
 
 /** Variants to decode for one DCI 1_1 grant (payload of `len` bits, MCS index `mcs`, DM-RS type-A position l0 2/3).
  * `budget` caps the probes; returns the number written to out[]. */

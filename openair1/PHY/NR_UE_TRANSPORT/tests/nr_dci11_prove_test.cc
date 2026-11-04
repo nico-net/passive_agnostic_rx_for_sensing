@@ -375,6 +375,8 @@ TEST(Dci11Prove, BankAliveCountForTriage)
   EXPECT_EQ(nr_dci11_bank_alive(rnti), -1);                            // fed, not proved yet
   ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
   EXPECT_EQ(nr_dci11_bank_alive(rnti), 1);                             // exactly the proven split
+  nr_dci11_bank_alive_clear(rnti);                                      // solver reopen / layout change
+  EXPECT_EQ(nr_dci11_bank_alive(rnti), -1);
 }
 
 TEST(Dci11Prove, ReopensOnViolations)

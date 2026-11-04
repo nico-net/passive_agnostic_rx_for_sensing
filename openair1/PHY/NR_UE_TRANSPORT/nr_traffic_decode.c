@@ -7,8 +7,14 @@
 #include <string.h>
 
 #define TD_RNTIS 128
-typedef struct { bool used; uint16_t rnti; uint32_t grants, fails, seen; uint8_t k, bo, pend; uint64_t last_check_ns, last_t_ns, stamp; } td_ent_t;
-typedef struct { uint64_t clock; td_ent_t e[2][TD_RNTIS]; } td_tab_t;
+typedef struct { bool used; uint16_t rnti; uint32_t grants, fails; uint8_t k, bo, pend; uint64_t last_check_ns, last_t_ns, stamp; } td_ent_t;
+typedef struct { uint64_t clock; uint32_t ul_n; td_ent_t e[2][TD_RNTIS]; } td_tab_t;
+/* DCIs seen per (dir, C-RNTI): its own table, so that the busy cell's other RNTIs cannot evict a count (exact LRU; shortcut: linear scan of 1024, fine at DCI rates) */
+#define TD_SEEN 1024
+typedef struct { bool used; uint16_t rnti; uint32_t n; uint64_t stamp; } seen_ent_t;
+typedef struct { uint64_t clock; seen_ent_t e[2][TD_SEEN]; } seen_tab_t;
+NR_CELL_STATIC(seen_tab_t, g_seen)
+#define g_seen NR_CELL_REF(g_seen)
 NR_CELL_STATIC_INIT(pthread_mutex_t, g_td_mu, PTHREAD_MUTEX_INITIALIZER)
 #define g_td_mu NR_CELL_REF(g_td_mu)
 NR_CELL_STATIC(td_tab_t, g_td)
@@ -45,10 +51,11 @@ bool nr_traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_
   if (dir == 0 && ls != NR_LAYOUT_SOLVED) return false; /* FIXED: layout known; CANDIDATE/UNSOLVED: the solver's probes work */
   td_tab_t *t = &g_td;
   if (dir != 0) {
-    /* E4: PUSCH is decoded until the UL layout is locked (FIXED: 0_0 needs no lock) and the MCS table is known; lock/table lost: again. Backoff on failures. */
-    if (ul_table_learned && (ls == NR_LAYOUT_SOLVED || ls == NR_LAYOUT_FIXED)) return false;
+    /* E4: PUSCH is decoded until the UL layout is locked (FIXED: 0_0 needs no lock) and the MCS table is known; lock/table lost: again (backoff on failures).
+     * After that, one UL grant in 32 of the CELL is still decoded: its CRC verdicts are what reopens a stale lock (crc_fail_run) or table (reopens_ul). */
     pthread_mutex_lock(&g_td_mu);
-    const bool w = bo_pass(ent(t, dir, rnti));
+    const bool n32 = (t->ul_n++ % NR_TRAFFIC_UL_CHECK_EVERY) == 0;
+    const bool w = (ul_table_learned && (ls == NR_LAYOUT_SOLVED || ls == NR_LAYOUT_FIXED)) ? n32 : bo_pass(ent(t, dir, rnti));
     pthread_mutex_unlock(&g_td_mu);
     return w;
   }
@@ -82,27 +89,34 @@ void nr_traffic_decode_reset(void)
 {
   pthread_mutex_lock(&g_td_mu);
   memset(&g_td, 0, sizeof g_td);
+  memset(&g_seen, 0, sizeof g_seen);
   pthread_mutex_unlock(&g_td_mu);
 }
 
 int nr_traffic_note_dci(int dir, uint16_t rnti, bool count)
 {
   pthread_mutex_lock(&g_td_mu);
-  td_ent_t *e = ent(&g_td, dir, rnti);
-  if (count && e->seen < 1000000u) e->seen++;
-  const int n = (int)e->seen;
+  seen_tab_t *t = &g_seen;
+  seen_ent_t *e = t->e[dir & 1], *v = e;
+  int i = 0;
+  for (; i < TD_SEEN; i++) {
+    if (e[i].used && e[i].rnti == rnti) break;
+    if (!e[i].used) v = &e[i];
+    else if (v->used && e[i].stamp < v->stamp) v = &e[i];
+  }
+  seen_ent_t *x = i < TD_SEEN ? &e[i] : v;
+  if (i == TD_SEEN) { memset(x, 0, sizeof *x); x->used = true; x->rnti = rnti; }
+  x->stamp = ++t->clock;
+  if (count && x->n < 1000000u) x->n++;
+  const int n = (int)x->n;
   pthread_mutex_unlock(&g_td_mu);
   return n;
 }
 
 bool nr_traffic_probe_wanted(int cell, uint16_t rnti, int dir, int n_dci_seen, int n_alive, bool family_match, float snr_db, int mcs, int mcs_table)
 {
-  (void)cell;   /* the state is per cell through NR_CELL_STATIC; the argument names it for the caller */
-  if (!(n_dci_seen >= 2 || family_match) || n_alive < 1 || nr_snr_no_chance_dir(snr_db, mcs, mcs_table, dir & 1)) return false;
-  pthread_mutex_lock(&g_td_mu);
-  const bool w = bo_pass(ent(&g_td, dir, rnti));
-  pthread_mutex_unlock(&g_td_mu);
-  return w;
+  (void)cell; (void)rnti;   /* the state is per cell through NR_CELL_STATIC; no per-RNTI backoff: the solver's own search back-off / PARK rate-limit the probes */
+  return (n_dci_seen >= 2 || family_match) && n_alive >= 1 && !nr_snr_no_chance_dir(snr_db, mcs, mcs_table, dir & 1);
 }
 
 void nr_traffic_probe_result(int dir, uint16_t rnti, bool crc_ok)

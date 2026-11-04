@@ -432,6 +432,37 @@ TEST(PdschSolver, OnlyACrcProvenSolutionSeedsTheCell)
   nr_pdsch_solver_reset();
 }
 
+// E4: the first DCI of an RNTI is planned with the seeded variants only (no coverage search); without any seed it plans nothing.
+static int PlanN(uint16_t rnti, const Cell &c, std::mt19937 &rng, bool seeded_only)
+{
+  nr_pdsch_solver_reading_t rd[2] = {{c.wrong.data(), (int)c.wrong.size(), 16}, {c.truth.data(), (int)c.truth.size(), 16}};
+  nr_dci_bits_t p = {{(uint64_t)rng(), 0, 0}};
+  nr_pdsch_solver_var_t v[NR_PDSCH_SOLVER_MAX_VAR];
+  nr_pdsch_solver_set_seeded_only(seeded_only);
+  const int n = nr_pdsch_solver_plan(rnti, p, 49, 0, 2, rd, 2, 24, v);
+  nr_pdsch_solver_set_seeded_only(false);
+  for (int i = 0; i < n; i++) nr_pdsch_solver_feedback(v[i].token, false, false);
+  return n;
+}
+TEST(PdschSolver, FirstDciSeededVariantsOnly)
+{
+  Cell c;
+  c.add_pos = 2;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(41);
+  EXPECT_EQ(PlanN(0x00c1, c, rng, true), 0) << "no seed in the cell: the first DCI gets no probe";
+  EXPECT_GT(PlanN(0x00c2, c, rng, false), 0) << "the full search plans variants";
+  ASSERT_GT(RunCell(c, 0x00a1, -1, 400, rng), 0);
+  FullDecodes(0x00a1, c, 20, true, rng);   // the cell is seeded now
+  const int seeded = PlanN(0x00c3, c, rng, true);
+  const int full = PlanN(0x00c4, c, rng, false);
+  EXPECT_GT(seeded, 0);
+  EXPECT_LT(seeded, full) << "the coverage search adds variants beyond the seeded ones";
+  nr_pdsch_solver_reset();
+}
+
 /* TIMSOLVE2. A busy RNTI that already spent 20000 credited search probes (CRC16 code blocks: chance
  * passes Poisson with mean 20000 x 2^-16 = 0.31) is not solved by two consistent CRC16 passes (P = 0.037); a quiet RNTI is; one
  * CRC24 pass (TBS > 3824) solves at once. */

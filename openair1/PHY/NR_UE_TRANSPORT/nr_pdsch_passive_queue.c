@@ -81,6 +81,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.h" // Technique D Qm oracle
 #include "PHY/NR_UE_TRANSPORT/nr_td_order.h" // BC12a SIB1 census
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
+#include "nr_dci11_prove.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
 #include "PHY/TOOLS/nr_gpu_path.h" // per-path GPU/CPU choice (GPUPASS trial samples)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
@@ -2286,7 +2287,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         /* traffic mode: probes and policy-wanted decodes become "decode" records (SNR = DM-RS combined, NaN when not measured) */
         const float tsnr = dec.dmrs_snr.comb_db > -90.f ? dec.dmrs_snr.comb_db : NAN;
         if (nr_traffic_decode_outcome(job.absolute_slot, job.dci_mono_slot > 0 ? job.dci_mono_slot : -1, job.rnti, 0, job.layout_probe, job.grant.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, tsnr))
-          nr_pdsch_solver_reopen(job.rnti);
+          { nr_pdsch_solver_reopen(job.rnti); nr_dci11_bank_alive_clear(job.rnti); }
       }
       if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && !job.layout_probe &&
           (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {

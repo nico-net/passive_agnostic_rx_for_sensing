@@ -67,8 +67,12 @@ TEST(TrafficDecode, UlDecodesUntilTableLearned)
 // E4 rule 1: PUSCH is decoded until the UL layout is locked AND the MCS table is known; then never (lock lost: again).
 TEST(TrafficDecode, UlLockedAndTableKnownNoDecode)
 {
-  for (int i = 0; i < 100; i++) EXPECT_FALSE(nr_traffic_decode_wanted(1, 0x10b, C, NR_LAYOUT_SOLVED, true, S + i, false)) << i;
-  for (int i = 0; i < 100; i++) EXPECT_FALSE(nr_traffic_decode_wanted(1, 0x10c, C, NR_LAYOUT_FIXED, true, S + i, true)) << i;   // 0_0: the layout needs no lock
+  nr_traffic_decode_reset();
+  int n = 0, m = 0;   // only the cell's 1-in-32 check (UlLockedChecksOneIn32OfTheCell)
+  for (int i = 0; i < 64; i++) n += nr_traffic_decode_wanted(1, 0x10b, C, NR_LAYOUT_SOLVED, true, S + i, false);
+  for (int i = 0; i < 64; i++) m += nr_traffic_decode_wanted(1, 0x10c, C, NR_LAYOUT_FIXED, true, S + i, true);   // 0_0: the layout needs no lock
+  EXPECT_EQ(n, 2);
+  EXPECT_EQ(m, 2);
 }
 TEST(TrafficDecode, UlUnlockedDecodesEvenWithTable)
 {
@@ -76,8 +80,10 @@ TEST(TrafficDecode, UlUnlockedDecodesEvenWithTable)
 }
 TEST(TrafficDecode, UlLockLostResumes)
 {
+  nr_traffic_decode_reset();
+  EXPECT_TRUE(nr_traffic_decode_wanted(1, 0x10e, C, NR_LAYOUT_SOLVED, true, S, false));    // the cell's first grant is a check (counter 0)
   EXPECT_FALSE(nr_traffic_decode_wanted(1, 0x10e, C, NR_LAYOUT_SOLVED, true, S, false));
-  EXPECT_TRUE(nr_traffic_decode_wanted(1, 0x10e, C, NR_LAYOUT_UNSOLVED, true, S, false));
+  EXPECT_TRUE(nr_traffic_decode_wanted(1, 0x10e, C, NR_LAYOUT_UNSOLVED, true, S, false));  // lock lost
   EXPECT_FALSE(nr_traffic_decode_wanted(1, 0x10e, C, NR_LAYOUT_SOLVED, true, S, false));   // relocked
   EXPECT_TRUE(nr_traffic_decode_wanted(1, 0x10e, C, NR_LAYOUT_SOLVED, false, S, false));   // table forgotten (K failures / identity change)
 }
@@ -99,11 +105,11 @@ bool probe(uint16_t r, int seen, int alive = 1, bool fam = false, float snr = OK
 {
   return nr_traffic_probe_wanted(0, r, dir, seen, alive, fam, snr, mcs, tbl);
 }
-// the grants between two probes of one RNTI, every probe failing (or passing when pass)
+// grants until the next wanted UL decode of an unlocked RNTI (the backoff), the decode then failing (or passing)
 int next_gap(uint16_t r, bool pass)
 {
   for (int g = 1; g < 100; g++)
-    if (probe(r, 5)) { nr_traffic_probe_result(0, r, pass); return g; }
+    if (nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_UNSOLVED, false, S, false)) { nr_traffic_probe_result(1, r, pass); return g; }
   return -1;
 }
 }
@@ -132,66 +138,91 @@ TEST(TrafficProbe, LowSnrNoProbe)
   EXPECT_TRUE(probe(0x205, 9, 1, false, 0.f, 0));        // QPSK 120/1024 is decodable at 0 dB
   EXPECT_TRUE(probe(0x205, 9, 1, false, -100.f, 27));    // no SNR estimate: never gated
 }
-TEST(TrafficProbe, BackoffDoublesAndResets)
+TEST(TrafficProbe, NoDlBackoff)
 {
-  const uint16_t r = 0x206;
-  EXPECT_TRUE(probe(r, 5));                       // first probe: no history
-  nr_traffic_probe_result(0, r, false);
-  const int want[] = {2, 4, 8, 16, 16};
-  for (int w : want) EXPECT_EQ(next_gap(r, false), w);
-  EXPECT_EQ(next_gap(r, true), 16);               // a pass at the 16-gap
-  EXPECT_EQ(next_gap(r, false), 1);               // reset: every grant again
-  EXPECT_EQ(next_gap(r, false), 2);
+  for (int i = 0; i < 50; i++) EXPECT_TRUE(probe(0x206, 5)) << i;   // the solver's own search back-off rate-limits; E4 adds none
 }
-TEST(TrafficProbe, OneFailurePerGrantNotPerVariant)
+// UL decodes wanted before the lock follow an exponential backoff: 1 grant in 2^k, k <= 4; a pass resets it
+TEST(TrafficProbe, UlBackoffDoublesAndResets)
 {
   const uint16_t r = 0x207;
-  EXPECT_TRUE(probe(r, 5));
-  for (int v = 0; v < 24; v++) nr_traffic_probe_result(0, r, false);   // 24 variants of ONE grant fail
+  EXPECT_TRUE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_UNSOLVED, false, S, false));
+  nr_traffic_probe_result(1, r, false);
+  const int want[] = {2, 4, 8, 16, 16};
+  for (int w : want) EXPECT_EQ(next_gap(r, false), w);
+  EXPECT_EQ(next_gap(r, true), 16);
+  EXPECT_EQ(next_gap(r, false), 1);
   EXPECT_EQ(next_gap(r, false), 2);
 }
-TEST(TrafficProbe, PassBeforeSiblingFailuresStaysReset)
+TEST(TrafficProbe, UlOneFailurePerGrantNotPerVariant)
 {
   const uint16_t r = 0x208;
-  EXPECT_TRUE(probe(r, 5));
-  nr_traffic_probe_result(0, r, false);
+  EXPECT_TRUE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_UNSOLVED, false, S, false));
+  for (int v = 0; v < 24; v++) nr_traffic_probe_result(1, r, false);
+  EXPECT_EQ(next_gap(r, false), 2);
+}
+TEST(TrafficProbe, UlPassBeforeSiblingFailuresStaysReset)
+{
+  const uint16_t r = 0x209;
+  EXPECT_TRUE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_UNSOLVED, false, S, false));
+  nr_traffic_probe_result(1, r, false);
   EXPECT_EQ(next_gap(r, true), 2);
-  nr_traffic_probe_result(0, r, false);   // late failing sibling of the passing grant
+  nr_traffic_probe_result(1, r, false);
   EXPECT_EQ(next_gap(r, false), 1);
 }
-TEST(TrafficProbe, RntisAndDirectionsIndependent)
+TEST(TrafficProbe, ResetForgetsBackoffAndDciCounts)
 {
-  EXPECT_TRUE(probe(0x209, 5));
-  nr_traffic_probe_result(0, 0x209, false);
-  EXPECT_TRUE(probe(0x20a, 5));
-  EXPECT_TRUE(probe(0x209, 5, 1, false, OK_SNR, 10, 0, 1));   // UL entry of the same RNTI
-}
-TEST(TrafficProbe, ResetForgetsBackoff)
-{
-  EXPECT_TRUE(probe(0x20b, 5));
-  nr_traffic_probe_result(0, 0x20b, false);
-  EXPECT_FALSE(probe(0x20b, 5));
+  const uint16_t r = 0x20b;
+  EXPECT_TRUE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_UNSOLVED, false, S, false));
+  nr_traffic_probe_result(1, r, false);
+  EXPECT_FALSE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_UNSOLVED, false, S, false));
+  EXPECT_EQ(nr_traffic_note_dci(0, r, true), 1);
   nr_traffic_decode_reset();
-  EXPECT_TRUE(probe(0x20b, 5));
+  EXPECT_TRUE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_UNSOLVED, false, S, false));
+  EXPECT_EQ(nr_traffic_note_dci(0, r, true), 1);
 }
 TEST(TrafficProbe, DciCountPerRntiAndDirection)
 {
   EXPECT_EQ(nr_traffic_note_dci(0, 0x20c, true), 1);
   EXPECT_EQ(nr_traffic_note_dci(0, 0x20c, true), 2);
+  EXPECT_EQ(nr_traffic_note_dci(0, 0x20c, false), 2);   // a duplicate is not counted
   EXPECT_EQ(nr_traffic_note_dci(1, 0x20c, true), 1);
   EXPECT_EQ(nr_traffic_note_dci(0, 0x20d, true), 1);
-  EXPECT_EQ(nr_traffic_note_dci(0, 0x20c, false), 2);   // a duplicate is not counted
-  nr_traffic_decode_reset();
-  EXPECT_EQ(nr_traffic_note_dci(0, 0x20c, true), 1);
 }
-// UL decodes that rule 1 still wants follow the same backoff; a CRC pass resets it
-TEST(TrafficProbe, UlDecodeBackoff)
+// I1: the busy cell's other RNTIs do not evict a frequent RNTI's count
+TEST(TrafficProbe, FrequentRntiNeverEvictedAmong1500)
 {
-  const uint16_t r = 0x20e;
-  EXPECT_TRUE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_SOLVED, false, S, false));
-  nr_traffic_probe_result(1, r, false);
-  EXPECT_FALSE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_SOLVED, false, S, false));
-  EXPECT_TRUE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_SOLVED, false, S, false));
-  nr_traffic_probe_result(1, r, true);
-  EXPECT_TRUE(nr_traffic_decode_wanted(1, r, C, NR_LAYOUT_SOLVED, false, S, false));
+  nr_traffic_decode_reset();
+  const uint16_t hot = 0x3000;
+  int expect = 0;
+  for (int i = 0; i < 1500; i++) {
+    nr_traffic_note_dci(0, (uint16_t)(0x4000 + i), true);
+    if (i % 3 == 0) expect = nr_traffic_note_dci(0, hot, true);
+  }
+  EXPECT_EQ(nr_traffic_note_dci(0, hot, false), expect);
+  EXPECT_EQ(expect, 500);
+  // an RNTI not seen for more than 1024 others is evicted (LRU): starts again
+  nr_traffic_note_dci(0, 0x2000, true);
+  for (int i = 0; i < 1100; i++) nr_traffic_note_dci(0, (uint16_t)(0x5000 + i), true);
+  EXPECT_EQ(nr_traffic_note_dci(0, 0x2000, true), 1);
+}
+// C1: after lock + table, 1 UL grant in 32 of the CELL is still decoded (its CRC verdicts reopen a stale lock/table)
+TEST(TrafficProbe, UlLockedChecksOneIn32OfTheCell)
+{
+  nr_traffic_decode_reset();
+  int n = 0;
+  for (int i = 0; i < 32 * 40; i++) n += nr_traffic_decode_wanted(1, (uint16_t)(0x600 + i % 7), C, NR_LAYOUT_SOLVED, true, S, false);
+  EXPECT_EQ(n, 40);
+  // 8 consecutive check failures (RELOCK_FAILS of the lock) are reached within 8 * 32 cell grants
+  int checks = 0, grants = 0;
+  while (checks < 8 && grants < 1000) { grants++; checks += nr_traffic_decode_wanted(1, 0x610, C, NR_LAYOUT_FIXED, true, S, false); }
+  EXPECT_LE(grants, 8 * 32);
+}
+TEST(TrafficProbe, UlBackoffDoesNotThrottleTheLockedCheck)
+{
+  nr_traffic_decode_reset();
+  nr_traffic_probe_result(1, 0x620, false);
+  int n = 0;
+  for (int i = 0; i < 64; i++) n += nr_traffic_decode_wanted(1, 0x620, C, NR_LAYOUT_SOLVED, true, S, false);
+  EXPECT_EQ(n, 2);
 }

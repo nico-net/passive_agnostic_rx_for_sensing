@@ -186,8 +186,8 @@ void nr_traffic_retx_reset(void)
 bool nr_traffic_decode_outcome(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db)
 {
   nr_sense_emit_decode(abs_slot, dci_abs_slot, rnti, dir, probe, crc, snr_db, NULL);
-  /* backoff of the probe/UL-decode triage (nr_traffic_decode.h): a UL trial/probe failure is not a failure of the UL decode gate, a pass is */
-  if (crc >= 0 && (dir == 0 ? probe : (!probe || crc == 1))) nr_traffic_probe_result(dir, rnti, crc == 1);
+  /* backoff of the UL decode gate (nr_traffic_decode.h): a UL trial/probe failure is not a failure of the gate, a pass is */
+  if (crc >= 0 && dir == 1 && (!probe || crc == 1)) nr_traffic_probe_result(dir, rnti, crc == 1);
   if (probe) { nr_traffic_count(dir ? NR_TRAFFIC_CNT_PROBE_UL : NR_TRAFFIC_CNT_PROBE); return false; }
   nr_traffic_count(dir ? NR_TRAFFIC_CNT_CHECK_UL : NR_TRAFFIC_CNT_CHECK);
   if (crc == 0) nr_traffic_count(NR_TRAFFIC_CNT_CHECK_FAIL);

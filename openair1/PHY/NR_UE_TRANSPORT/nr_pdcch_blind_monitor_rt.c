@@ -8912,9 +8912,9 @@ constdiag_done:;
       /* DL 1_1 of dl_auto already went through the dir-0 dedupe (not in a discovered pass: no dir-0 dedupe there); every other accept can repeat (other passes / AL / CORESET hypotheses) */
       if (!(cand_task[ti].dl_auto && !t_discovered_token && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) && dedupe_hit(abs_slot, source_absolute_slot, out.rnti, 2)) {
         nr_traffic_count(NR_TRAFFIC_CNT_DUP);
-        t_seen = nr_traffic_note_dci(0, out.rnti, false);
+        if (out.rnti_class == NR_BLIND_RNTI_CLASS_C) t_seen = nr_traffic_note_dci(0, out.rnti, false);
       } else {
-        t_seen = nr_traffic_note_dci(0, out.rnti, true);
+        if (out.rnti_class == NR_BLIND_RNTI_CLASS_C) t_seen = nr_traffic_note_dci(0, out.rnti, true);
         const int dbs = cand_task[ti].bwp_entry > 0 && pbwp_snap[cand_task[ti].bwp_entry].start >= 0 ? pbwp_snap[cand_task[ti].bwp_entry].start : cfg->bwp_start;
         const int dbz = is10t ? (int)dci10_ctx.n_rb_riv : cand_task[ti].bwp_size;
         /* 1_1 payload exists only for dl_auto / bwp_probe tasks (dl_raw); other 1_1 extractions keep no payload: bits unavailable (null) */
@@ -9800,6 +9800,8 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
 #undef s_weak
       if (nrd <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_NOREAD);
       else if (sv_budget <= 0 && !sv_weak) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_BUDGET0);
+      /* E4: the first DCI of a C-RNTI (traffic mode) is planned with the solver's seeded variants only; the full search starts at the second */
+      nr_pdsch_solver_set_seeded_only(tw >= 0 && out.rnti_class == NR_BLIND_RNTI_CLASS_C && t_seen < 2);
       const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
                                                     cfg->dmrs_typeA_position + 2, sv_nrm > 0, rd, nrd, sv_budget, var) : 0;
       int v = 0;
@@ -9816,7 +9818,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
             float tsnr = -100.f;
             if (!nr_pdsch_solver_snr(out.rnti, &tsnr)) tsnr = -100.f;
             const int na = nr_dci11_bank_alive(out.rnti);
-            tprobe = nr_traffic_probe_wanted(0, out.rnti, 0, t_seen, na < 0 ? 1 : na, false, tsnr, (int)o->mcs, (int)var[v].table) ? 1 : 0;
+            tprobe = nr_traffic_probe_wanted(0, out.rnti, 0, t_seen, na < 0 ? 1 : na, t_seen < 2 /* seeded variants only: like a family match */, tsnr, (int)o->mcs, (int)var[v].table) ? 1 : 0;
           }
           if (tprobe == 0) {
             nr_traffic_count(NR_TRAFFIC_CNT_PROBE_SKIP);
@@ -10445,7 +10447,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
                 && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
               const float tsnr = dec.dmrs_snr.comb_db > -90.f ? dec.dmrs_snr.comb_db : NAN;
               if (nr_traffic_decode_outcome(grant_pd.source_absolute_slot, source_absolute_slot, out.rnti, 0, false, out.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, tsnr))
-                nr_pdsch_solver_reopen(out.rnti);
+                { nr_pdsch_solver_reopen(out.rnti); nr_dci11_bank_alive_clear(out.rnti); }
             } else if (nr_sense_enabled() && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
               struct timespec sense_ts;
               clock_gettime(CLOCK_MONOTONIC, &sense_ts);

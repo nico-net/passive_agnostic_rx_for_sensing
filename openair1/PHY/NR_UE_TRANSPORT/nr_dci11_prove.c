@@ -491,7 +491,7 @@ static bool bank_prove_impl(uint16_t rnti, const nr_dci11_class_t *cls, int ncls
     b->proved_at = fed <= b->fed ? fed : b->fed;
     b->deferred = false;
     b->due_since = 0;
-    b->alive1 = n_alive < 0 ? 0 : n_alive + 1;
+    b->alive1 = n_alive < 0 || scoped ? 0 : n_alive + 1;   /* a scoped look counts one class of a solved RNTI: not an alive count */
     if (was && b->proven && prev_alive && !multi) {
       /* HYSTERESIS: a proof stands until the data refute it; losing significance in a later look is not a refutation. A surviving rival (multi) is
        * ambiguity and ends it. */
@@ -521,6 +521,14 @@ bool nr_dci11_bank_proven_scope(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_s
   if (ok) { *cls = b->cls; *out = b->split; if (scoped) *scoped = b->scoped; }
   pthread_mutex_unlock(&g_bank_mu);
   return ok;
+}
+
+void nr_dci11_bank_alive_clear(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_bank_mu);
+  bank_t *b = bank_find(rnti);
+  if (b) b->alive1 = 0;
+  pthread_mutex_unlock(&g_bank_mu);
 }
 
 int nr_dci11_bank_alive(uint16_t rnti)
