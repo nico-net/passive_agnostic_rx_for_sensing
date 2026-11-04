@@ -106,16 +106,17 @@ bool nr_dci11_bank_proven(uint16_t rnti, const nr_dci11_layout_t *l, const nr_dc
 bool nr_dci11_bank_proven_scope(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out, bool *scoped);
 /* One due look of an RNTI on the scan consumer (everything E1 does per accept after the feed): cheap due test, budget test, class set (own == NULL: the
  * RNTI is unsolved, proved over the resolver's classes, unscoped) or own class (solved RNTI: scoped proof), prove, charge the time to the cell's budget.
- * Budget: 20 ms per second of wall time per cell; over budget the RNTI stays due. Returns NR_DCI11_SVC_* flags; *total_classes = alive classes counted (-1: no
+ * Budget: 10 ms/s scoped + 10 ms/s unscoped per cell, oldest-due first within each; over budget the RNTI stays due. Returns NR_DCI11_SVC_* flags; *total_classes = alive classes counted (-1: no
  * unsolved look ran or the set is incomplete). */
 #define NR_DCI11_SVC_CHANGED 1u    /* the proven state changed */
 #define NR_DCI11_SVC_DEFERRED 2u   /* over budget, first time since the last look of this RNTI */
+#define NR_DCI11_SVC_DEFERRED_SCOPED 8u   /* with DEFERRED: the held-back look was a scoped (own-class) one */
 #define NR_DCI11_SVC_SKIPPED 4u    /* unsolved look without a usable class set (too many classes, incomplete) */
 unsigned nr_dci11_bank_service(uint16_t rnti, const nr_dci11_resolver_t *r, const nr_dci11_class_t *own, nr_ul_slot_fn ul, int *total_classes);
 /* May the stored proof be used to read this DCI? proven/scoped/pc as returned by nr_dci11_bank_proven_scope; rep_l/rep_o = the solver's representative layout
- * (both NULL: the RNTI is unsolved); set_usable = the cached class set is current and usable. */
+ * (both NULL: the RNTI is unsolved); set/nset = the current cached class set (nset <= 0: not usable); an unscoped proof needs its class in it. */
 bool nr_dci11_emit_ok(bool proven, bool scoped, uint16_t dci_len, const nr_dci11_class_t *pc, const nr_dci11_layout_t *rep_l, const nr_dci11_offsets_t *rep_o,
-                      bool set_usable);
+                      const nr_dci11_class_t *set, int nset);
 void nr_dci11_set_clock(uint64_t (*fn)(void));   /* test hook: monotonic nanoseconds, NULL = CLOCK_MONOTONIC */
 void nr_dci11_budget_reset(void);
 /* New cell identity: forget every bank and proof of this cell. */

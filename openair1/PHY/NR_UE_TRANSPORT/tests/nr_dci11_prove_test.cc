@@ -539,19 +539,24 @@ TEST(Dci11Prove, EmitRuleScopedUnscopedAndLength)
   make_layout(c13, &la, &oa); make_layout(c14, &lb, &ob);
   const nr_dci11_class_t pc = cls_of(la, oa);
   const uint16_t len = oa.total;
+  const nr_dci11_class_t S1[1] = {pc}, SB[1] = {cls_of(lb, ob)};   // current cached class set: this class / another one
   // unsolved (no rep): scoped never, unscoped only with a usable current set
-  EXPECT_FALSE(nr_dci11_emit_ok(true, true, len, &pc, nullptr, nullptr, true));       // D1: solve -> prove -> unsolve -> no emission
-  EXPECT_TRUE(nr_dci11_emit_ok(true, false, len, &pc, nullptr, nullptr, true));
-  EXPECT_FALSE(nr_dci11_emit_ok(true, false, len, &pc, nullptr, nullptr, false));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, true, len, &pc, nullptr, nullptr, S1, 1));       // D1: solve -> prove -> unsolve -> no emission
+  EXPECT_TRUE(nr_dci11_emit_ok(true, false, len, &pc, nullptr, nullptr, S1, 1));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, false, len, &pc, nullptr, nullptr, nullptr, 0));
   // solved: scoped only while the rep still has the stored class; unscoped also needs the same class under a rep
-  EXPECT_TRUE(nr_dci11_emit_ok(true, true, len, &pc, &la, &oa, false));
-  EXPECT_FALSE(nr_dci11_emit_ok(true, true, len, &pc, &lb, &ob, true));
-  EXPECT_FALSE(nr_dci11_emit_ok(true, false, len, &pc, &lb, &ob, true));
-  EXPECT_TRUE(nr_dci11_emit_ok(true, false, len, &pc, &la, &oa, true));
+  EXPECT_TRUE(nr_dci11_emit_ok(true, true, len, &pc, &la, &oa, nullptr, 0));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, true, len, &pc, &lb, &ob, S1, 1));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, false, len, &pc, &lb, &ob, S1, 1));
+  EXPECT_TRUE(nr_dci11_emit_ok(true, false, len, &pc, &la, &oa, S1, 1));
   // D4: a DCI of another length is never read with this class
-  EXPECT_FALSE(nr_dci11_emit_ok(true, true, (uint16_t)(len + 1), &pc, &la, &oa, true));
-  EXPECT_FALSE(nr_dci11_emit_ok(true, false, (uint16_t)(len - 1), &pc, nullptr, nullptr, true));
-  EXPECT_FALSE(nr_dci11_emit_ok(false, false, len, &pc, &la, &oa, true));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, true, (uint16_t)(len + 1), &pc, &la, &oa, S1, 1));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, false, (uint16_t)(len - 1), &pc, nullptr, nullptr, S1, 1));
+  EXPECT_FALSE(nr_dci11_emit_ok(false, false, len, &pc, &la, &oa, S1, 1));
+  // F2: an unscoped proof whose class is no longer in the current cached set is not emitted (with or without a rep); a scoped one does not depend on the set
+  EXPECT_FALSE(nr_dci11_emit_ok(true, false, len, &pc, nullptr, nullptr, SB, 1));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, false, len, &pc, &la, &oa, SB, 1));
+  EXPECT_TRUE(nr_dci11_emit_ok(true, true, len, &pc, &la, &oa, SB, 1));
 }
 
 TEST(Dci11Prove, SolvedProofSurvivesTheUnsolvedClassSetChurn)
@@ -593,36 +598,101 @@ TEST(Dci11Prove, SolvedProofSurvivesTheUnsolvedClassSetChurn)
   nr_dci11_bank_reset();
 }
 
-static uint64_t g_fake_t = 0;
-static uint64_t fake_clock(void) { const uint64_t v = g_fake_t; g_fake_t += 15000000ull; return v; }   // every reading advances 15 ms
+static uint64_t g_fake_t = 0, g_fake_step = 15000000ull;
+static uint64_t fake_clock(void) { const uint64_t v = g_fake_t; g_fake_t += g_fake_step; return v; }   // every reading advances by g_fake_step
 
 TEST(Dci11Prove, ProveBudgetDefersAndIsCounted)
 {
-  // 20 ms per second of wall time per cell: each service reads the clock twice (start, end) and is charged the difference (15 ms here), so two looks fit and
-  // the third is held back; it stays due and is counted once; a new window lets it run
+  // scoped sub-budget 10 ms per second of wall time per cell: each service reads the clock twice (start, end) and is charged the difference (15 ms here), so one
+  // look fits and the second is held back; it stays due and is counted once (also as a scoped deferral); a new window lets it run
   nr_cell_bind(0);
   nr_dci11_bank_reset();
   nr_dci11_budget_reset();
-  g_fake_t = 1000000000ull;
+  g_fake_t = 1000000000ull; g_fake_step = 15000000ull;
   nr_dci11_set_clock(fake_clock);
   std::mt19937 rng(29);
   Cfg c;
   nr_dci11_layout_t l; nr_dci11_offsets_t o;
   make_layout(c, &l, &o);
   const nr_dci11_class_t own = cls_of(l, o);
-  uint16_t rn[3] = {0x4711, 0x4712, 0x4713};
+  uint16_t rn[2] = {0x4711, 0x4712};
   for (uint16_t r : rn) feed_all(r, gen_stream(c, 64, rng), o.total);
   int tot;
-  EXPECT_TRUE(nr_dci11_bank_service(rn[0], nullptr, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);   // spent 15 ms
-  EXPECT_TRUE(nr_dci11_bank_service(rn[1], nullptr, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);   // spent 30 ms (a look that starts under budget may overshoot)
-  unsigned fl = nr_dci11_bank_service(rn[2], nullptr, &own, ul_dddsu, &tot);
-  EXPECT_EQ(fl, (unsigned)NR_DCI11_SVC_DEFERRED);                      // over budget: held back, counted
-  EXPECT_TRUE(nr_dci11_bank_due(rn[2]));                                // and still due
-  EXPECT_EQ(nr_dci11_bank_service(rn[2], nullptr, &own, ul_dddsu, &tot), 0u);   // counted once per episode, not per accept
-  EXPECT_TRUE(nr_dci11_bank_due(rn[2]));
+  EXPECT_TRUE(nr_dci11_bank_service(rn[0], nullptr, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);   // spent 15 ms (a look that starts under budget may overshoot)
+  unsigned fl = nr_dci11_bank_service(rn[1], nullptr, &own, ul_dddsu, &tot);
+  EXPECT_EQ(fl, (unsigned)(NR_DCI11_SVC_DEFERRED | NR_DCI11_SVC_DEFERRED_SCOPED));   // over budget: held back, counted
+  EXPECT_TRUE(nr_dci11_bank_due(rn[1]));                                // and still due
+  EXPECT_EQ(nr_dci11_bank_service(rn[1], nullptr, &own, ul_dddsu, &tot), 0u);   // counted once per episode, not per accept
+  EXPECT_TRUE(nr_dci11_bank_due(rn[1]));
   g_fake_t += 2000000000ull;                                            // two seconds later: a fresh window
-  EXPECT_TRUE(nr_dci11_bank_service(rn[2], nullptr, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);
-  EXPECT_FALSE(nr_dci11_bank_due(rn[2]));
+  EXPECT_TRUE(nr_dci11_bank_service(rn[1], nullptr, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);
+  EXPECT_FALSE(nr_dci11_bank_due(rn[1]));
+  nr_dci11_set_clock(nullptr);
+  nr_dci11_budget_reset();
+  nr_dci11_bank_reset();
+}
+
+TEST(Dci11Prove, UnscopedDemandNeverDelaysAScopedLook)
+{
+  // F1(a): the unscoped demand is far above its 10 ms/s; a scoped look of the same window still runs (reserved sub-budget), and a second scoped one is bounded by
+  // the scoped sub-budget alone. Merging the two sub-budgets (one index) fails here.
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  nr_dci11_budget_reset();
+  g_fake_t = 1000000000ull; g_fake_step = 12000000ull;
+  nr_dci11_set_clock(fake_clock);
+  std::mt19937 rng(31);
+  Cfg c;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(c, &l, &o);
+  const nr_dci11_class_t own = cls_of(l, o);
+  nr_dci11_resolver_t *r = (nr_dci11_resolver_t *)calloc(1, sizeof *r);
+  r->hyp[0] = l; r->off[0] = o; r->alive[0] = true; r->n_hyp = 1; r->n_alive = 1;
+  const uint16_t un[5] = {0x4721, 0x4722, 0x4723, 0x4724, 0x4725}, sc[2] = {0x4731, 0x4732};
+  for (uint16_t x : un) feed_all(x, gen_stream(c, 64, rng), o.total);
+  for (uint16_t x : sc) feed_all(x, gen_stream(c, 64, rng), o.total);
+  int tot;
+  EXPECT_TRUE(nr_dci11_bank_service(un[0], r, nullptr, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);   // 12 ms: the unscoped share is gone
+  for (int i = 1; i < 5; i++) EXPECT_EQ(nr_dci11_bank_service(un[i], r, nullptr, ul_dddsu, &tot), (unsigned)NR_DCI11_SVC_DEFERRED);   // demand above budget
+  EXPECT_TRUE(nr_dci11_bank_service(sc[0], nullptr, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);   // the scoped look is not delayed
+  EXPECT_EQ(nr_dci11_bank_service(sc[1], nullptr, &own, ul_dddsu, &tot), (unsigned)(NR_DCI11_SVC_DEFERRED | NR_DCI11_SVC_DEFERRED_SCOPED));   // its own share is gone
+  free(r);
+  nr_dci11_set_clock(nullptr);
+  nr_dci11_budget_reset();
+  nr_dci11_bank_reset();
+}
+
+TEST(Dci11Prove, OldestDueIsServedFirstWithinTheSubBudget)
+{
+  // F1(b): C became due after B; in the next window C's accept comes first but B (waiting longer) goes first; C follows in the window after
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  nr_dci11_budget_reset();
+  g_fake_t = 1000000000ull; g_fake_step = 12000000ull;
+  nr_dci11_set_clock(fake_clock);
+  std::mt19937 rng(32);
+  Cfg c;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(c, &l, &o);
+  nr_dci11_resolver_t *r = (nr_dci11_resolver_t *)calloc(1, sizeof *r);
+  r->hyp[0] = l; r->off[0] = o; r->alive[0] = true; r->n_hyp = 1; r->n_alive = 1;
+  const uint16_t A = 0x4741, B = 0x4742, C = 0x4743;
+  for (uint16_t x : {A, B, C}) feed_all(x, gen_stream(c, 64, rng), o.total);
+  int tot;
+  EXPECT_TRUE(nr_dci11_bank_service(A, r, nullptr, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);
+  EXPECT_TRUE(nr_dci11_bank_service(B, r, nullptr, ul_dddsu, &tot) & NR_DCI11_SVC_DEFERRED);       // B waits first
+  EXPECT_TRUE(nr_dci11_bank_service(C, r, nullptr, ul_dddsu, &tot) & NR_DCI11_SVC_DEFERRED);       // C waits second
+  g_fake_t += 1100000000ull;                                            // a fresh window
+  EXPECT_EQ(nr_dci11_bank_service(C, r, nullptr, ul_dddsu, &tot), 0u);   // budget is there, but B has waited longer
+  EXPECT_TRUE(nr_dci11_bank_due(C));
+  EXPECT_TRUE(nr_dci11_bank_service(B, r, nullptr, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);
+  EXPECT_FALSE(nr_dci11_bank_due(B));
+  EXPECT_EQ(nr_dci11_bank_service(C, r, nullptr, ul_dddsu, &tot), 0u);   // B used the window's share
+  EXPECT_TRUE(nr_dci11_bank_due(C));
+  g_fake_t += 1100000000ull;
+  EXPECT_TRUE(nr_dci11_bank_service(C, r, nullptr, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);
+  EXPECT_FALSE(nr_dci11_bank_due(C));
+  free(r);
   nr_dci11_set_clock(nullptr);
   nr_dci11_budget_reset();
   nr_dci11_bank_reset();

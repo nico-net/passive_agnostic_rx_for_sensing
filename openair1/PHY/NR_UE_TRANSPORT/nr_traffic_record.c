@@ -135,6 +135,7 @@ void nr_traffic_stats_get(nr_traffic_stats_t *s)
   s->e1_skip_classes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_SKIP], memory_order_relaxed);
   s->e1_unfed = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_UNFED], memory_order_relaxed);
   s->e1_deferred = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_DEFERRED], memory_order_relaxed);
+  s->e1_deferred_scoped = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_DEFERRED_SCOPED], memory_order_relaxed);
   for (int i = 0; i < 5; i++) s->e1_cls[i] = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_CLS_1 + i], memory_order_relaxed);
   s->traffic_skip = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_SKIP], memory_order_relaxed);
   s->check_decodes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK], memory_order_relaxed);

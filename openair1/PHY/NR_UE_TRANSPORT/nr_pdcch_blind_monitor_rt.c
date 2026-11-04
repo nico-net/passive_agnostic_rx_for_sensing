@@ -4725,6 +4725,7 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
           const unsigned fl = nr_dci11_bank_service(out->rnti, g_dci11_resolver, have_rep ? &one : NULL, e1_ul_capable, &tot);
           if (fl & NR_DCI11_SVC_CHANGED) nr_traffic_count(NR_TRAFFIC_CNT_E1_CHANGE);
           if (fl & NR_DCI11_SVC_DEFERRED) nr_traffic_count(NR_TRAFFIC_CNT_E1_DEFERRED);
+          if (fl & NR_DCI11_SVC_DEFERRED_SCOPED) nr_traffic_count(NR_TRAFFIC_CNT_E1_DEFERRED_SCOPED);
           if (fl & NR_DCI11_SVC_SKIPPED) nr_traffic_count(NR_TRAFFIC_CNT_E1_SKIP);   /* too many classes, or an incomplete resolver set: no proof this round */
           if (tot >= 0)   /* histogram of what E2/E3 must reduce */
             nr_traffic_count(tot <= 1 ? NR_TRAFFIC_CNT_E1_CLS_1 : tot <= 4 ? NR_TRAFFIC_CNT_E1_CLS_2_4 : tot <= 16 ? NR_TRAFFIC_CNT_E1_CLS_5_16
@@ -4735,8 +4736,9 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
        * while the cached class set is the resolver's CURRENT usable one (this test never scans). Both only for a DCI of the length the proof was made for. */
       bool scoped = false;
       const bool proven = nr_dci11_bank_proven_scope(out->rnti, &pc, &ps, &scoped);
-      e1 = nr_dci11_emit_ok(proven, scoped, dci_len, &pc, have_rep ? &g_dci11_resolver->hyp[rep] : NULL, have_rep ? &g_dci11_resolver->off[rep] : NULL,
-                            proven && !scoped && nr_dci11_class_set(g_dci11_resolver, NULL, false, NULL) > 0);
+      nr_dci11_class_t cur[NR_DCI11_CLASS_MAX];
+      const int ncur = proven && !scoped ? nr_dci11_class_set(g_dci11_resolver, cur, false, NULL) : 0;   /* cached set only, never a scan */
+      e1 = nr_dci11_emit_ok(proven, scoped, dci_len, &pc, have_rep ? &g_dci11_resolver->hyp[rep] : NULL, have_rep ? &g_dci11_resolver->off[rep] : NULL, cur, ncur);
     }
     if (e1) nr_dci11_harq_fields_proven(*payload, dci_len, &pc.l, &pc.o, &ps, &hf);
     else if (have_rep) nr_dci11_harq_fields(*payload, dci_len, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep], &hf);

@@ -361,6 +361,8 @@ typedef struct {
   int64_t last_slot;
   uint8_t head, cnt;
   nr_dci11_obs_t obs[NR_DCI11_BANK];
+  uint64_t due_since, last_try;   /* while deferred: when the look was first held back (oldest-due-first) and when it was last attempted (a silent RNTI stops blocking) */
+  bool pend_scoped;               /* the held-back look is a scoped (own-class) one */
   bool proven, scoped, deferred;   /* scoped: proved within a CRC-solved RNTI's own class only (not unique over the resolver's set); deferred: counted as budget-deferred since the last look */
   nr_dci11_class_t cls;
   nr_dci11_split_t split;
@@ -442,6 +444,7 @@ static bool bank_prove_impl(uint16_t rnti, const nr_dci11_class_t *cls, int ncls
   if (!cls || ncls <= 0) {   /* a skipped round (no usable class set): look again after 16 more */
     b->proved_at = b->fed;
     b->deferred = false;
+    b->due_since = 0;
     pthread_mutex_unlock(&g_bank_mu);
     return false;
   }
@@ -484,6 +487,7 @@ static bool bank_prove_impl(uint16_t rnti, const nr_dci11_class_t *cls, int ncls
   if (b && b->rev == rev) {
     b->proved_at = fed <= b->fed ? fed : b->fed;
     b->deferred = false;
+    b->due_since = 0;
     if (was && b->proven && prev_alive && !multi) {
       /* HYSTERESIS: a proof stands until the data refute it; losing significance in a later look is not a refutation. A surviving rival (multi) is
        * ambiguity and ends it. */
@@ -611,27 +615,29 @@ static uint64_t (*g_clock)(void) = clock_real;   /* test hook only (process-wide
 void nr_dci11_set_clock(uint64_t (*fn)(void)) { g_clock = fn ? fn : clock_real; }
 
 /* PROVE BUDGET: 20 ms of prover and class-scan time per second of wall time per cell = 2 % of one core on the scan consumers (a general bound on what an
- * optional evidence stage may take). Fixed 1 s windows; a look that starts under budget may overshoot by one proof (< 1 ms). */
-#define BUDGET_NS 20000000ull
+ * optional evidence stage may take), split in two sub-budgets of 10 ms: scoped (a solved RNTI's own-class look, 56 us) and unscoped (class-set look, <= 820 us
+ * per class). Unscoped demand can never consume the scoped share. Within a sub-budget the longest-waiting RNTI is served first. Fixed 1 s windows; a look
+ * that starts under budget may overshoot by one proof (< 1 ms). */
+#define BUDGET_NS 10000000ull
 #define BUDGET_WINDOW_NS 1000000000ull
-typedef struct { uint64_t start_ns, spent_ns; } budget_t;
+typedef struct { uint64_t start_ns[2], spent_ns[2]; } budget_t;   /* [0] unscoped, [1] scoped */
 NR_CELL_STATIC(budget_t, g_budget)
 #define g_budget NR_CELL_REF(g_budget)
 NR_CELL_STATIC_INIT(pthread_mutex_t, g_budget_mu, PTHREAD_MUTEX_INITIALIZER)
 #define g_budget_mu NR_CELL_REF(g_budget_mu)
 
-static bool budget_ok(uint64_t now)
+static bool budget_ok(uint64_t now, int k)
 {
   pthread_mutex_lock(&g_budget_mu);
-  if (now - g_budget.start_ns >= BUDGET_WINDOW_NS || now < g_budget.start_ns) { g_budget.start_ns = now; g_budget.spent_ns = 0; }
-  const bool ok = g_budget.spent_ns < BUDGET_NS;
+  if (now - g_budget.start_ns[k] >= BUDGET_WINDOW_NS || now < g_budget.start_ns[k]) { g_budget.start_ns[k] = now; g_budget.spent_ns[k] = 0; }
+  const bool ok = g_budget.spent_ns[k] < BUDGET_NS;
   pthread_mutex_unlock(&g_budget_mu);
   return ok;
 }
-static void budget_charge(uint64_t ns)
+static void budget_charge(uint64_t ns, int k)
 {
   pthread_mutex_lock(&g_budget_mu);
-  g_budget.spent_ns += ns;
+  g_budget.spent_ns[k] += ns;
   pthread_mutex_unlock(&g_budget_mu);
 }
 void nr_dci11_budget_reset(void)
@@ -641,18 +647,39 @@ void nr_dci11_budget_reset(void)
   pthread_mutex_unlock(&g_budget_mu);
 }
 
+/* Oldest-due first: the look of rnti may run only if no other RNTI's look of the same kind has been waiting longer (a waiting RNTI silent for > 2 windows
+ * does not count). Returns true = run; false = held back (marks it waiting; *first = first hold-back of this episode). */
+static bool bank_turn(uint16_t rnti, bool scoped, uint64_t t0, bool budget, bool *first)
+{
+  *first = false;
+  pthread_mutex_lock(&g_bank_mu);
+  bank_t *b = bank_find(rnti);
+  bool run = b != NULL && budget;
+  const uint64_t mine = b && b->deferred ? b->due_since : t0;
+  if (run) {
+    for (int i = 0; i < BANK_RNTIS; i++) {
+      const bank_t *o = &g_bank.e[i];
+      if (o != b && o->used && o->deferred && o->pend_scoped == scoped && o->due_since < mine && t0 - o->last_try <= 2 * BUDGET_WINDOW_NS) { run = false; break; }
+    }
+  }
+  if (b && !run) {
+    if (!b->deferred) { b->deferred = true; b->due_since = t0; b->pend_scoped = scoped; *first = true; }
+    b->last_try = t0;
+  }
+  pthread_mutex_unlock(&g_bank_mu);
+  return run;
+}
+
 unsigned nr_dci11_bank_service(uint16_t rnti, const nr_dci11_resolver_t *r, const nr_dci11_class_t *own, nr_ul_slot_fn ul, int *total_classes)
 {
   unsigned fl = 0;
   if (total_classes) *total_classes = -1;
   if (!nr_dci11_bank_due(rnti)) return 0;
+  const int k = own ? 1 : 0;
   const uint64_t t0 = g_clock();
-  if (!budget_ok(t0)) {   /* over budget: it stays due (looked at again on the next accept), counted once per episode */
-    pthread_mutex_lock(&g_bank_mu);
-    bank_t *b = bank_find(rnti);
-    if (b && !b->deferred) { b->deferred = true; fl |= NR_DCI11_SVC_DEFERRED; }
-    pthread_mutex_unlock(&g_bank_mu);
-    return fl;
+  bool first;
+  if (!bank_turn(rnti, own != NULL, t0, budget_ok(t0, k), &first)) {   /* over budget, or an older one goes first: it stays due, counted once per episode */
+    return first ? NR_DCI11_SVC_DEFERRED | (own ? NR_DCI11_SVC_DEFERRED_SCOPED : 0u) : 0u;
   }
   bool changed;
   if (own) {
@@ -665,15 +692,18 @@ unsigned nr_dci11_bank_service(uint16_t rnti, const nr_dci11_resolver_t *r, cons
     if (nc < 0) fl |= NR_DCI11_SVC_SKIPPED;
     changed = bank_prove_impl(rnti, cls, nc > 0 ? nc : 0, ul, false);
   }
-  budget_charge(g_clock() - t0);
+  budget_charge(g_clock() - t0, k);
   return fl | (changed ? NR_DCI11_SVC_CHANGED : 0);
 }
 
 bool nr_dci11_emit_ok(bool proven, bool scoped, uint16_t dci_len, const nr_dci11_class_t *pc, const nr_dci11_layout_t *rep_l, const nr_dci11_offsets_t *rep_o,
-                      bool set_usable)
+                      const nr_dci11_class_t *set, int nset)
 {
   if (!proven || !pc || dci_len != pc->o.total) return false;                                     /* only DCIs of the length the proof was made for */
   const bool rep = rep_l && rep_o;
   if (scoped) return rep && nr_dci11_class_same(&pc->l, &pc->o, rep_l, rep_o);                   /* a solved RNTI's own-class proof: only while it is still that class */
-  return set_usable && (!rep || nr_dci11_class_same(&pc->l, &pc->o, rep_l, rep_o));              /* an unscoped one: only over the current usable class set */
+  if (!set || nset <= 0) return false;                                                            /* an unscoped one: only over the current usable class set ... */
+  if (rep && !nr_dci11_class_same(&pc->l, &pc->o, rep_l, rep_o)) return false;
+  for (int i = 0; i < nset; i++) if (nr_dci11_class_same(&set[i].l, &set[i].o, &pc->l, &pc->o)) return true;   /* ... and only while its class is still in it */
+  return false;
 }
