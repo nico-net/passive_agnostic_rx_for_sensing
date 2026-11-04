@@ -77,8 +77,7 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   put(&j,"{\"schema\":2,\"type\":\"rs\"");
   common(&j,m->epoch,m->identity_gen,m->dedicated_epoch,(int64_t)m->abs_slot,m->frame,m->slot,
          m->t_mono_ns ? m->t_mono_ns : mono_ns(),m->rx_ts,m->pci);
-  quoted(&j,"source",names[src]);
-  quoted(&j,"dir",m->q_valid ? (ul ? "ul" : "dl") : (ul ? "UL" : "DL")); /* sensing-mode records carry the lower-case form of the brief */
+  quoted(&j,"source",names[src]); quoted(&j,"dir",ul ? "UL" : "DL"); /* same in every mode (spec: DL/UL); with q_valid it is the link-context direction */
   integer(&j,"rnti",src==NR_SENSE_SRC_SSB || src==NR_SENSE_SRC_CSIRS || !m->rnti ? -1 : m->rnti);
   integer(&j,"start_rb",m->start_rb); integer(&j,"nb_rb",m->nb_rb);
   integer(&j,"n_re",m->n_re);
@@ -323,13 +322,10 @@ void nr_sense_emit_rs(nr_sense_src_t src, const nr_sense_rs_meta_t *in, uint64_t
   if (!m.stamp_valid) stamp(&m.epoch,&m.identity_gen,&m.dedicated_epoch);
   if (!m.t_mono_ns) m.t_mono_ns=mono_ns();
   stamp_rx_state(&m);
-  /* quality of the pushed CFR (sensing mode only): the producer's recon_conf rides on top of the stored one */
-  nr_sense_quality_t q;
-  m.q_valid=frame_id && nr_sense_quality_for_frame(frame_id,&q);
-  if (m.q_valid) {
-    if (m.recon_valid) q.recon_conf=m.q.recon_conf;
-    m.q=q; m.wideband=q.valid_cfr_prbs>=nr_isac_sense_min_prb();
-  }
+  /* quality of the pushed CFR (sensing mode only): computed by the writer from the frame, never here (the pushing thread is an RX path) */
+  m.q_valid=false;
+  m.want_q=frame_id && nr_isac_mode()==NR_ISAC_MODE_SENSING;
+  m.min_prb=nr_isac_sense_min_prb();
   if ((!m.csirs_resource || strnlen(m.csirs_resource,256)<256) &&
       (!m.srs_attribution || strnlen(m.srs_attribution,256)<256)) {
     if (nr_sense_push_rs_binary(src,&m,frame_id)>=0) return;

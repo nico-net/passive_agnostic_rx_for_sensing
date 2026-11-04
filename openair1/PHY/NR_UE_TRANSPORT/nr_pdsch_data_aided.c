@@ -512,7 +512,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     rs_meta.prg_valid = prg >= 0;
     rs_meta.prg_size = prg >= 0 ? prg : 0;
     if (nl == 1 && mod_idx == nof_re) { /* RE ordinal i <-> mod_syms[i] only when no RE was skipped */
-      rs_meta.q.recon_conf = nr_da_recon_conf(isac_h, isac_max_re, isac_nof_ant, isac_k, nof_re, (const int16_t *)mod_syms, cw->qamModOrder);
+      rs_meta.q.recon_conf = nr_da_recon(isac_h, isac_max_re, isac_nof_ant, isac_k, isac_l, nof_re, (const int16_t *)mod_syms, cw->qamModOrder,
+                                         rs_meta.recon_prb_ok);
       rs_meta.recon_valid = rs_meta.q.recon_conf == rs_meta.q.recon_conf;
     }
   }
