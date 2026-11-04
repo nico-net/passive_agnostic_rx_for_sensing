@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 #include "nr_sense_api.h"
 #include "nr_traffic_record.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -273,4 +275,110 @@ TEST_F(SenseApi, DciWriteErrorCountsLost) {
   int q=0; push_dci(3,&q);
   nr_sense_close(); nr_sense_stats_t s{}; nr_sense_stats(&s);
   EXPECT_EQ(s.dci_lost,3u); EXPECT_EQ(s.dci_persisted,0u);
+}
+
+namespace {
+struct QRing : ::testing::Test {
+  std::string rec=temp_path(), cfr=temp_path();
+  std::vector<float> iq; std::vector<uint16_t> k; std::vector<uint8_t> l;
+  void open(uint32_t ring) {
+    nr_sense_cfg_t cfg{rec.c_str(),cfr.c_str(),nullptr,ring,4096,16};
+    ASSERT_EQ(nr_sense_open(&cfg),0);
+    for (int s=2;s<=3;s++) for (int p=0;p<4;p++) for (int i=0;i<6;i++) { k.push_back(12*p+2*i); l.push_back(s); }
+    iq.assign(2*k.size(),0.f);
+    for (size_t i=0;i<k.size();i++) { iq[2*i]=4.f; iq[2*i+1]=0.5f*float(k[i]%5); }
+  }
+  uint64_t push(uint64_t slot) { return nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DMRS,1,iq.data(),(int)k.size(),(int)k.size(),k.data(),l.data(),slot,0,1.f,0,0,nullptr); }
+  void TearDown() override { nr_sense_test_pause_writer(false); nr_sense_close(); nr_isac_mode_set(NR_ISAC_MODE_LEGACY); unlink(rec.c_str()); unlink(cfr.c_str()); }
+};
+}
+TEST_F(QRing, FrameIdRingMiss)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  open(2);
+  nr_sense_quality_t q;
+  uint64_t id[4];
+  for (int i=0;i<3;i++) { id[i]=push(10+i); ASSERT_NE(id[i],0u); usleep(150000); }   /* writer drains between pushes: 3rd reuses id[0]'s slot */
+  EXPECT_FALSE(nr_sense_quality_for_frame(id[0],&q)) << "overwritten frame id must not return the newer frame's quality";
+  ASSERT_TRUE(nr_sense_quality_for_frame(id[1],&q));
+  ASSERT_TRUE(nr_sense_quality_for_frame(id[2],&q));
+  EXPECT_EQ(q.allocated_prbs,4);
+  EXPECT_FALSE(nr_sense_quality_for_frame(0,&q));
+  EXPECT_FALSE(nr_sense_quality_for_frame(999,&q));
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+  EXPECT_FALSE(nr_sense_quality_for_frame(id[2],&q)) << "legacy: no lookup";
+}
+TEST_F(QRing, DroppedPushLeavesNoQuality)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  open(1);
+  nr_sense_test_pause_writer(true);
+  const uint64_t a=push(1), b=push(2);              /* ring of 1, writer paused: the second is dropped (returns 0) */
+  ASSERT_EQ(a,1u); ASSERT_EQ(b,0u);
+  nr_sense_quality_t q;
+  ASSERT_TRUE(nr_sense_quality_for_frame(a,&q));
+  EXPECT_FALSE(nr_sense_quality_for_frame(2,&q)) << "the dropped frame consumed id 2 (slot 0 holds id 1): no stale hit";
+}
+TEST_F(QRing, QualityMatchesComputeOnRingCopyAndWide)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  open(4);
+  nr_sense_quality_t want, got;
+  nr_sense_quality_compute(1,iq.data(),(int)k.size(),(int)k.size(),k.data(),l.data(),1.f,&want);
+  const uint64_t a=push(1);
+  ASSERT_TRUE(nr_sense_quality_for_frame(a,&got));
+  EXPECT_EQ(memcmp(got.valid_mask,want.valid_mask,sizeof want.valid_mask),0);
+  EXPECT_EQ(got.valid_cfr_prbs,want.valid_cfr_prbs);
+  EXPECT_EQ(got.allocated_prbs,want.allocated_prbs);
+  std::vector<uint32_t> k32(k.begin(),k.end()), l32(l.begin(),l.end());   /* the u32 entry point (data-aided / nr_isac) */
+  const uint64_t b=nr_sense_push_cfr_u32(NR_SENSE_SRC_PDSCH_DATA,1,iq.data(),(int)k.size(),(int)k.size(),k32.data(),l32.data(),2,0,1.f,0,0,nullptr);
+  ASSERT_TRUE(nr_sense_quality_for_frame(b,&got));
+  EXPECT_EQ(memcmp(got.valid_mask,want.valid_mask,sizeof want.valid_mask),0);
+  EXPECT_EQ(got.valid_cfr_prbs,want.valid_cfr_prbs);
+  EXPECT_EQ(got.snr_db_p50,want.snr_db_p50);
+}
+
+/* per-record cost of the quality computation on the pushing thread (printed, not asserted: host-dependent) */
+TEST_F(QRing, CostPerRecord)
+{
+  struct Shape { const char *name; int nprb, nsym, step; } shapes[] = {
+    {"dmrs 128prb x2sym comb2", 128, 2, 2}, {"data 217prb x13sym full-grid", 217, 13, 1}, {"data 128prb x13sym full-grid", 128, 13, 1}};
+  for (const auto &sh : shapes) {
+    std::vector<uint16_t> kk; std::vector<uint8_t> ll;
+    for (int s = 0; s < sh.nsym; s++) for (int p = 0; p < sh.nprb; p++) for (int i = 0; i < 12; i += sh.step) { kk.push_back(12*p+i); ll.push_back(s); }
+    const int n = (int)kk.size(), nant = 4;
+    std::vector<float> v(2 * (size_t)nant * n);
+    for (size_t i = 0; i < v.size(); i++) v[i] = 3.f * std::cos(0.01f * float(i % 977)) + 0.1f * float(i % 7);
+    double ns[2] = {0, 0};
+    for (int mode = 0; mode < 2; mode++) {
+      nr_isac_mode_set(mode ? NR_ISAC_MODE_SENSING : NR_ISAC_MODE_LEGACY);
+      nr_sense_cfg_t cfg{nullptr, nullptr, nullptr, 8, 70000, 16};   /* no sink: counted, no pack -> force a sink */
+      cfg.cfr_path = cfr.c_str();
+      ASSERT_EQ(nr_sense_open(&cfg), 0);
+      const int reps = 20; uint64_t tot = 0;
+      for (int r = 0; r < reps; r++) {
+        auto t0 = std::chrono::steady_clock::now();
+        nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DATA, nant, v.data(), n, n, kk.data(), ll.data(), r, 0, 1.f, 0, 0, nullptr);
+        tot += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        usleep(3000);
+      }
+      ns[mode] = double(tot) / reps; nr_sense_close();
+    }
+    printf("S3_COST %-32s n_re=%6d legacy_push=%8.1f us sensing_push=%8.1f us added=%8.1f us\n", sh.name, n, ns[0]/1e3, ns[1]/1e3, (ns[1]-ns[0])/1e3);
+  }
+}
+
+TEST_F(QRing, LegacyPushComputesNothing)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+  open(4);
+  const uint64_t a = push(1);
+  ASSERT_EQ(a, 1u);
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);   /* the lookup is open now: a quality stored during the legacy push would show */
+  nr_sense_quality_t q;
+  EXPECT_FALSE(nr_sense_quality_for_frame(a, &q)) << "legacy push must not spend the quality computation";
+  nr_isac_mode_set(NR_ISAC_MODE_TRAFFIC);
+  const uint64_t b = push(2);
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  EXPECT_FALSE(nr_sense_quality_for_frame(b, &q)) << "traffic push must not spend it either";
 }

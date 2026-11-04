@@ -5,6 +5,7 @@
 #include "nr_sense_api.h"
 #include "nr_sense_records.h"
 #include "nr_traffic_record.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 /* The standalone core test links without the receiver record module. The receiver
  * links that module through its emitters and supplies the formatter. */
 __attribute__((weak)) int nr_sense_rs_to_json(nr_sense_src_t, const nr_sense_rs_meta_t *, uint64_t, char *, size_t);
@@ -100,6 +101,10 @@ NR_CELL_STATIC(rs_job_t *, rs_jobs)
 #define rs_jobs NR_CELL_REF(rs_jobs)
 NR_CELL_STATIC(nr_sense_dci_rec_t *, dci_jobs)
 #define dci_jobs NR_CELL_REF(dci_jobs)
+/* S3: quality of the CFR frames still addressable by id, slot = frame_id % frame_cap, id 0 = empty. SENSING mode only; guarded by mu. */
+typedef struct { uint64_t id; nr_sense_quality_t q; } qslot_t;
+NR_CELL_STATIC(qslot_t *, qring)
+#define qring NR_CELL_REF(qring)
 NR_CELL_STATIC(uint8_t *, record_binary)
 #define record_binary NR_CELL_REF(record_binary)
 NR_CELL_STATIC_INIT(int, cfr_fd, -1)
@@ -309,6 +314,7 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
   rs_jobs=calloc(cfg->rec_ring_slots,sizeof(*rs_jobs));
   dci_jobs=calloc(cfg->rec_ring_slots,sizeof(*dci_jobs));
   record_binary=calloc(cfg->rec_ring_slots,sizeof(*record_binary));
+  qring=calloc(cfg->cfr_ring_frames,sizeof(*qring));
   if (cfg->cfr_path) cfr_fd=open(cfg->cfr_path,O_CREAT|O_WRONLY|O_TRUNC|O_CLOEXEC,0644);
   if (cfg->records_path) record_fd=open(cfg->records_path,O_CREAT|O_WRONLY|O_TRUNC|O_CLOEXEC,0644);
 #ifndef NR_SENSE_HAVE_ZMQ
@@ -326,7 +332,7 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
     if (!zmq_pub || zmq_bind(zmq_pub,cfg->endpoint) != 0) goto fail;
   }
 #endif
-  if (!frames || !frame_lengths || !records || !record_lengths || !rs_jobs || !dci_jobs || !record_binary ||
+  if (!frames || !frame_lengths || !records || !record_lengths || !rs_jobs || !dci_jobs || !record_binary || !qring ||
       (cfg->cfr_path && cfr_fd < 0) || (cfg->records_path && record_fd < 0)) goto fail;
   frame_cap=cfg->cfr_ring_frames; frame_re=cfg->cfr_max_re; record_cap=cfg->rec_ring_slots;
   frame_head=frame_count=record_head=record_count=0;
@@ -347,8 +353,8 @@ fail:
   if (cfr_fd>=0) close(cfr_fd);
   if (record_fd>=0) close(record_fd);
   cfr_fd=record_fd=-1;
-  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary);
-  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL;
+  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary); free(qring);
+  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL; qring=NULL;
   pthread_mutex_unlock(&mu);
   return -1;
 }
@@ -371,8 +377,8 @@ void nr_sense_close(void)
   if (zmq_context) zmq_ctx_term(zmq_context);
   zmq_pub=zmq_context=NULL;
 #endif
-  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary);
-  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL;
+  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary); free(qring);
+  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL; qring=NULL;
   pthread_mutex_unlock(&mu);
 }
 bool nr_sense_enabled(void) { return atomic_load_explicit(&active,memory_order_acquire) && !atomic_load_explicit(&paused,memory_order_acquire); }
@@ -392,6 +398,26 @@ void nr_sense_reject_cfr(void)
   pthread_mutex_lock(&mu); stats.cfr_rejected++; pthread_mutex_unlock(&mu);
 }
 
+/* SENSING mode only, after a frame was accepted: quality of the kept REs from the caller's own buffers (outside mu), stored by frame id.
+ * Runs on the pushing thread (measured per record, see task-S3-report); an overwritten slot is detected by its id tag. */
+static void store_quality(nr_sense_src_t src, uint64_t id, int n_ant, const float *iq, int ant_stride, int keep,
+                          const void *k_abs, const void *l_sym, bool wide, float noise_var)
+{
+  const uint64_t t0=nr_sense_now_ns();
+  nr_sense_quality_t q;
+  uint16_t *k16=NULL; uint8_t *l8=NULL;
+  if (wide) { /* the u32 entry point: narrow to the computation's types (values were range-checked while packing) */
+    k16=malloc(3*(size_t)keep); if (!k16) return;
+    l8=(uint8_t *)(k16+keep);
+    for (int i=0;i<keep;i++) { k16[i]=(uint16_t)((const uint32_t *)k_abs)[i]; l8[i]=(uint8_t)((const uint32_t *)l_sym)[i]; }
+  }
+  nr_sense_quality_compute(n_ant,iq,ant_stride,keep,wide?k16:(const uint16_t *)k_abs,wide?l8:(const uint8_t *)l_sym,noise_var,&q);
+  free(k16);
+  pthread_mutex_lock(&mu);
+  if (opened && qring && frame_cap) { qslot_t *s=&qring[id%frame_cap]; s->id=id; s->q=q; }
+  pthread_mutex_unlock(&mu);
+  nr_sense_cost_add(NR_SENSE_COST_PACK,src,nr_sense_now_ns()-t0);
+}
 static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
                          const void *k_abs, const void *l_sym, bool wide, uint64_t abs_slot, float slot_frac,
                          float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
@@ -451,7 +477,17 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
   if (cut) stats.truncated++;
   if (truncated) *truncated=cut;
   pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
+  if (nr_isac_mode()==NR_ISAC_MODE_SENSING) store_quality(src,id,n_ant,iq,ant_stride,(int)keep,k_abs,l_sym,wide,noise_var);
   return id;
+}
+bool nr_sense_quality_for_frame(uint64_t frame_id, nr_sense_quality_t *q)
+{
+  if (!frame_id || !q || !nr_sense_enabled() || nr_isac_mode()!=NR_ISAC_MODE_SENSING) return false;
+  pthread_mutex_lock(&mu);
+  const bool hit=opened && qring && frame_cap && qring[frame_id%frame_cap].id==frame_id;
+  if (hit) *q=qring[frame_id%frame_cap].q;
+  pthread_mutex_unlock(&mu);
+  return hit;
 }
 uint64_t nr_sense_push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
                            const uint16_t *k_abs, const uint8_t *l_sym, uint64_t abs_slot, float slot_frac,

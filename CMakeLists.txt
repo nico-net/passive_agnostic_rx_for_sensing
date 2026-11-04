@@ -1184,7 +1184,7 @@ add_library(nr_sense_api ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_sense_api.c
                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_obs.c)
 target_compile_definitions(PHY_NR_PASSIVE_UL PRIVATE $<$<BOOL:${ENABLE_ISAC_SENSING}>:NR_SRS_EXPORT_ON>)
 target_include_directories(nr_sense_api PUBLIC ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-target_link_libraries(nr_sense_api PUBLIC pthread nr_passive_cfg_epoch PRIVATE utils LOG ${T_LIB})
+target_link_libraries(nr_sense_api PUBLIC pthread nr_passive_cfg_epoch nr_isac_mode PRIVATE utils LOG ${T_LIB})
 target_link_libraries(PHY_NR_PASSIVE_UL PRIVATE nr_sense_api)
 find_library(ZMQ_LIB zmq)
 if(ZMQ_LIB)

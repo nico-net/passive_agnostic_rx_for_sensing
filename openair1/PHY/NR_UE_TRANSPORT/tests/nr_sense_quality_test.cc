@@ -198,3 +198,69 @@ TEST(SenseQuality, BenchNsPerCall)
   double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / N;
   printf("BENCH nr_sense_quality_compute 128PRBx4antx2sym: %.0f ns/call\n", ns);
 }
+
+/* ---- S3: data-aided reconstruction confidence (nr_da_recon_conf) ---- */
+#include "nr_pdsch_da_recon.h"
+
+namespace {
+struct Da {
+  int nprb, n_ant, n;
+  std::vector<float> h;         /* H = Y/X, antenna-major, stride n */
+  std::vector<uint32_t> k;
+  std::vector<int16_t> x_true, x_rec;
+};
+/* qm bits/symbol; the transmitter sends x_true; the receiver reconstructs x_rec (equal, or independent = wrong decode) */
+Da make_da(int qm, int nprb, float noise, bool wrong, unsigned seed)
+{
+  Da d; d.nprb = nprb; d.n_ant = 4;
+  std::mt19937_64 g(seed);
+  const int M = 1 << (qm / 2);
+  auto gauss = [&g]() {
+    double u1 = ((g() >> 11) + 1) * (1.0 / 9007199254740993.0), u2 = (g() >> 11) * (1.0 / 9007199254740992.0);
+    return float(std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2));
+  };
+  auto sym = [&]() { return int16_t(1000 * (2 * int(g() % M) - (M - 1))); };
+  for (int p = 0; p < nprb; p++) for (int i = 0; i < 12; i++) for (int s = 0; s < 3; s++) d.k.push_back(12 * p + i);
+  d.n = d.k.size();
+  d.h.resize(2 * d.n_ant * d.n);
+  std::vector<cf> hp(d.n_ant * nprb);
+  for (auto &v : hp) v = cf(gauss(), gauss());
+  for (int i = 0; i < d.n; i++) {
+    int16_t tr = sym(), ti = sym();
+    d.x_true.push_back(tr); d.x_true.push_back(ti);
+    int16_t rr = wrong ? sym() : tr, ri = wrong ? sym() : ti;
+    d.x_rec.push_back(rr); d.x_rec.push_back(ri);
+    for (int a = 0; a < d.n_ant; a++) {
+      cf y = hp[a * nprb + d.k[i] / 12] * cf(tr, ti) + cf(gauss(), gauss()) * noise * 1000.f;
+      cf hh = y / cf(rr, ri);   /* H = Y/X with the reconstructed X */
+      d.h[2 * (a * d.n + i)] = hh.real(); d.h[2 * (a * d.n + i) + 1] = hh.imag();
+    }
+  }
+  return d;
+}
+}
+
+TEST(SenseReconConf, CorrectReconstructionScoresHighAllOrders)
+{
+  for (int qm : {2, 4, 6, 8}) {
+    Da d = make_da(qm, 10, 0.02f, false, 11 + qm);
+    float c = nr_da_recon_conf(d.h.data(), d.n, d.n_ant, d.k.data(), d.n, d.x_rec.data(), qm);
+    EXPECT_GT(c, 0.97f) << "qm " << qm;
+    EXPECT_LE(c, 1.0f);
+  }
+}
+TEST(SenseReconConf, WrongReconstructionScoresLow)
+{
+  for (int qm : {2, 4, 6}) {
+    Da d = make_da(qm, 10, 0.02f, true, 21 + qm);
+    float c = nr_da_recon_conf(d.h.data(), d.n, d.n_ant, d.k.data(), d.n, d.x_rec.data(), qm);
+    EXPECT_LT(c, 0.5f) << "qm " << qm;
+  }
+}
+TEST(SenseReconConf, TooFewSymbolsOrBadOrderIsNan)
+{
+  Da d = make_da(4, 1, 0.02f, false, 5);   /* 36 REs */
+  EXPECT_TRUE(std::isnan(nr_da_recon_conf(d.h.data(), d.n, d.n_ant, d.k.data(), d.n, d.x_rec.data(), 4)));
+  Da e = make_da(4, 10, 0.02f, false, 6);
+  EXPECT_TRUE(std::isnan(nr_da_recon_conf(e.h.data(), e.n, e.n_ant, e.k.data(), e.n, e.x_rec.data(), 3)));
+}

@@ -29,6 +29,7 @@
 
 #include "nr_pdsch_data_aided.h"
 #include "nr_pdsch_da_snap.h"
+#include "nr_pdsch_da_recon.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.h" // nr_bgq_prepare / nr_bgq_start
 #include "common/utils/nr_cell.h"
 
@@ -54,6 +55,7 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "nr_pdsch_mimo_ls.h"
 #include "nr_sense_api.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_prg_latched
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
@@ -505,6 +507,15 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     .ta_est_samples=-1, .transform_precoding=-1,
     .dmrs_type=dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_config->nscid};
   nr_sense_meta_set_snr(&rs_meta, dmrs_snr_db);
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING) {
+    const int prg = nr_pdsch_prg_latched(rnti);
+    rs_meta.prg_valid = prg >= 0;
+    rs_meta.prg_size = prg >= 0 ? prg : 0;
+    if (nl == 1 && mod_idx == nof_re) { /* RE ordinal i <-> mod_syms[i] only when no RE was skipped */
+      rs_meta.q.recon_conf = nr_da_recon_conf(isac_h, isac_max_re, isac_nof_ant, isac_k, nof_re, (const int16_t *)mod_syms, cw->qamModOrder);
+      rs_meta.recon_valid = rs_meta.q.recon_conf == rs_meta.q.recon_conf;
+    }
+  }
   /* the demodulator's noise estimate in the units of the exported |Y/X|^2; 0 = none measured (prints null) */
   const float nvar_f = nvar > 0.0 ? (float)nvar : NAN;
   /* Slow-time index for the CPI grid. `proc->frame_rx` WRAPS at 1024, so the obvious

@@ -3,6 +3,7 @@
 #define NR_SENSE_RECORDS_H
 #include "nr_passive_obs.h"
 #include "nr_sense_api.h"
+#include "nr_sense_quality.h"
 #include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +55,15 @@ typedef struct nr_sense_rs_meta_s {
   int64_t rx_shift_cum_samples;
   uint32_t rx_shift_count;
   float rx_gain_db;
+  /* Sensing-mode CFR quality + link context (S3). q_valid=false (legacy, traffic, no CFR) -> none of the keys below is printed.
+   * nr_sense_emit_rs fills q from the frame-id ring (nr_sense_quality_for_frame); a producer sets only recon_valid + q.recon_conf. */
+  nr_sense_quality_t q;
+  bool q_valid;
+  bool wideband;         /* set by nr_sense_emit_rs with q_valid: q.valid_cfr_prbs >= nr_isac_sense_min_prb() at emit time */
+  bool recon_valid;      /* the producer measured q.recon_conf (data-aided, rank 1) */
+  bool prg_valid;        /* prg_size is the per-RNTI PRG sweep's latched value (nr_pdsch_prg_latched); false prints null */
+  int prg_size;          /* 0 = wideband, 2, 4 */
+  uint32_t cfg_ref_ver;  /* with identity_gen + dedicated_epoch = cfg_ref; 0 = unknown (prints null) */
 } nr_sense_rs_meta_t;
 
 /* The estimators floor a signal below their noise estimate at -30 dB (nr_ulsch_dmrs_snr_db) and the DL side reports <= -90 for "none":

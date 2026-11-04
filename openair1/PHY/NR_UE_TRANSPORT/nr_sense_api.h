@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
+#include "nr_sense_quality.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,6 +31,9 @@ void nr_sense_close(void);
 bool nr_sense_enabled(void);
 /* iq is antenna-major complex float pairs; ant_stride is in complex RE, not floats.
  * A gap in frame_id = frames dropped. */
+/* SENSING mode only: the quality computed when frame `frame_id` was pushed. false when the frame was never pushed, was dropped, was
+ * overwritten in the per-cell ring (frame_id % cfr_ring_frames), or the mode is not SENSING. */
+bool nr_sense_quality_for_frame(uint64_t frame_id, nr_sense_quality_t *q);
 uint64_t nr_sense_push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
                            const uint16_t *k_abs, const uint8_t *l_sym, uint64_t abs_slot, float slot_frac,
                            float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated);

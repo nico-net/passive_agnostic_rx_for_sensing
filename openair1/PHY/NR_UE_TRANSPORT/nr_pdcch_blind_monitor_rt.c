@@ -10251,7 +10251,10 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
                                        .pci             = fp->Nid_cell,
                                        .slots_per_frame = fp->slots_per_frame};
           /* quality from the two numbers this block already holds: antenna-0 mean |H|^2 over the estimator's noise variance (the gate's own ratio), no extra pass */
+          /* PRG context of the record (sensing mode only): the RNTI's latched PRG sweep value, null while it has not latched */
+          const int prg_latched = nr_isac_mode() == NR_ISAC_MODE_SENSING ? nr_pdsch_prg_latched(out.rnti) : -1;
           const nr_sense_rs_meta_t rs_meta = nr_sense_meta_with_snr((nr_sense_rs_meta_t){.rnti=out.rnti,
+            .prg_valid=prg_latched >= 0, .prg_size=prg_latched >= 0 ? prg_latched : 0,
             .start_rb=dlsch_pdu.BWPStart+freq_alloc.first_rb, .nb_rb=freq_alloc.num_rbs,
             .ports=__builtin_popcount((unsigned)out.dmrs_ports), .port_mask=(int)out.dmrs_ports, .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
             .transform_precoding=-1, .dmrs_type=out.dmrs_config_type ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_pdu.nscid},

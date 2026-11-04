@@ -1060,6 +1060,14 @@ static int rnti_prg_pick(uint16_t rnti)
   pthread_mutex_unlock(&g_ptrs_lock);
   return arm;
 }
+int nr_pdsch_prg_latched(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  const rnti_dec_t *r = rnti_dec_find(rnti, false);
+  const int arm = r ? r->prg.s.latched : -1;
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return arm < 0 ? -1 : nr_prg_arm_value(arm);
+}
 static int rnti_prg_feed(uint16_t rnti, int arm, bool tb_ok, bool link_ok, bool *explore_started)
 {
   if (!nr_cfg_epoch_work_current()) return -1;
