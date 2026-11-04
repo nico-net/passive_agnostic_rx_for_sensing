@@ -74,12 +74,20 @@ TEST(TrafficRecord, DecodeRecordShape)
   char path[]="/tmp/nr_traffic_XXXXXX"; int fd=mkstemp(path); ASSERT_GE(fd,0); close(fd);
   nr_sense_cfg_t cfg{}; cfg.records_path=path; cfg.rec_ring_slots=4; cfg.cfr_ring_frames=2; cfg.cfr_max_re=12;
   ASSERT_EQ(nr_sense_open(&cfg),0);
-  nr_sense_emit_decode(77,0x4567,0,true,1,12.5f,"dci_len");
+  nr_sense_emit_decode(77,75,0x4567,0,true,1,12.5f,"dci_len");
+  nr_sense_emit_decode(78,-1,0x4567,0,false,0,12.5f,NULL);
   nr_sense_close();
   std::ifstream f(path); std::string line; ASSERT_TRUE(std::getline(f,line));
-  EXPECT_TRUE(has(line,"\"type\":\"decode\"")); EXPECT_TRUE(has(line,"\"abs_slot\":77"));
+  EXPECT_TRUE(has(line,"\"type\":\"decode\"")); EXPECT_TRUE(has(line,"\"abs_slot\":77")); EXPECT_TRUE(has(line,"\"dci_abs_slot\":75"));
+  std::string l2; ASSERT_TRUE(std::getline(f,l2)); EXPECT_TRUE(has(l2,"\"dci_abs_slot\":null"));
   EXPECT_TRUE(has(line,"\"rnti\":17767")); EXPECT_TRUE(has(line,"\"crc\":1")); EXPECT_TRUE(has(line,"\"learned\":\"dci_len\""));
   unlink(path);
+}
+TEST(TrafficRecord, BitsUnavailablePrintsNull)
+{
+  auto r=fixture(NR_LAYOUT_SOLVED); r.dci_len=0;
+  std::string d=json(r);
+  EXPECT_TRUE(has(d,"\"dci_len\":null")); EXPECT_TRUE(has(d,"\"dci_bits\":null"));
 }
 TEST(TrafficRecord, DciJsonFitsRecordBytes)
 {

@@ -31,7 +31,6 @@
 
 #include "nr_pusch_passive_decode.h"
 #include "nr_traffic_record.h"
-#include "nr_pdsch_solver.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "PHY/MODULATION/nr_sfo_state.h" /* the receiver SFO (one provider, DL and UL) */
@@ -3333,8 +3332,13 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
       && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL)) {
     /* traffic mode: UL layout probes/trials and policy-wanted decodes become "decode" records */
     const bool tprobe = t_solver_probe || nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g);
-    if (nr_traffic_decode_outcome(abs_slot, g->rnti, 1, tprobe, g->rv, out->status == NR_PUSCH_PASSIVE_OK, out->snr_db))
-      nr_pdsch_solver_reopen(g->rnti);
+    /* K failures: forget this RNTI's learned UL MCS table so PUSCH decodes resume until relearned; DL state is never touched from UL */
+    if (nr_traffic_decode_outcome(abs_slot, abs_slot ? (int64_t)abs_slot - g->k2 : -1, g->rnti, 1, tprobe, g->rv, out->status == NR_PUSCH_PASSIVE_OK, out->snr_db)) {
+      pthread_mutex_lock(&g_tblr_mu);
+      nr_ul_tblr_ent_t *te = nr_ul_tblr_get(g_tblr, g->rnti, false);
+      if (te) { te->learned = 0; te->passes = 0; }
+      pthread_mutex_unlock(&g_tblr_mu);
+    }
   }
   if (!t_solver_probe && (nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
                     out->status == NR_PUSCH_PASSIVE_ZERO_TB)) {

@@ -74,3 +74,12 @@ TEST(TrafficDciFields, PreAntUniqueValues)
   for (int v : u) printf("unique pre_ant=%d\n", v);
   EXPECT_EQ(u, std::vector<int>({9, 38}));
 }
+
+TEST(TrafficDciFields, Dci10HarqFeedbackSlot)
+{
+  EXPECT_EQ(nr_dci10_harq_fb_slot(100, 0), 101);
+  EXPECT_EQ(nr_dci10_harq_fb_slot(100, 7), 108);
+  EXPECT_EQ(nr_dci10_harq_fb_slot(-1, 3), -1);
+  EXPECT_EQ(nr_dci10_harq_fb_slot(100, -1), -1);
+  EXPECT_EQ(nr_dci10_harq_fb_slot(100, 8), -1);
+}

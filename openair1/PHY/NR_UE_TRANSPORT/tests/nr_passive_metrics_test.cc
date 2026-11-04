@@ -238,13 +238,13 @@ TEST(PassiveMetrics, TrafficKeysPresentOnlyInTrafficMode) {
   EXPECT_EQ(std::string(buf).find("dci_accepted_10"), std::string::npos);  // legacy line unchanged
   m.has_traffic = 1;
   m.traffic.accepted[NR_DCI_REC_FMT_10] = 7; m.traffic.state[NR_LAYOUT_UNSOLVED] = 3; m.traffic.emit_us_p99 = 9;
-  m.dci_rec_generated = 5; m.traffic.reopens = 2;
+  m.dci_rec_generated = 5; m.traffic.reopens = 2; m.traffic.reopens_ul = 4;
   ASSERT_GT(nr_passive_metrics_to_json(&m, buf, sizeof(buf)), 0);
   const std::string s(buf);
   for (const char *k : {"\"dci_accepted_10\":7", "\"dci_accepted_11\":0", "\"dci_accepted_00\":0", "\"dci_accepted_01\":0",
                         "\"dci_state_fixed\":0", "\"dci_state_solved\":0", "\"dci_state_cand\":0", "\"dci_state_unsolved\":3",
                         "\"dci_rec_generated\":5", "\"dci_rec_persisted\":0", "\"dci_rec_lost\":0", "\"check_decodes\":0",
-                        "\"check_fail\":0", "\"probe_decodes\":0", "\"reopens\":2", "\"dci_emit_us_p50\":0", "\"dci_emit_us_p99\":9",
+                        "\"check_fail\":0", "\"probe_decodes\":0", "\"reopens\":2", "\"reopens_ul\":4", "\"dci_emit_us_p50\":0", "\"dci_emit_us_p99\":9",
                         "\"traffic_skip\":0", "\"dci_dup\":0"})
     EXPECT_NE(s.find(k), std::string::npos) << k;
 }

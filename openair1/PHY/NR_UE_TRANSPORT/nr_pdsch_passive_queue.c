@@ -2272,7 +2272,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
         /* traffic mode: probes and policy-wanted decodes become "decode" records (SNR = DM-RS combined, NaN when not measured) */
         const float tsnr = dec.dmrs_snr.comb_db > -90.f ? dec.dmrs_snr.comb_db : NAN;
-        if (nr_traffic_decode_outcome(job.absolute_slot, job.rnti, 0, job.layout_probe, job.grant.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, tsnr))
+        if (nr_traffic_decode_outcome(job.absolute_slot, job.dci_mono_slot > 0 ? job.dci_mono_slot : -1, job.rnti, 0, job.layout_probe, job.grant.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, tsnr))
           nr_pdsch_solver_reopen(job.rnti);
       }
       if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && !job.layout_probe &&

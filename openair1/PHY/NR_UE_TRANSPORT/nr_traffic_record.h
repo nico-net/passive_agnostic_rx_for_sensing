@@ -31,20 +31,21 @@ typedef struct {
 } nr_sense_dci_rec_t;
 int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n);   /* writer-thread formatter, pure */
 void nr_sense_emit_dci(nr_sense_dci_rec_t *r);   /* stamps epoch/identity/t_mono like nr_sense_emit_grant_meta, then nr_sense_push_dci */
-/* outcome of a probe/check decode: {"type":"decode","abs_slot","rnti","dir","probe","crc","snr_db","learned":...} */
-void nr_sense_emit_decode(uint64_t abs_slot, uint16_t rnti, int dir, bool probe, int crc, float snr_db, const char *learned);
+/* outcome of a probe/check decode: {"type":"decode","abs_slot" (= PDSCH/PUSCH slot),"dci_abs_slot" (= the DCI record's abs_slot, the join key; null if unknown),"rnti","dir","probe","crc","snr_db","learned":...} */
+void nr_sense_emit_decode(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti, int dir, bool probe, int crc, float snr_db, const char *learned);
 /* Traffic-mode counters of this cell (ISAC_METRICS). accepted[] is indexed by NR_DCI_REC_FMT_*, state[] by nr_layout_state_t. */
 typedef struct {
-  uint64_t accepted[4], state[4], dup, traffic_skip, check_decodes, check_fail, probe_decodes, reopens;
+  uint64_t accepted[4], state[4], dup, traffic_skip, check_decodes, check_fail, probe_decodes, reopens, reopens_ul;
   uint64_t emit_us_p50, emit_us_p99;
 } nr_traffic_stats_t;
 void nr_traffic_count_dci(int fmt, nr_layout_state_t ls, uint64_t emit_ns);   /* one emitted DCI record + its fill+emit time */
 void nr_traffic_count(int what);   /* NR_TRAFFIC_CNT_* */
-enum { NR_TRAFFIC_CNT_DUP, NR_TRAFFIC_CNT_SKIP, NR_TRAFFIC_CNT_CHECK, NR_TRAFFIC_CNT_CHECK_FAIL, NR_TRAFFIC_CNT_PROBE, NR_TRAFFIC_CNT_REOPEN };
+enum { NR_TRAFFIC_CNT_DUP, NR_TRAFFIC_CNT_SKIP, NR_TRAFFIC_CNT_CHECK, NR_TRAFFIC_CNT_CHECK_FAIL, NR_TRAFFIC_CNT_PROBE, NR_TRAFFIC_CNT_REOPEN, NR_TRAFFIC_CNT_REOPEN_UL };
 void nr_traffic_stats_get(nr_traffic_stats_t *s);
 /* Traffic mode: one decode outcome (probe or full decode, crc < 0 = no verdict) -> the "decode" record, the check/probe counters and the
- * reopen decision. Returns true when the RNTI must be reopened (K consecutive counted failures): the caller then calls nr_pdsch_solver_reopen. */
-bool nr_traffic_decode_outcome(uint64_t abs_slot, uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db);
+ * reopen decision. Returns true after K consecutive counted failures. dir 0: the caller then calls nr_pdsch_solver_reopen (reopens). dir 1: the
+ * caller forgets that RNTI's learned UL MCS table (reopens_ul); UL never touches DL state. */
+bool nr_traffic_decode_outcome(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db);
 /* Per RNTI+HARQ pid last NDI (dir 0 DL, 1 UL): -1 first sighting (or ndi < 0), 0 new data (NDI toggled), 1 retransmission (same NDI). Updates the table. */
 int nr_traffic_retx(int dir, uint16_t rnti, int pid, int ndi);
 void nr_traffic_retx_reset(void);   /* HARD_RESET epochs: every RNTI is new again */

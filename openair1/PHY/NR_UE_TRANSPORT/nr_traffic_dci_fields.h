@@ -10,6 +10,11 @@ extern "C" {
 #endif
 #include "nr_pdcch_dci11_layout_sweep.h"
 typedef struct { int8_t dai, tpc, pri, k1; } nr_dci_harq_fields_t;  /* -1 unknown */
+/* DCI 1_0 PDSCH-to-HARQ-ACK slot (TS 38.213 9.2.3: field 0..7 -> k = 1..8 slots after the PDSCH slot). -1 when either input is unknown. */
+static inline int64_t nr_dci10_harq_fb_slot(int64_t pdsch_abs_slot, int k1_field)
+{
+  return pdsch_abs_slot < 0 || k1_field < 0 || k1_field > 7 ? -1 : pdsch_abs_slot + k1_field + 1;
+}
 /* DCI 1_0 C-RNTI/TC-RNTI (TS 38.212 7.3.1.2.1): identifier 1, FDRA(fdra_bits), TDRA 4, VRB 1, MCS 5, NDI 1, RV 2, HARQ 4,
  * DAI 2, TPC 2, PRI 3, K1 3. false (all -1) if dci_len is shorter than that. */
 bool nr_dci10_harq_fields(nr_dci_bits_t payload, uint16_t dci_len, uint16_t fdra_bits, nr_dci_harq_fields_t *out);

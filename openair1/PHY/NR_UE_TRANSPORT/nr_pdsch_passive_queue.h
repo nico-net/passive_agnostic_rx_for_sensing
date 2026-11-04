@@ -98,6 +98,7 @@ typedef struct {
   int      nr_slot_rx;    ///< inspection of nr_dl_channel_estimation.c / nr_dlsch_demodulation.c /
   int      gNB_id;        ///< nr_pdsch_data_aided.c: frame_rx, nr_slot_rx, gNB_id and nothing else)
   long     absolute_slot; ///< producer clock at capture: what the staleness check compares against
+  int64_t dci_mono_slot;  ///< the DCI's monotonic source slot (traffic-mode decode records: join key to the dci record), 0 unset
   uint32_t dci_abs_slot;  ///< BC9: the DCI's slot, frame * slots_per_frame + slot (key into the DL DCI history ring)
   uint32_t config_epoch; ///< captured by the queue at admission
   uint32_t sense_epoch, sense_identity_gen, sense_dedicated_epoch; ///< schema-2 provenance at admission

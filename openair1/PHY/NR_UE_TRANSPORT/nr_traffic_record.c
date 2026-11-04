@@ -41,10 +41,14 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   tj_t j = {buf, n, 0, false};
   tput(&j, "%.*s\"type\":\"dci\"%.*s", (int)(t - g), g, (int)(gl - 1 - (size_t)(t - g) - 14), t + 14);
   tint(&j, "dci_format", r->dci_format); tint(&j, "ss_type", r->ss_type); tint(&j, "al", r->al);
-  tint(&j, "cce", r->cce); tint(&j, "coreset_id", r->coreset_id); tint(&j, "dci_len", r->dci_len);
-  tput(&j, ",\"dci_bits\":\"");
-  for (unsigned i = 0; i < (r->dci_len + 7u) / 8u && i < sizeof r->dci_bits; i++) tput(&j, "%02x", r->dci_bits[i]);
-  tput(&j, "\",\"rnti_confirmed\":%s,\"layout_state\":\"%s\"", r->rnti_confirmed ? "true" : "false",
+  tint(&j, "cce", r->cce); tint(&j, "coreset_id", r->coreset_id); tint(&j, "dci_len", r->dci_len ? (int64_t)r->dci_len : -1);
+  if (r->dci_len == 0) tput(&j, ",\"dci_bits\":null");   /* bits unavailable (never printed as zeros) */
+  else {
+    tput(&j, ",\"dci_bits\":\"");
+    for (unsigned i = 0; i < (r->dci_len + 7u) / 8u && i < sizeof r->dci_bits; i++) tput(&j, "%02x", r->dci_bits[i]);
+    tput(&j, "\"");
+  }
+  tput(&j, ",\"rnti_confirmed\":%s,\"layout_state\":\"%s\"", r->rnti_confirmed ? "true" : "false",
        lname[(unsigned)r->layout_state & 3u]);
   tput(&j, ",\"layout_checks_ok\":%u,\"layout_checks_fail\":%u", r->layout_checks_ok, r->layout_checks_fail);
   if (r->m.identity_gen < 0 || r->m.dedicated_epoch < 0) tput(&j, ",\"cfg_ref\":null");
@@ -71,16 +75,17 @@ void nr_sense_emit_dci(nr_sense_dci_rec_t *r)
   nr_sense_push_dci(r);
 }
 
-void nr_sense_emit_decode(uint64_t abs_slot, uint16_t rnti, int dir, bool probe, int crc, float snr_db, const char *learned)
+void nr_sense_emit_decode(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti, int dir, bool probe, int crc, float snr_db, const char *learned)
 {
   if (!nr_sense_enabled()) return;
   char line[512], lr[128] = "";
   const bool has_l = learned != NULL;
   if (has_l) { size_t k = 0; for (; *learned && k < sizeof lr - 2; learned++) if (*learned != '"' && *learned != '\\' && (unsigned char)*learned >= 32) lr[k++] = *learned; lr[k] = 0; }
+  char dcis[32]; if (dci_abs_slot < 0) strcpy(dcis, "null"); else snprintf(dcis, sizeof dcis, "%" PRId64, dci_abs_slot);
   char snr[32]; if (isfinite(snr_db)) snprintf(snr, sizeof snr, "%.7g", (double)snr_db); else strcpy(snr, "null");
   const int k = snprintf(line, sizeof line,
-      "{\"schema\":2,\"type\":\"decode\",\"abs_slot\":%" PRIu64 ",\"rnti\":%u,\"dir\":\"%s\",\"probe\":%s,\"crc\":%d,\"snr_db\":%s,\"learned\":%s%s%s}",
-      abs_slot, (unsigned)rnti, dir ? "UL" : "DL", probe ? "true" : "false", crc, snr,
+      "{\"schema\":2,\"type\":\"decode\",\"abs_slot\":%" PRIu64 ",\"dci_abs_slot\":%s,\"rnti\":%u,\"dir\":\"%s\",\"probe\":%s,\"crc\":%d,\"snr_db\":%s,\"learned\":%s%s%s}",
+      abs_slot, dcis, (unsigned)rnti, dir ? "UL" : "DL", probe ? "true" : "false", crc, snr,
       has_l ? "\"" : "null", lr, has_l ? "\"" : "");
   if (k > 0 && (size_t)k < sizeof line) nr_sense_push_record(line);
 }
@@ -90,7 +95,7 @@ void nr_sense_emit_decode(uint64_t abs_slot, uint16_t rnti, int dir, bool probe,
 #include <stdatomic.h>
 #include <stdlib.h>
 #define TS_RING 512
-typedef struct { _Atomic uint64_t accepted[4], state[4], cnt[6]; _Atomic uint32_t emit_us[TS_RING]; _Atomic uint32_t w; } traffic_ctr_t;
+typedef struct { _Atomic uint64_t accepted[4], state[4], cnt[7]; _Atomic uint32_t emit_us[TS_RING]; _Atomic uint32_t w; } traffic_ctr_t;
 NR_CELL_STATIC(traffic_ctr_t, g_traffic_ctr)
 #define g_traffic_ctr NR_CELL_REF(g_traffic_ctr)
 
@@ -105,7 +110,7 @@ void nr_traffic_count_dci(int fmt, nr_layout_state_t ls, uint64_t emit_ns)
 
 void nr_traffic_count(int what)
 {
-  if (what >= 0 && what < 6) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
+  if (what >= 0 && what < 7) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
 }
 
 static int cmp_u32(const void *a, const void *b) { const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return (x > y) - (x < y); }
@@ -121,6 +126,7 @@ void nr_traffic_stats_get(nr_traffic_stats_t *s)
   s->check_fail = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK_FAIL], memory_order_relaxed);
   s->probe_decodes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_PROBE], memory_order_relaxed);
   s->reopens = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_REOPEN], memory_order_relaxed);
+  s->reopens_ul = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_REOPEN_UL], memory_order_relaxed);
   uint32_t v[TS_RING]; int n = 0;
   for (int i = 0; i < TS_RING; i++) { const uint32_t x = atomic_load_explicit(&c->emit_us[i], memory_order_relaxed); if (x) v[n++] = x - 1u; }
   if (n) { qsort(v, (size_t)n, sizeof v[0], cmp_u32); s->emit_us_p50 = v[n / 2]; s->emit_us_p99 = v[(n * 99) / 100 >= n ? n - 1 : (n * 99) / 100]; }
@@ -155,13 +161,13 @@ void nr_traffic_retx_reset(void)
   pthread_mutex_unlock(&g_retx_mu);
 }
 
-bool nr_traffic_decode_outcome(uint64_t abs_slot, uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db)
+bool nr_traffic_decode_outcome(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db)
 {
-  nr_sense_emit_decode(abs_slot, rnti, dir, probe, crc, snr_db, NULL);
+  nr_sense_emit_decode(abs_slot, dci_abs_slot, rnti, dir, probe, crc, snr_db, NULL);
   if (probe) { nr_traffic_count(NR_TRAFFIC_CNT_PROBE); return false; }
   nr_traffic_count(NR_TRAFFIC_CNT_CHECK);
   if (crc == 0) nr_traffic_count(NR_TRAFFIC_CNT_CHECK_FAIL);
   const bool reopen = crc >= 0 && nr_traffic_decode_result(dir, rnti, rv, snr_db, crc == 1);
-  if (reopen) nr_traffic_count(NR_TRAFFIC_CNT_REOPEN);
+  if (reopen) nr_traffic_count(dir ? NR_TRAFFIC_CNT_REOPEN_UL : NR_TRAFFIC_CNT_REOPEN);
   return reopen;
 }
