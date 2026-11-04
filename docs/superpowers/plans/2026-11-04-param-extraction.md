@@ -228,6 +228,18 @@ physics, not from PDSCH/PUSCH CRC trials. The useless probe and UL decodes that 
 
 ### Task E3: CRC-free SOLVED path and layout families
 
+**Qm safety rules (E2 re-review, coordinator ruling 2026-11-04):** `nr_qm_classify` can still give a confident
+wrong answer under hierarchical superposition (a same-order interferer at specific ratios), large H error, or rank > 1.
+- Qm never fixes the MCS table, MCS or TBS on its own. A field is accepted only with Qm consensus over several grants
+  from distinct slots, with zero dissenting votes, AND a CRC pass with the implied table. Any dissent makes the field
+  UNKNOWN.
+- Qm = 0, rank > 1, n_signif != n_cells, or fewer PRBs than the header's minimum all mean UNKNOWN, never a default.
+- Qm is taken only from grants whose layout is SOLVED, per cell, never merged across hosts, cells or bandwidths.
+- Each field carries its evidence: `qm_consensus` or `crc`.
+- The caller passes eq at the rms-8192 scale with an honest noise_var (never under-estimated), and skips PRB-flat H
+  when the nearest DM-RS symbol is far away.
+- Qm costs about 2 ms per call: rate-limit it per RNTI and count it in the E1 prove budget or its own budget.
+
 **Files:**
 - Modify: SOL (`significant` path; new phys acceptance; families extending `seed_tuples`); RT (call E2 on the scan
   consumer for alive E1 splits, sharing the `dmrs_sym_rx` FEP).
