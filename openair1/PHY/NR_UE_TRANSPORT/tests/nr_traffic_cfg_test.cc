@@ -1,5 +1,6 @@
 #include "nr_traffic_cfg.h"
 #include "nr_sense_api.h"
+#include "nr_dedupe.h"
 #include <gtest/gtest.h>
 #include <cstdlib>
 #include <cstring>
@@ -46,7 +47,7 @@ static bool has(const std::string &s, const char *k) { return s.find(k) != std::
 TEST(TrafficCfg, SameSnapshotSameVersion)
 {
   Sink k; auto s = snap();
-  uint32_t a = nr_traffic_cfg_ref(0x4601, &s), b = nr_traffic_cfg_ref(0x4601, &s);
+  uint32_t a = nr_traffic_cfg_ref(0x4601, 0, &s), b = nr_traffic_cfg_ref(0x4601, 0, &s);
   EXPECT_EQ(a, b);
   auto l = k.lines();
   ASSERT_EQ(l.size(), 1u);
@@ -58,10 +59,10 @@ TEST(TrafficCfg, SameSnapshotSameVersion)
 TEST(TrafficCfg, ChangeBumpsVersion)
 {
   Sink k; auto s = snap();
-  uint32_t a = nr_traffic_cfg_ref(5, &s);
+  uint32_t a = nr_traffic_cfg_ref(5, 0, &s);
   s.bwp_size = 217;
-  EXPECT_EQ(nr_traffic_cfg_ref(5, &s), a + 1);
-  EXPECT_EQ(nr_traffic_cfg_ref(6, &s), a);   // other RNTI has its own version
+  EXPECT_EQ(nr_traffic_cfg_ref(5, 0, &s), a + 1);
+  EXPECT_EQ(nr_traffic_cfg_ref(6, 0, &s), a + 2);   // versions come from one per-cell counter
   auto l = k.lines();
   ASSERT_EQ(l.size(), 3u);
   EXPECT_TRUE(has(l[1], "\"bwp_size\":217")); EXPECT_TRUE(has(l[1], "\"cfg_ref\":\"3.7.2\""));
@@ -69,15 +70,39 @@ TEST(TrafficCfg, ChangeBumpsVersion)
 TEST(TrafficCfg, ResetRestartsVersions)
 {
   Sink k; auto s = snap();
-  nr_traffic_cfg_ref(5, &s); s.bwp_size = 217; nr_traffic_cfg_ref(5, &s);
+  nr_traffic_cfg_ref(5, 0, &s); s.bwp_size = 217; nr_traffic_cfg_ref(5, 0, &s);
   nr_traffic_cfg_reset();
-  EXPECT_EQ(nr_traffic_cfg_ref(5, &s), 1u);
+  EXPECT_EQ(nr_traffic_cfg_ref(5, 0, &s), 1u);
   EXPECT_EQ(k.lines().size(), 3u);
 }
 TEST(TrafficCfg, LruEvictsOldest)
 {
   Sink k; auto s = snap();
-  for (int r = 1; r <= 257; r++) nr_traffic_cfg_ref((uint16_t)r, &s);   // 257 RNTIs in a 256 table: rnti 1 evicted
-  nr_traffic_cfg_ref(2, &s); nr_traffic_cfg_ref(1, &s);   // 2 still cached, 1 re-announced
+  for (int r = 1; r <= 257; r++) nr_traffic_cfg_ref((uint16_t)r, 0, &s);   // 257 RNTIs in a 256 table: rnti 1 evicted
+  nr_traffic_cfg_ref(2, 0, &s); nr_traffic_cfg_ref(1, 0, &s);   // 2 still cached, 1 re-announced
   EXPECT_EQ(k.lines().size(), 258u);
+}
+
+TEST(TrafficCfg, FormatsHaveOwnEntriesAndAlternationIsQuiet)
+{
+  Sink k; auto s = snap(), s2 = snap(); s2.layout_rep = 3;   // DL and UL snapshots differ
+  for (int i = 0; i < 10; i++) { nr_traffic_cfg_ref(9, 0, &s); nr_traffic_cfg_ref(9, 2, &s2); }
+  EXPECT_EQ(k.lines().size(), 2u);   // one config per (rnti, format), not one per alternation
+}
+TEST(TrafficCfg, VersionNeverRepeatsAfterEviction)
+{
+  Sink k; auto s = snap();
+  uint32_t v1 = nr_traffic_cfg_ref(1, 0, &s);
+  for (int r = 2; r <= 257; r++) nr_traffic_cfg_ref((uint16_t)r, 0, &s);   // rnti 1 evicted
+  EXPECT_NE(nr_traffic_cfg_ref(1, 0, &s), v1);
+}
+
+TEST(Dedupe, WrappedSlotAliasIsNotDup)
+{
+  nr_dedupe_ent_t tab[NR_DEDUPE_N] = {}; unsigned w = 0;
+  EXPECT_FALSE(nr_dedupe_probe(tab, &w, 100, 100, 0xFFFF, 2));
+  EXPECT_TRUE(nr_dedupe_probe(tab, &w, 100, 100, 0xFFFF, 2));              // same slot twice
+  EXPECT_TRUE(nr_dedupe_probe(tab, &w, 100, 103, 0xFFFF, 2));              // early + end-of-slot job lag
+  EXPECT_FALSE(nr_dedupe_probe(tab, &w, 100, 100 + 1024 * 20, 0xFFFF, 2)); // 1024 frames (20 slots/frame) later
+  EXPECT_FALSE(nr_dedupe_probe(tab, &w, 100, 100, 0xFFFF, 1));             // other direction
 }

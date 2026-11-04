@@ -4624,7 +4624,7 @@ static void traffic_cfg_ref(nr_sense_dci_rec_t *r, nr_traffic_cfg_snap_t *sn, co
   sn->coreset_n_rb = (int16_t)(cfg->coreset_freq_domain * 6); sn->coreset_dur = (int8_t)cfg->coreset_duration;
   sn->bwp_start = (int16_t)bwp_start; sn->bwp_size = (int16_t)bwp_size;
   r->bwp_start = sn->bwp_start; r->bwp_size = sn->bwp_size;
-  r->cfg_ref_ver = nr_traffic_cfg_ref(r->o.rnti, sn);
+  r->cfg_ref_ver = nr_traffic_cfg_ref(r->o.rnti, r->dci_format, sn);
 }
 
 static int traffic_fdra_bits(int n)

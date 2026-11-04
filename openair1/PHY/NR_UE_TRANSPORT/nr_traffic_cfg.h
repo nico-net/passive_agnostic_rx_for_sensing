@@ -16,9 +16,10 @@ typedef struct {
   nr_dci11_layout_t layout;        /* zero when layout_rep < 0 */
   int8_t s_by_tda[16], l_by_tda[16], dmrs_add_pos, mcs_table, rm_set;
 } nr_traffic_cfg_snap_t;
-/* Per cell, per RNTI (rnti 0 = cell-wide). Returns the version (first = 1) for this snapshot; on change bumps it and emits one
- * {"type":"config","rnti","cfg_ref", every snapshot field} record. Rare by construction. */
-uint32_t nr_traffic_cfg_ref(uint16_t rnti, const nr_traffic_cfg_snap_t *s);
+/* Per cell, per (RNTI, dci_format) (rnti 0 = cell-wide). Returns the version for this snapshot: a per-cell monotonic counter value (first = 1),
+ * so (rnti, cfg_ref) is unique within a cell identity. On change takes a new version and emits one
+ * {"type":"config","rnti","dci_format","cfg_ref", every snapshot field} record, before any DCI record that uses it. */
+uint32_t nr_traffic_cfg_ref(uint16_t rnti, uint8_t dci_format, const nr_traffic_cfg_snap_t *s);
 void nr_traffic_cfg_reset(void);   /* this cell's table, on HARD_RESET epochs */
 #ifdef __cplusplus
 }
