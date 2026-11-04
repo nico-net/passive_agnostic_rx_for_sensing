@@ -2,6 +2,7 @@
 /* UL-LAYOUT: blind UL BWP / DCI 0_1 layout lock. See the header for the method. */
 #include "nr_ul_tp_rules.h"
 #include "nr_pdcch_ul_layout_lock.h"
+#include "nr_lockhold.h"
 #include "nr_ul_trial_variant.h"
 #include "nr_pdsch_prb_set.h" /* NR_FDRA_TYPE1 */
 #include "nr_blind_stats.h"
@@ -443,6 +444,8 @@ typedef struct {
 
 NR_CELL_STATIC_INIT(pthread_mutex_t, g_mu, PTHREAD_MUTEX_INITIALIZER);
 #define g_mu NR_CELL_REF(g_mu)
+NR_CELL_STATIC(nr_lockhold_t, g_mu_lh); /* LOCKHOLD diagnostics, guarded by g_mu */
+#define g_mu_lh NR_CELL_REF(g_mu_lh)
 typedef len_state_t g_len_cell_t[NR_UL_LAYOUT_MAX_LEN];
 NR_CELL_STATIC_HEAP(g_len_cell_t, g_len); /* 180 KiB per cell */
 #define g_len NR_CELL_HEAP_REF(g_len_cell_t, g_len)
@@ -547,18 +550,18 @@ void nr_ul_layout_cell_prealloc(int cell)
 
 void nr_ul_layout_lock_reset(void)
 {
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   reset_locked();
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
 }
 
 void nr_ul_layout_note_pdcch_slot(long abs_slot)
 {
   if (abs_slot < 0) return;
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   const int spf = g_have_cell ? g_cell.slots_per_frame : 0;
   if (spf > 0 && spf <= 160) g_occ[abs_slot % spf]++;
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
 }
 
 static int cand_list(uint16_t *c, int cap)
@@ -1006,9 +1009,9 @@ static uint32_t prov_budget_locked(const len_state_t *ls)
 bool nr_ul_layout_provisional(uint16_t len)
 {
   bool r = false;
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len && g_len[l].fitted && g_len[l].prov && !g_len[l].locked) r = true;
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
   return r;
 }
 
@@ -1062,7 +1065,7 @@ void nr_ul_layout_eval_once(void)
   NR_CELL_STATIC(eval_snap_cell_t, eval_snap);
   #define eval_snap NR_CELL_REF(eval_snap)
   for (int l = 0; l < NR_UL_LAYOUT_MAX_LEN; l++) {
-    pthread_mutex_lock(&g_mu);
+    nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
     const bool in = l < g_nlen && g_have_cell;
     const bool want_fit = in && !g_len[l].fitted && g_len[l].count >= FIT_MIN && g_len[l].count - g_len[l].last_eval_count >= 64;
     /* a provisional fit rests on a ranking prior from the bank of its time; the strict (significance) fit keeps being evaluated on the growing
@@ -1076,7 +1079,7 @@ void nr_ul_layout_eval_once(void)
     const bool want_rot = in && g_len[l].fitted && g_len[l].prov && !g_len[l].locked
                           && (g_len[l].prov_done >= g_len[l].prov_budget || g_var_ctr - g_len[l].prov_ctr0 >= 2u * g_len[l].prov_budget);
     if (!want_fit && !want_strict && !want_rot) {
-      pthread_mutex_unlock(&g_mu);
+      nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
       continue;
     }
     len_state_t *ls = &g_len[l];
@@ -1098,7 +1101,7 @@ void nr_ul_layout_eval_once(void)
       memcpy(cand, ls->cand, sizeof(cand));
       from = ls->cand_i + 1;
     }
-    pthread_mutex_unlock(&g_mu);
+    nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
 
     float sc = 0.f, sec = 0.f, rs[NR_UL_LAYOUT_MAX_CAND] = {0};
     int mo = -1;
@@ -1110,7 +1113,7 @@ void nr_ul_layout_eval_once(void)
     if (strict) {
       fit_chain_t c;
       fit_chain(eval_snap, n, len, mo, occ, spf, cn, nc, &c);
-      pthread_mutex_lock(&g_mu);
+      nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
       if (gen == g_gen && (!ls->fitted || (ls->prov && !ls->locked))) {
         k2_borrow_locked(ls, &c);
         if (c.npre > 0 && c.ntail > 0 && c.k2ok) {
@@ -1124,7 +1127,7 @@ void nr_ul_layout_eval_once(void)
                 sc, sec, c.npre, c.ntail, c.k2ok);
         }
       }
-      pthread_mutex_unlock(&g_mu);
+      nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
       continue;
     }
     if (!want_fit && !want_rot) continue; /* the strict retry found nothing significant: the provisional candidate keeps its trials */
@@ -1132,24 +1135,24 @@ void nr_ul_layout_eval_once(void)
     if (!want_rot || from >= ncand) { /* first ranking, or the list is exhausted: rank again on the current bank */
       ncand = nr_ul_layout_rank_mcs(eval_snap, n, len, cand, rs, NR_UL_LAYOUT_MAX_CAND);
       from = 0;
-      pthread_mutex_lock(&g_mu);
+      nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
       if (want_rot) { if (ls->prov_cycle < 1000) ls->prov_cycle++; } else ls->prov_cycle = 0;
-      pthread_mutex_unlock(&g_mu);
+      nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     } else {
       for (int i = 0; i < ncand; i++) rs[i] = 0.f;
     }
-    pthread_mutex_lock(&g_mu);
+    nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
     if (gen != g_gen || (want_fit && ls->fitted) || (want_rot && (!ls->fitted || ls->locked || !ls->prov))) {
-      pthread_mutex_unlock(&g_mu);
+      nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
       continue;
     }
-    pthread_mutex_unlock(&g_mu);
+    nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     bool done = false;
     for (int i = from; i < ncand && !done; i++) {
       fit_chain_t c;
       fit_chain(eval_snap, n, len, cand[i], occ, spf, cn, nc, &c);
       if (c.npre <= 0 || c.ntail <= 0) continue;
-      pthread_mutex_lock(&g_mu);
+      nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
       if (gen == g_gen && !ls->locked && (want_fit ? !ls->fitted : ls->prov)) {
         k2_borrow_locked(ls, &c);
         if (c.k2ok) {
@@ -1161,19 +1164,19 @@ void nr_ul_layout_eval_once(void)
           done = true;
         }
       }
-      pthread_mutex_unlock(&g_mu);
+      nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     }
     if (!done && want_fit) {
-      pthread_mutex_lock(&g_mu);
+      nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
       LOG_I(PHY, "SENSING: ULLAYOUT FIT len=%u dcis=%d not yet: mcs_off=%d (%.2f/%.2f) ranked=%d, none with prefix+tail+k2\n", len, n, mo, sc, sec, ncand);
-      pthread_mutex_unlock(&g_mu);
+      nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     } else if (!done && want_rot) { /* every ranked offset failed its chain: rank again at the next budget */
-      pthread_mutex_lock(&g_mu);
+      nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
       ls->prov_ctr0 = g_var_ctr;
       ls->prov_done = 0;
       ls->ncand = 0;
       ls->cand_i = -1;
-      pthread_mutex_unlock(&g_mu);
+      nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     }
   }
   pthread_mutex_unlock(&g_eval_mu);
@@ -1191,16 +1194,16 @@ bool nr_ul_layout_read_fitted(uint16_t rnti, uint16_t len, nr_dci_bits_t payload
 {
   if (!nr_ul_layout_fit_read_enabled() || !out || !len) return false;
   nr_pdcch_blind_ul_opts_t o;
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   const len_state_t *ls = NULL;
   for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len && g_len[l].fitted && !g_len[l].locked && !g_len[l].prov) ls = &g_len[l];
-  if (!ls || ls->npre < 1 || ls->ntail < 1) { pthread_mutex_unlock(&g_mu); return false; }
+  if (!ls || ls->npre < 1 || ls->ntail < 1) { nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout"); return false; }
   const nr_ul_layout_prefix_t *p0 = &ls->pre[0];
   const uint16_t start = (g_cell.sib1_ul_size == p0->n_max && g_cell.sib1_ul_start + p0->n_max <= g_cell.carrier_rb)
                              ? g_cell.sib1_ul_start : 0;
   nr_ul_layout_build_opts(p0, &ls->tail[ls->chosen_tail >= 0 && ls->chosen_tail < ls->ntail ? ls->chosen_tail : 0], start,
                           p0->n_max, ls->k2row, 1, g_cell.pci, g_cell.mu, g_cell.typeA_pos, &o);
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
   if (!nr_pdcch_blind_extract_01(payload, len, rnti, &o, out)) return false;
   out->hyp_generation = 1; /* explicit-layout sentinel (as a forced layout): admitted by the chain, no width-class ticket */
   return true;
@@ -1225,7 +1228,7 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
   NR_CELL_STATIC_INIT(pthread_once_t, layout_once, PTHREAD_ONCE_INIT);
   #define layout_once NR_CELL_REF(layout_once)
   pthread_once(&layout_once, ul_layout_start_thread);
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   if (g_have_cell && (cell->pci != g_cell.pci || cell->carrier_rb != g_cell.carrier_rb
                       || cell->slots_per_frame != g_cell.slots_per_frame)) {
     LOG_A(PHY, "SENSING: ULLAYOUT reset: cell changed (PCI %u->%u, carrier %u->%u)\n", g_cell.pci, cell->pci,
@@ -1248,7 +1251,7 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
     g_len[li].first_slot = abs_slot;
     g_len[li].chosen_tail = -1;
   }
-  if (li < 0) { pthread_mutex_unlock(&g_mu); return 0; }
+  if (li < 0) { nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout"); return 0; }
   len_state_t *ls = &g_len[li];
   ls->bank[ls->count % NR_UL_LAYOUT_BANK] = (nr_ul_layout_dci_t){.rnti = rnti, .slot = abs_slot, .p = payload};
   ls->count++;
@@ -1256,7 +1259,7 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
   if (ls->locked) {
     const nr_pdcch_blind_ul_opts_t o = ls->opts;
     const uint64_t gen = g_gen;
-    pthread_mutex_unlock(&g_mu);
+    nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     if (!nr_pdcch_blind_extract_01(payload, len, rnti, &o, out)) return 0;
     out->hyp_generation = NR_UL_LAYOUT_TAG | gen;
     return 1;
@@ -1296,7 +1299,7 @@ int nr_ul_layout_on_dci(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_bits_
       ret = 2;
     }
   }
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
   return ret;
 }
 
@@ -1319,7 +1322,7 @@ int nr_ul_layout_probe_plan(const nr_pdcch_blind_ul_result_t *g, uint16_t *prb0,
                             uint16_t *nid, uint8_t *l0)
 {
   if (!nr_ul_layout_is_probe(g)) return 0;
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   int n = 0;
   if ((g->hyp_generation & ~(NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_PROBE)) == g_gen && g_locked_hyp < 0) {
     for (int l = 0; l < g_nlen; l++) {
@@ -1336,7 +1339,7 @@ int nr_ul_layout_probe_plan(const nr_pdcch_blind_ul_result_t *g, uint16_t *prb0,
     if (nid) *nid = g_cell.pci;
     if (l0) *l0 = g_cell.typeA_pos ? 3 : 2;
   }
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
   return n;
 }
 
@@ -1344,14 +1347,14 @@ int nr_ul_layout_probe_plan(const nr_pdcch_blind_ul_result_t *g, uint16_t *prb0,
 void nr_ul_layout_probe_feed(const nr_pdcch_blind_ul_result_t *g, long target, const nr_ul_layout_probe_res_t *r)
 {
   if (!nr_ul_layout_is_probe(g) || !r) return;
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   if ((g->hyp_generation & ~(NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_PROBE)) != g_gen || g_locked_hyp >= 0) {
-    pthread_mutex_unlock(&g_mu);
+    nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     return;
   }
   int li = -1;
   for (int l = 0; l < g_nlen; l++) if (g_len[l].len == g->dci_length) li = l;
-  if (li < 0) { pthread_mutex_unlock(&g_mu); return; }
+  if (li < 0) { nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout"); return; }
   g_probes_fed++;
   { /* one line per probe, the three best hypotheses */
     {
@@ -1387,7 +1390,7 @@ void nr_ul_layout_probe_feed(const nr_pdcch_blind_ul_result_t *g, long target, c
     p->ctl = r->ctl_db;
     p->comb1 = r->comb1_db;
   }
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
 }
 
 
@@ -1463,14 +1466,14 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
   if (K > NR_UL_LAYOUT_MAX_TRIALS) K = NR_UL_LAYOUT_MAX_TRIALS;
   if (K > cap) K = cap;
   int n = 0;
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   int li = -1;
   for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len) li = l;
   len_state_t *ls = li >= 0 ? &g_len[li] : NULL;
   /* one DCI per slot (<= K jobs), small MCS only; locked layouts are re-tried only after a run of CRC failures */
   if (!g_have_cell || !ls || !ls->fitted || g_nhyp == 0 || g_trial_slot == abs_slot
       || (ls->locked && ls->crc_fail_run < RELOCK_FAILS && ls->lock_decisive) || fld(&payload, len, ls->mcs_off, 5) > TRIAL_MCS_MAX) {
-    pthread_mutex_unlock(&g_mu);
+    nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     return 0;
   }
   /* rank BWP hypotheses: SIB1 UL BWP first, then DM-RS votes, then list order */
@@ -1559,7 +1562,7 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
   }
   g_trial_slot = abs_slot;
   if (n) ls->trials += (uint32_t)n;
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
   return n;
 }
 
@@ -1573,12 +1576,12 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
   if (total) *total = 0;
   if (next) *next = first;
   if (!out || cap < 1) return 0;
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   int li = -1;
   for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len) li = l;
   len_state_t *ls = li >= 0 ? &g_len[li] : NULL;
   if (!g_have_cell || !ls || !ls->fitted || g_nhyp == 0) {
-    pthread_mutex_unlock(&g_mu);
+    nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     return 0;
   }
   int rk[NR_UL_LAYOUT_MAX_HYP], nr = 0;
@@ -1632,7 +1635,7 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
     n++;
   }
   if (next && tot) *next = (first + c) % tot;
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
   return n;
 }
 
@@ -1640,12 +1643,12 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
 void nr_ul_layout_trial_add(const nr_pdcch_blind_ul_result_t *g, uint32_t n)
 {
   if (!nr_ul_layout_is_tagged(g) || !nr_ul_layout_is_trial(g)) return;
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   int li = -1;
   for (int l = 0; l < g_nlen; l++) if (g_len[l].len == g->dci_length) li = l;
   if (li >= 0 && (g->hyp_generation & NR_UL_LAYOUT_GEN_MASK) == (g_gen & NR_UL_LAYOUT_GEN_MASK))
     ev_slot_locked(&g_len[li], (uint32_t)((g->hyp_generation >> 40) & 0xfffff))->trials += n;
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
 }
 
 /* caller holds mu: a TB CRC passed under (h, k, t): this layout is the lock (BWP, prefix, tail, k2/TDRA) */
@@ -1717,7 +1720,7 @@ void nr_ul_layout_crc_result(const nr_pdcch_blind_ul_result_t *g, bool ok)
 void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint32_t tbs_bits, int nseg, int seg_ok, long slot)
 {
   if (!nr_ul_layout_is_tagged(g) || nr_ul_layout_is_probe(g)) return;
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   int li = -1;
   for (int l = 0; l < g_nlen; l++) if (g_len[l].len == g->dci_length) li = l;
   if (li >= 0 && (g->hyp_generation & NR_UL_LAYOUT_GEN_MASK) == (g_gen & NR_UL_LAYOUT_GEN_MASK)) {
@@ -1739,7 +1742,7 @@ void nr_ul_layout_crc_verdict(const nr_pdcch_blind_ul_result_t *g, bool ok, uint
       else if (ls->crc_fail_run < 1000000) ls->crc_fail_run++;
     }
   }
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
 }
 
 /* ISAC_UL_NID_BG: a hit of the background n_ID search that already passed its own confirmation rule (CRC24, or CRC16 with the same id in >= 2 slots) is a decisive
@@ -1750,7 +1753,7 @@ void nr_ul_layout_nid_verdict(const nr_pdcch_blind_ul_result_t *g, bool keep_tab
   if (!nr_ul_layout_is_tagged(g) || !nr_ul_layout_is_trial(g)) return;
   nr_pdcch_blind_ul_result_t t = *g;
   if (keep_table) {
-    pthread_mutex_lock(&g_mu);
+    nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
     int li = -1;
     for (int l = 0; l < g_nlen; l++) if (g_len[l].len == g->dci_length) li = l;
     if (li >= 0) {
@@ -1760,7 +1763,7 @@ void nr_ul_layout_nid_verdict(const nr_pdcch_blind_ul_result_t *g, bool keep_tab
       e = (e & ~(127ull << 13)) | (((var & ~7ull) | cur) << 13);
       t.hyp_generation = (g->hyp_generation & ~(0xfffffull << 40)) | (e << 40);
     }
-    pthread_mutex_unlock(&g_mu);
+    nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
   }
   nr_ul_layout_crc_verdict(&t, true, tbs_bits, 2, 2, slot);
 }
@@ -1775,7 +1778,7 @@ void nr_ul_layout_prior_note(const nr_pdcch_blind_ul_result_t *g, bool ok, uint3
 
 void nr_ul_layout_stats_dump(void)
 {
-  pthread_mutex_lock(&g_mu);
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   char v[512];
   int u = 0;
   for (int h = 0; h < g_nhyp && u < (int)sizeof(v) - 24; h++)
@@ -1808,5 +1811,5 @@ void nr_ul_layout_stats_dump(void)
         g_locked_hyp >= 0 ? "LOCKED " : "searching ", g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].n : 0,
         g_locked_hyp >= 0 ? g_hyp[g_locked_hyp].start : 0, g_probes_booked, g_probes_fed, g_probes_skipped, g_votes_total, g_ctl_votes,
         g_discarded, g_tied, g_nhyp, v, w ? ls : "", sgn, (unsigned long)g_tp_spec_refuted);
-  pthread_mutex_unlock(&g_mu);
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
 }

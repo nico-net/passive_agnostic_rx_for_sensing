@@ -5008,10 +5008,15 @@ static void *disc_worker(void *arg)
     NR_CFG_EPOCH_WORK(j.stamp, &g_disc_drop_epoch);
     uint64_t token = 0;
     nr_pdcch_blind_phase2_lock();
+    uint64_t ts = btim_now_ns(), te; /* sub-step split for the LOCKHOLD diagnostics */
     nr_pdcch_discovered_note_pci(j.pci); /* before the poll: ISAC_PDCCH_DISC_ENUM queues nID = PCI */
+    te = btim_now_ns(); nr_pdcch_blind_phase2_note_split(0, te - ts); ts = te;
     if (j.step) nr_pdcch_discovered_step_ex(j.token, j.slot, j.prescreen);
+    te = btim_now_ns(); nr_pdcch_blind_phase2_note_split(1, te - ts); ts = te;
     nr_pdcch_blind_monitor_discovered_poll();
+    te = btim_now_ns(); nr_pdcch_blind_phase2_note_split(2, te - ts); ts = te;
     const bool ok = nr_pdcch_discovered_snapshot(&cfg, &token, j.carrier_rb);
+    nr_pdcch_blind_phase2_note_split(3, btim_now_ns() - ts);
     nr_pdcch_blind_phase2_unlock();
     pthread_mutex_lock(&g_disc_pub_mu);
     g_disc_pub.valid = ok;

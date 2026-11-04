@@ -1793,6 +1793,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10655	nr_dl_gpu_warmup:
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10678	nr_dl_gw_pool_warmup::done	func_static	bool	PROCESS	A4	one-time process-wide pool warm-up flag
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	10753	isac_segv_bt_install::alt	func_static	char[65536]	PROCESS	A4	sigaltstack buffer of the process-wide SIGSEGV backtrace handler
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	34	g_phase2_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A4	converted: lock/condvar guarding per-cell state (one per cell, no cross-cell contention)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	38	g_phase2_lh	file_static	nr_lockhold_t [converted]	PER_CELL	A4	LOCKHOLD diagnostics, guarded by g_phase2_mu
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	57	g_recent	file_static	g_recent_cell_t [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	59	g_recent_head	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_phase2.c	61	g_recent_count	file_static	int [converted]	PER_CELL	A4	converted: state of one cell's receive path
@@ -2006,6 +2007,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c	185	g_ul_dmrs_pin_ns	fil
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	333	nr_ul_layout_fit_tail::k2s	func_static	const uint8_t[16]	CONST	A6	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	431	g_only	file_static	g_only_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	444	g_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	447	g_mu_lh	file_static	nr_lockhold_t [converted]	PER_CELL	A6	LOCKHOLD diagnostics, guarded by g_mu
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	447	g_len	file_static	g_len_cell_t [converted]	PER_CELL	A6	converted (A6); HEAP, prealloc before the RX fence
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	449	g_nlen	file_static	int [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	451	g_cell	file_static	nr_ul_layout_cell_t [converted]	PER_CELL	A6	converted (A6)

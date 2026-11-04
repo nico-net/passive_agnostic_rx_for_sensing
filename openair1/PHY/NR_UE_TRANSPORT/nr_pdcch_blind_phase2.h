@@ -15,8 +15,11 @@ extern "C" {
 #endif
 
 /* Phase 2 of one occasion (everything after the candidate decode join) runs under this lock. */
-void nr_pdcch_blind_phase2_lock(void);
+void nr_pdcch_blind_phase2_lock_at(const char *site, int line);
 void nr_pdcch_blind_phase2_unlock(void);
+#define nr_pdcch_blind_phase2_lock() nr_pdcch_blind_phase2_lock_at(__func__, __LINE__) /* LOCKHOLD diagnostics: site = caller */
+/* disc_worker only, HOLDING the lock: record the duration of sub-step i (0 note_pci, 1 step_ex, 2 poll, 3 snapshot) for the LOCKHOLD line. */
+void nr_pdcch_blind_phase2_note_split(int i, uint64_t ns);
 
 /* Returns true once `rnti` has been sighted at least `min_k` times (including this one) within the
  * last `window_slots` slots; always records the sighting. CALLER HOLDS the Phase-2 lock. */
