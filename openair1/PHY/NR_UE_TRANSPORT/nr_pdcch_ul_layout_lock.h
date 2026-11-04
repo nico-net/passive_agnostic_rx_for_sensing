@@ -158,12 +158,14 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
  * hypotheses); tagged like the trials, so nr_ul_layout_crc_verdict() accepts their verdicts. nr_ul_layout_trial_add(): n more candidates were tried under a tagged grant's hypothesis. */
 int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
                           uint32_t *total, uint32_t *next);
-/* g_mu is held only to copy the inputs and to apply the tp counters afterwards; the enumeration runs unlocked. A reset of the lock state during it discards the result (returns 0, *total = 0,
+/* g_mu is held only to copy the inputs and to apply the tp counters afterwards; the enumeration runs unlocked. A reset/re-fit of the lock state during it discards the result (returns 0, *total = 0,
  * *next = first, counted by nr_ul_layout_hyp_list_discarded()). nr_ul_layout_hyp_list_ref() is the pre-fix all-under-lock version and the gap hook runs between the sections: tests only. */
 int nr_ul_layout_hyp_list_ref(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
                               uint32_t *total, uint32_t *next);
 extern void (*nr_ul_layout_hyp_list_gap_hook)(void);
 uint64_t nr_ul_layout_hyp_list_discarded(void);
+void nr_ul_layout_test_tp_counters(uint16_t len, uint32_t *ill, uint32_t *ok, uint64_t *spec);
+/* a reset or re-fit during the unlocked walk discards it once and retries once; a second discard returns 0 */
 void nr_ul_layout_trial_add(const nr_pdcch_blind_ul_result_t *g, uint32_t n);
 void nr_ul_layout_nid_verdict(const nr_pdcch_blind_ul_result_t *g, bool keep_table, uint32_t tbs_bits, long slot); /* a confirmed n_ID hit = decisive CRC pass of the tagged hypothesis */
 /* PUSCH worker: TB CRC verdict of a tagged (locked or trial) grant. */

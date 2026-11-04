@@ -37,3 +37,10 @@ Per-call hold seen by consumers: old = whole call (0.6 us ... 555 us here; 12-48
 
 ## Verification
 Build (ninja -k 0 nr-uesoftmodem oai_usrpdevif rfsimulator params_libconfig nr-softmodem tests): rc 0, 24 .so, 0 FAILED. ctest -j4: 391 tests, 18 failed; all in the baseline list except test_nr_spin_handoff (timing under load) which passes alone; UL layout lock tests (UlLayoutLock.* 15/15, test_nr_pdcch_blind_monitor, test_mpci_a6_ul_cells, test_nr_lockhold, static_audit_check, test_static_audit_scanner) pass. static_audit.py --strict exit 0 (after adding the 3 rows). Frozen check exit 0.
+
+## Fix round 1 (review ulnid-lock-fix-review.md)
+- I1: commit_fit_locked() now does g_epoch++ (not g_gen); comment at g_epoch updated. A re-fit during the unlocked walk discards the result.
+- M1: nr_ul_layout_hyp_list = hyp_list_once() with one retry on discard (bounded to 1). A second discard returns 0, *total=0, *next=first. Each discarded attempt is counted. A reset leaves the state unfitted, so the retry returns 0 in section 1 without a second discard.
+- M4: new test accessor nr_ul_layout_test_tp_counters(); the bit-for-bit test now also compares tp_ill, tp_ok and g_tp_spec_refuted after each full walk (equal in all 5 configs). LIMIT: with this generator the sum is 0 (no transform-precoding tail is fitted), so the counters are compared but the TP delta path itself is NOT exercised by any test; stated in the test.
+- New test HypListRetriesOnceAfterAResetAndAfterAnotherLengthIsFitted: hook runs a fit (commit_fit_locked of len 42) during the gap -> discard +1 and the retry returns a grant (n=1). Reset-during-gap -> discard +1, n=0. The existing reset test now expects: n=0, total=0, next=first, discard +1.
+- Verification: UlLayoutLock.* 16/16; build rc 0, 0 FAILED, 24 .so; ctest -j4 391 tests, 18 failed, all in the baseline list (test_nr_spin_handoff passed this time); test_nr_lockhold, test_mpci_a6_ul_cells, static_audit_check pass; static audit --strict exit 0; frozen check exit 0.

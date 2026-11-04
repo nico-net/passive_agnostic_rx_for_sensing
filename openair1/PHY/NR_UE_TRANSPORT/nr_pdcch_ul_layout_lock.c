@@ -460,7 +460,7 @@ NR_CELL_STATIC(g_occ_cell_t, g_occ);
 #define g_occ NR_CELL_REF(g_occ)
 NR_CELL_STATIC_INIT(uint64_t, g_gen, 1);
 #define g_gen NR_CELL_REF(g_gen)
-NR_CELL_STATIC(uint64_t, g_epoch);      /* bumped by every reset_locked(): a snapshot taken before it describes a wiped state; guarded by g_mu */
+NR_CELL_STATIC(uint64_t, g_epoch);      /* bumped by reset_locked() and commit_fit_locked() (both re-index pre/tail/hyp): a snapshot taken before it describes a wiped state; guarded by g_mu */
 #define g_epoch NR_CELL_REF(g_epoch)
 NR_CELL_STATIC(uint64_t, g_hyp_discard); /* nr_ul_layout_hyp_list results dropped because the state was reset/regenerated during the unlocked enumeration; guarded by g_mu */
 #define g_hyp_discard NR_CELL_REF(g_hyp_discard)
@@ -1036,6 +1036,7 @@ static void commit_fit_locked(len_state_t *ls, const fit_chain_t *c, int mo, flo
   ls->chosen_tail = -1;
   memset(ls->ev, 0, sizeof(ls->ev)); /* evidence of an abandoned candidate does not carry over */
   ls->fit_slot = fit_slot;
+  g_epoch++; /* pre/tail/k2row replaced: unlocked hyp_list snapshots are stale */
   build_hyps_locked();
   if (prov) {
     ls->prov_ctr0 = g_var_ctr;
@@ -1676,9 +1677,10 @@ static int snap_pre_for_hyp(const hyp_snap_t *s, int h)
 
 void (*nr_ul_layout_hyp_list_gap_hook)(void); /* test only: runs between the snapshot and the apply section, with g_mu released */
 
-int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
-                          uint32_t *total, uint32_t *next)
+static int hyp_list_once(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
+                         uint32_t *total, uint32_t *next, bool *discarded)
 {
+  *discarded = false;
   if (total) *total = 0;
   if (next) *next = first;
   if (!out || cap < 1) return 0;
@@ -1774,6 +1776,7 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
   nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   if (g_epoch != s->epoch || (g_gen & NR_UL_LAYOUT_GEN_MASK) != s->gen || !g_have_cell || s->li >= g_nlen || g_len[s->li].len != s->len) {
     g_hyp_discard++;
+    *discarded = true;
     nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
     return 0; /* total = 0 and next = first stay as set on entry: the caller stops */
   }
@@ -1784,6 +1787,26 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
   if (total) *total = tot;
   if (next) *next = nxt;
   return n;
+}
+
+/* one retry when the state was reset / re-fitted during the unlocked walk; a second discard returns 0 with *total = 0 (the caller stops) */
+int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
+                          uint32_t *total, uint32_t *next)
+{
+  bool d;
+  int n = hyp_list_once(rnti, len, payload, first, nhyp, ap_n, out, cap, total, next, &d);
+  if (d) n = hyp_list_once(rnti, len, payload, first, nhyp, ap_n, out, cap, total, next, &d);
+  return n;
+}
+
+/* test only: the tp counters of length `len` and g_tp_spec_refuted */
+void nr_ul_layout_test_tp_counters(uint16_t len, uint32_t *ill, uint32_t *ok, uint64_t *spec)
+{
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
+  *ill = *ok = 0;
+  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len) { *ill = g_len[l].tp_ill; *ok = g_len[l].tp_ok; }
+  *spec = g_tp_spec_refuted;
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
 }
 
 uint64_t nr_ul_layout_hyp_list_discarded(void)

@@ -6667,7 +6667,7 @@ namespace {
 struct HypRec { int n; uint32_t tot, next; nr_pdcch_blind_ul_result_t g; };
 typedef int (*HypFn)(uint16_t, uint16_t, nr_dci_bits_t, uint32_t, int, int, nr_pdcch_blind_ul_result_t *, int, uint32_t *, uint32_t *);
 // one deterministic state, then every hyp_list call of a cursor walk (cap 1 and cap 3) on 40 DCIs; the tp counters evolve across calls on both versions
-std::vector<HypRec> UllHypWalk(HypFn fn, int nhyp, int ap_n, int *ncalls_with_grant)
+std::vector<HypRec> UllHypWalk(HypFn fn, int nhyp, int ap_n, int *ncalls_with_grant, uint32_t *ill, uint32_t *okc, uint64_t *spec)
 {
   nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
                               .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
@@ -6693,6 +6693,7 @@ std::vector<HypRec> UllHypWalk(HypFn fn, int nhyp, int ap_n, int *ncalls_with_gr
       }
     }
   }
+  nr_ul_layout_test_tp_counters(44, ill, okc, spec);
   nr_ul_layout_lock_reset();
   return v;
 }
@@ -6701,10 +6702,15 @@ std::vector<HypRec> UllHypWalk(HypFn fn, int nhyp, int ap_n, int *ncalls_with_gr
 TEST(UlLayoutLock, HypListUnlockedEnumerationEqualsTheAllUnderLockReference)
 {
   const int cfg[][2] = {{1, 1}, {8, 1}, {8, 3}, {64, 3}, {0, 1}};
+  int tp_seen = 0;
   for (const auto &c : cfg) {
     int na = 0, nb = 0;
-    const auto a = UllHypWalk(nr_ul_layout_hyp_list_ref, c[0], c[1], &na);
-    const auto b = UllHypWalk(nr_ul_layout_hyp_list, c[0], c[1], &nb);
+    uint32_t ia = 0, oa = 0, ib = 0, ob = 0;
+    uint64_t sa = 0, sb = 0;
+    const auto a = UllHypWalk(nr_ul_layout_hyp_list_ref, c[0], c[1], &na, &ia, &oa, &sa);
+    const auto b = UllHypWalk(nr_ul_layout_hyp_list, c[0], c[1], &nb, &ib, &ob, &sb);
+    EXPECT_EQ(ia, ib); EXPECT_EQ(oa, ob); EXPECT_EQ(sa, sb) << "tp_ill/tp_ok/g_tp_spec_refuted side effects";
+    tp_seen += (int)(ia + oa + sa);
     ASSERT_EQ(a.size(), b.size()) << c[0] << "/" << c[1];
     EXPECT_EQ(na, nb);
     EXPECT_GT(na, 0) << "no grant produced: the comparison would be vacuous";
@@ -6715,10 +6721,30 @@ TEST(UlLayoutLock, HypListUnlockedEnumerationEqualsTheAllUnderLockReference)
       ASSERT_EQ(0, memcmp(&a[i].g, &b[i].g, sizeof(a[i].g))) << "call " << i << " cfg " << c[0] << "/" << c[1];
     }
   }
+  RecordProperty("tp_counter_sum", tp_seen);
+  // tp_counter_sum is 0 with this generator (no transform-precoding tail is fitted): the counters are compared (equal), the TP delta path itself is not exercised
   EXPECT_EQ(nr_ul_layout_hyp_list_discarded(), 0u);
 }
 
 static void UllHookReset(void) { nr_ul_layout_lock_reset(); }
+static void UllHookResetOnce(void) { nr_ul_layout_hyp_list_gap_hook = nullptr; nr_ul_layout_lock_reset(); }
+// another length gets fitted (commit_fit_locked) while the walk is unlocked
+static void UllHookRefit(void)
+{
+  nr_ul_layout_hyp_list_gap_hook = nullptr;
+  static nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                                     .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
+  UllGen g3;
+  g3.rivw = 13;
+  nr_pdcch_blind_ul_result_t o;
+  for (int i = 0; i < 300; i++) {
+    for (int s2 = 0; s2 < 18; s2++)
+      if (s2 % 10 < 7) nr_ul_layout_note_pdcch_slot(1000 + i * 20 + s2);
+    const nr_ul_layout_dci_t d = g3.next(107);
+    nr_ul_layout_on_dci(d.rnti, 42, d.slot, d.p, &cell, &o);
+  }
+  nr_ul_layout_eval_once();
+}
 
 TEST(UlLayoutLock, HypListResultIsDiscardedWhenTheStateIsResetDuringTheEnumeration)
 {
@@ -6739,7 +6765,34 @@ TEST(UlLayoutLock, HypListResultIsDiscardedWhenTheStateIsResetDuringTheEnumerati
   EXPECT_EQ(n, 0);
   EXPECT_EQ(tot, 0u);
   EXPECT_EQ(next, 5u) << "the cursor stays where it was";
+  EXPECT_EQ(nr_ul_layout_hyp_list_discarded(), d0 + 1) << "attempt 1 discarded; the retry meets an unfitted state and returns 0 (no second discard)";
+  nr_ul_layout_lock_reset();
+}
+
+TEST(UlLayoutLock, HypListRetriesOnceAfterAResetAndAfterAnotherLengthIsFitted)
+{
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
+  UllGen g;
+  UllFit(g, cell);
+  nr_pdcch_blind_ul_result_t o, out[1];
+  const nr_ul_layout_dci_t x = g.next();
+  nr_ul_layout_on_dci(x.rnti, 44, x.slot, x.p, &cell, &o);
+  uint32_t tot = 0, next = 0;
+  // reset during the gap: attempt 1 discarded, the retry sees an unfitted state and returns 0 without a second discard
+  uint64_t d0 = nr_ul_layout_hyp_list_discarded();
+  nr_ul_layout_hyp_list_gap_hook = UllHookResetOnce;
+  EXPECT_EQ(nr_ul_layout_hyp_list(x.rnti, 44, x.p, 0, 8, 1, out, 1, &tot, &next), 0);
   EXPECT_EQ(nr_ul_layout_hyp_list_discarded(), d0 + 1);
+  // re-fit (commit_fit_locked of another length) during the gap: epoch bump -> discard, the retry succeeds
+  UllFit(g, cell);
+  const nr_ul_layout_dci_t x3 = g.next();
+  nr_ul_layout_on_dci(x3.rnti, 44, x3.slot, x3.p, &cell, &o);
+  d0 = nr_ul_layout_hyp_list_discarded();
+  nr_ul_layout_hyp_list_gap_hook = UllHookRefit;
+  const int n = nr_ul_layout_hyp_list(x3.rnti, 44, x3.p, 0, 8, 1, out, 1, &tot, &next);
+  EXPECT_EQ(nr_ul_layout_hyp_list_discarded(), d0 + 1) << "commit_fit_locked must invalidate the snapshot";
+  EXPECT_EQ(n, 1) << "the single retry runs on the new state";
   nr_ul_layout_lock_reset();
 }
 
