@@ -6,30 +6,31 @@ T0 = 10**12  # a realistic CLOCK_MONOTONIC offset; only differences matter
 def ns(sec): return T0 + round(sec * 1e9)
 
 def rec(t, pci=10, dir="DL", tx="auto", valid=128, layer=None, n_layers=None, prg=None,
-        snr=20.0, resid=-30.0, recon=None, first=0, mask="auto"):
+        snr=20.0, resid=-30.0, recon=None, first=0, mask="auto", ssb_beam=None, port_mask=None, t_ns=None):
     """One rs line in the real nr_sense_rs_to_json format (schema 2, quality block present)."""
     if tx == "auto": tx = pci if dir == "DL" else "rnti:1a2b"
     if mask == "auto":
         m = 0
         for p in range(valid): m |= 1 << p
         mask = m.to_bytes((valid + 7) // 8, "little").hex() if valid else ""
-    d = {"schema": 2, "type": "rs", "pci": pci, "t_mono_ns": ns(t), "source": "pdsch_dmrs", "dir": dir,
+    d = {"schema": 2, "type": "rs", "pci": pci, "t_mono_ns": ns(t) if t_ns is None else t_ns, "source": "pdsch_dmrs", "dir": dir,
          "rnti": 4660, "allocated_prbs": valid, "estimated_usable_prbs": valid, "valid_cfr_prbs": valid,
          "valid_mask": mask, "first_prb": first, "snr_db_p50": snr, "snr_db_p10": None if snr is None else snr - 3,
          "resid_db": resid, "sym_consist": None, "recon_conf": recon, "wideband": valid >= 128,
-         "tx": tx, "ssb_beam": None, "cfg_ref": None, "prg_size": prg}
+         "tx": tx, "ssb_beam": ssb_beam, "cfg_ref": None, "prg_size": prg}
+    if port_mask is not None: d["port_mask"] = port_mask
     if layer is not None: d["layer"] = layer; d["n_layers"] = n_layers
     return json.dumps(d)
 
 class Base(unittest.TestCase):
-    def run_files(self, *contents, min_prb=128):
+    def run_files(self, *contents, min_prb=128, **kw):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         paths = []
         for i, c in enumerate(contents):
             p = os.path.join(tmp.name, f"rec{i}.jsonl")
             with open(p, "w") as f: f.write("\n".join(c) + ("\n" if c else ""))
             paths.append(p)
-        return S.score(paths, min_prb)
+        return S.score(paths, min_prb, **kw)
     def link(self, res, cell=0, i=0):
         return res["cells"][cell]["links"][i]
 
@@ -114,6 +115,48 @@ class Links(Base):
         self.assertEqual((a["pci"], b["pci"]), (10, 20))
         self.assertEqual(a["links"][0]["n_wideband"], 2); self.assertEqual(b["links"][0]["n_wideband"], 1)
         self.assertEqual(a["links"][0]["tx"], b["links"][0]["tx"])
+
+class Guards(Base):
+    def test_ssb_beam_and_port_mask_split_links(self):
+        r = self.run_files([rec(0, ssb_beam=1), rec(0.1, ssb_beam=2), rec(0.2, ssb_beam=1), rec(0.3, port_mask=3), rec(0.4)])
+        ls = r["cells"][0]["links"]
+        self.assertEqual(len(ls), 4)
+        b1 = [l for l in ls if l["ssb_beam"] == 1][0]
+        self.assertEqual(b1["n_wideband"], 2); self.assertAlmostEqual(b1["gap_s"]["max"], 0.2)
+    def test_mixed_clocks_refused(self):
+        far_t = T0 + 30_000 * 10**9 - 2 * 10**9
+        far = [rec(0, pci=20, t_ns=T0 + 30_000 * 10**9 - 10**9), rec(0.1, pci=20, t_ns=T0 + 30_000 * 10**9)]
+        with self.assertRaises(S.ScoreError): self.run_files([rec(0), rec(1)], [rec(0, pci=20, t_ns=far_t)] + far)
+        r = self.run_files([rec(0), rec(1)], [rec(0, pci=20, t_ns=far_t)] + far, allow_mixed_clocks=True)
+        self.assertEqual(len(r["cells"]), 2)
+    def test_overlapping_or_close_ranges_accepted(self):
+        self.run_files([rec(0), rec(5)], [rec(3, pci=20), rec(9, pci=20)])          # chained
+        self.run_files([rec(0), rec(10)], [rec(12, pci=20), rec(14, pci=20)])       # disjoint, span 14 <= 2 x 10
+    def test_cli_exit_codes(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        ps = []
+        for i, c in enumerate(([rec(0), rec(1)], [rec(0, pci=20, t_ns=T0 + 30_000 * 10**9)])):
+            ps.append(os.path.join(tmp.name, f"{i}.jsonl")); open(ps[-1], "w").write("\n".join(c) + "\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(S.main(ps), 2)
+            self.assertEqual(S.main(ps + ["--allow-mixed-clocks"]), 0)   # 30000 s < 24 h: override works
+        self.assertIn("share a clock", err.getvalue())
+    def test_corrupt_timestamp(self):
+        r = self.run_files([rec(0), rec(0, t_ns=10**18), rec(0.1)])
+        self.assertEqual(r["malformed_lines"], 1); self.assertEqual(r["cells"][0]["n_wideband"], 2)
+        with self.assertRaises(S.ScoreError):   # plausible per record, but > 24 h combined span
+            self.run_files([rec(0), rec(0, t_ns=T0 + 100_000 * 10**9)])
+    def test_short_mask(self):
+        r = self.run_files([rec(0, valid=128, mask="ff")])   # vp says 128, mask carries 8 bits
+        l = self.link(r)
+        self.assertEqual(l["n_wideband"], 1); self.assertEqual(l["occupancy"]["rows"], [[1] * 8])
+    def test_window_boundary(self):
+        r = self.run_files([rec(0), rec(0, t_ns=ns(0.1) - 1)])   # 99.999999 ms: still window 0
+        self.assertEqual(r["cells"][0]["availability"]["w100ms"]["windows"], 1)
+        r = self.run_files([rec(0), rec(0.1)])                    # exactly 100 ms: window 1
+        a = r["cells"][0]["availability"]["w100ms"]
+        self.assertEqual((a["windows"], a["covered"]), (2, 2))
 
 class MultiPci(Base):
     def test_rescue_fraction(self):
