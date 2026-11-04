@@ -12,6 +12,7 @@ extern "C" {
 #include "common/utils/LOG/log.h"
 #include "nr_pdsch_solver.h"
 #include "nr_signal_evidence.h"
+#include "nr_traffic_record.h"
 }
 extern "C" configmodule_interface_t *uniqCfg = nullptr;
 extern "C" void exit_function(const char *file, const char *function, const int line, const char *s, const int assert)
@@ -1988,4 +1989,23 @@ TEST(Park, AnRntiWithAnyCrcPassIsNeverParkedAndIsUnparked)
   EXPECT_FALSE(s.parked);
   for (int k = 501; k <= 900; k++) nse_note(&s, &sim.R, (uint64_t)k, 0, (float)sim.g(sim.noise_mu, sim.noise_sd), false, false, true);
   EXPECT_FALSE(s.parked) << "its noise-like draws no longer park it";
+}
+
+TEST(PdschSolver, ReopenClearsSolution)
+{
+  Cell fake;
+  fake.add_pos = 2;
+  for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? fake.truth : fake.wrong).push_back((uint16_t)i);
+  nr_pdsch_solver_reset();
+  nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
+  std::mt19937 rng(31);
+  ASSERT_GT(RunCell(fake, 0x00a1, -1, 400, rng), 0);
+  uint32_t ok = 0, fail = 0;
+  EXPECT_EQ(nr_pdsch_solver_layout_state(0x00a1, &ok, &fail), NR_LAYOUT_SOLVED);
+  EXPECT_FALSE(nr_pdsch_solver_take_hrv_alert(0x00a1));
+  nr_pdsch_solver_reopen(0x00a1);
+  EXPECT_EQ(nr_pdsch_solver_layout_state(0x00a1, &ok, &fail), NR_LAYOUT_UNSOLVED);
+  EXPECT_LT(nr_pdsch_solver_rep(0x00a1), 0);
+  EXPECT_EQ(nr_pdsch_solver_layout_state(0x7777, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  nr_pdsch_solver_reset();
 }

@@ -23,6 +23,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "nr_dci_bits.h"
+#include "nr_traffic_record.h" /* nr_layout_state_t */
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -255,6 +256,13 @@ void nr_probe_gate_release(nr_probe_gate_t *g, int *resv);
 
 typedef struct { uint64_t planned, probes, fulls, probe_ok, full_ok, candidates, solved, dropped; } nr_pdsch_solver_stats_t;
 void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);
+
+/** Traffic mode: drop rnti's solution exactly as the 256-grant reopen does (search restarts). */
+void nr_pdsch_solver_reopen(uint16_t rnti);
+/** SOLVED / CANDIDATE / UNSOLVED (never FIXED); checks_ok / checks_fail (either may be NULL) = full-TB CRC passes / failures. */
+nr_layout_state_t nr_pdsch_solver_layout_state(uint16_t rnti, uint32_t *checks_ok, uint32_t *checks_fail);
+/** Read-and-clear: a HARQ/RV consistency violation was counted for rnti since the last take. */
+bool nr_pdsch_solver_take_hrv_alert(uint16_t rnti);
 
 #ifdef __cplusplus
 }

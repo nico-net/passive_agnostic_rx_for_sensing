@@ -4172,3 +4172,5 @@ radio/rfsimulator/simulator.cpp	1710	rfsimulator_read_beams::average	func_static
 radio/rfsimulator/simulator.cpp	1712	rfsimulator_read_beams::calls	func_static	int	PROCESS	AUDIT	rfsimulator device commands and read bookkeeping: one simulated radio per process
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_cfg.c	15	g_cfg_tab	file_static	cfg_tab_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_cfg.c	17	g_cfg_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A6	converted (A6)
+openair1/PHY/NR_UE_TRANSPORT/nr_traffic_decode.c	13	g_td	file_static	td_tab_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, traffic decode policy table (128 RNTIs x DL/UL, LRU)
+openair1/PHY/NR_UE_TRANSPORT/nr_traffic_decode.c	11	g_td_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_td

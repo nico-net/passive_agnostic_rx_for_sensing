@@ -83,6 +83,7 @@ typedef struct {
   nr_dci_bits_t hq_ring[HQ_RING]; /* DCIRV: this RNTI's last DCI 1_1 payloads (oldest overwritten) */
   uint32_t hq_cnt, rvmis;  /*   payloads seen; RV-rescue notes since the last re-selection */
   uint64_t hq_abs;         /*   slot of the last payload (duplicate candidates of one DCI) */
+  bool hrv_alert;          /*   traffic mode: a HARQ/RV violation was counted (nr_pdsch_solver_take_hrv_alert) */
   bool mcs_pos, promoted;  /*   a CRC pass at MCS > 0 happened; the solution has been allowed to seed the cell */
 } solver_rnti_t;
 
@@ -2004,6 +2005,7 @@ static void hq_reselect(solver_rnti_t *r, bool force)
   int n, bad;
   hq_score(r, r->rep, &n, &bad);
   const bool refuted = nr_pdsch_solver_hq_refuted(n, bad);
+  if (bad > 0) r->hrv_alert = true;
   LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x HQSCORE layout %d: %d violations in %d grants (%s)%s\n", r->rnti, r->rep, bad, n,
         refuted ? "refuted" : "kept", force ? " [rv rescues]" : "");
   if (!refuted && !(force && bad > 0)) return;
@@ -2041,6 +2043,7 @@ void nr_pdsch_solver_note_rv_mismatch(uint16_t rnti)
 {
   pthread_mutex_lock(&g_mu);
   solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (r != NULL) r->hrv_alert = true;
   if (r != NULL && ++r->rvmis >= 3) {
     r->rvmis = 0;
     hq_reselect(r, true);
@@ -2559,4 +2562,33 @@ void nr_pdsch_solver_cell_prealloc(int cell)
 {
   NR_CELL_HEAP_PREALLOC(g_p_arr_t, g_p, cell);
   NR_CELL_HEAP_PREALLOC(g_r_arr_t, g_r, cell);
+}
+
+void nr_pdsch_solver_reopen(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (r != NULL && r->solved) {
+    r->solved = false; r->has_cand = false; g_st.dropped++;
+  }
+  pthread_mutex_unlock(&g_mu);
+}
+nr_layout_state_t nr_pdsch_solver_layout_state(uint16_t rnti, uint32_t *checks_ok, uint32_t *checks_fail)
+{
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (checks_ok) *checks_ok = r ? r->full_ok : 0;
+  if (checks_fail) *checks_fail = r ? r->full_tr - r->full_ok : 0;
+  const nr_layout_state_t ls = r && r->solved ? NR_LAYOUT_SOLVED : r && r->has_cand ? NR_LAYOUT_CANDIDATE : NR_LAYOUT_UNSOLVED;
+  pthread_mutex_unlock(&g_mu);
+  return ls;
+}
+bool nr_pdsch_solver_take_hrv_alert(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  solver_rnti_t *r = slot_of(rnti, false, NULL);
+  const bool a = r && r->hrv_alert;
+  if (r) r->hrv_alert = false;
+  pthread_mutex_unlock(&g_mu);
+  return a;
 }
