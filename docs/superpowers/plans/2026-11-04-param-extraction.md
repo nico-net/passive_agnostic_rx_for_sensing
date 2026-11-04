@@ -70,6 +70,15 @@ physics, not from PDSCH/PUSCH CRC trials. The useless probe and UL decodes that 
   existing epoch listener (RT:~2022).
 - Evidence labels on every claim; results per cell, never merged.
 
+- **No-loss gate (operator 2026-11-04, "MAKE NO MISTAKES").** Per cell, traffic mode after each task must give the
+  same or more of all of these, against traffic at 4759260bbf:
+  - distinct RNTIs with DCI records;
+  - DCI records;
+  - SOLVED RNTIs;
+  - DCI records with all fields non-null.
+  A task whose A/B shows any of these lower is not complete; it is fixed or reverted. E4 and E3 change what gets
+  probed, so each gets its own OTA A/B before it counts as done (E4 Step 6, E3 Step 6).
+
 ## Review Focus
 
 1. **RRC reconfiguration of a SOLVED(bits/phys) layout mid-run.** Constraint violations rise, so the layout must
@@ -179,6 +188,10 @@ physics, not from PDSCH/PUSCH CRC trials. The useless probe and UL decodes that 
   Task 7 did, and count `probe_skip`. Split the ISAC_METRICS counters into `check_dl, check_ul, probe_dl, probe_ul,
   probe_skip`.
 - [ ] **Step 4: Run the tests, then the build and ctest.**
+- [ ] **Step 6: No-loss OTA gate.** Daytime, alternating, >= 3 runs per arm: traffic at E4 against traffic at
+  4759260bbf, cases single 923 and the pair 415+923. Every no-loss metric is >= baseline per cell (mean, and the
+  T-mean must not fall below L-mean minus sd). If solved RNTIs drop, the first-DCI rule is wrong: probe a first DCI
+  when the SNR supports its MCS and E1 has <= 4 alive splits, and re-run the gate.
 - [ ] **Step 5: Commit** with the message `feat(traffic): probe triage (seen>=2 or family, SNR, backoff), PUSCH decode off in traffic mode`.
 
 ### Task E2: Full-layout DM-RS scorer and constellation Qm (Level 1, pure)
@@ -249,6 +262,7 @@ physics, not from PDSCH/PUSCH CRC trials. The useless probe and UL decodes that 
 - [ ] **Step 3: Implement it.** E2 runs on the scan consumer, never on the RX thread, and reuses the cached DM-RS
   symbol FEP.
 - [ ] **Step 4: Tests; build; ctest; legacy rfsim 4-RX gate (both arms) under `flock -x /tmp/td_measure.lock`.**
+- [ ] **Step 6: No-loss OTA gate**, the same as E4 Step 6, traffic at E3 against traffic at 4759260bbf.
 - [ ] **Step 5: Commit** with the message `feat(traffic): CRC-free SOLVED via DM-RS physics, per-cell layout families`.
 
 ### Task E5: One DM-RS estimate for layout and sensing
