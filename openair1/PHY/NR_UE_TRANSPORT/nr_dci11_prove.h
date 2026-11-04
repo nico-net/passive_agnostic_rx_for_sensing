@@ -3,10 +3,13 @@
  *
  * The cell-wide resolver (nr_pdcch_dci11_layout_sweep.c) fixes the SUM pre_ant = TB2 + HARQ pid + DAI + TPC + 2nd TPC + PRI + K1 + the
  * Rel-16/17 extras. This module splits that sum into widths from bits alone. Tests per split, over one RNTI's bank of DCI payloads:
- *   HARQ pid : consecutive grants advance the pid by 1..3 (null 3 / 2^w per pair). RELATIVE: it refutes only when another split's pid
- *              reading is significant (a scheduler with arbitrary pids supports nobody, so nobody is refuted).
- *   K1       : there must be offsets c (per K1 index, per TDRA index: c = K0 + K1 absorbs the unknown K0) such that every DCI's feedback slot
- *              n + c is UL-capable (UL or MIXED) in the SIB1 TDD pattern. An empty feasible set refutes. Abstains when the pattern is unknown.
+ *   HARQ pid : consecutive grants advance the pid by 1..3 (null 3 / 2^w per pair). RELATIVE and about the pid's START only: when some reading at one start
+ *              (TB2 absent/present) is significant, the splits at the other start fall; the pid WIDTH (4/5) is left to the other tests (a 5-bit reading of a
+ *              4-bit pid smears like a pid, and a lowest-free-process scheduler has no +1..3 habit at all). A scheduler with arbitrary pids supports nobody,
+ *              so nobody is refuted.
+ *   K1       : there must be offsets c (per K1 index, per TDRA index: c = K0 + K1 absorbs the unknown K0) such that the DCIs land on UL-capable slots (anything
+ *              but pure DL in the SIB1 pattern). The best c per key is taken; a split is refuted only when the DCIs no c explains are significantly more than
+ *              an outlier rate of 1 % (false alarms, SPS release, reused RNTI). Abstains when the pattern is unknown.
  *   counter DAI: of two consecutive grants whose HARQ-ACK slots CAN coincide (the feasible K1 offsets of their keys allow it), the later one reads the
  *              earlier + 1 mod 4 when they do (null 1/4 per pair). RELATIVE like the HARQ test: when some split's DAI position is significantly a counter,
  *              every split that does not put a DAI field exactly there falls (a DAI-less one calling those bits TPC, a longer HARQ field swallowing them).
@@ -58,12 +61,33 @@ int nr_dci11_mcs28_new_tb(const nr_dci11_layout_t *l, const nr_dci11_offsets_t *
 uint64_t nr_dci11_k1_feasible(const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, const nr_dci11_obs_t *bank, int n, nr_ul_slot_fn ul,
                               const nr_dci11_split_t *s, int tda_idx, int k1_idx);
 
+/* ---- layout classes: what the prover reads of a layout (start and length of pre_ant, TDRA field, MCS/NDI/RV block, DCI length). An RNTI whose layout is
+ * not solved is proven over every class among the resolver's alive layouts. ---- */
+typedef struct { nr_dci11_layout_t l; nr_dci11_offsets_t o; } nr_dci11_class_t;
+#define NR_DCI11_CLASS_MAX 16
+/* The distinct classes of the alive layouts of r (one representative each). Returns their number (0 when none is alive), or -1 when there are more than
+ * max: the caller skips the round and counts it. Reads r->alive racily (a layout dying meanwhile only adds a class). */
+int nr_dci11_classes(const nr_dci11_resolver_t *r, nr_dci11_class_t *out, int max);
+
+bool nr_dci11_class_same(const nr_dci11_layout_t *l1, const nr_dci11_offsets_t *o1, const nr_dci11_layout_t *l2, const nr_dci11_offsets_t *o2);
+/* A DCI's slot in the numbering of the SIB1 TDD pattern (frame * slots_per_frame + slot), unwrapped (frames wrap at 1024) to sit next to the monotonic
+ * receiver slot `mono`: same difference between DCIs as mono. -1 on bad arguments. Pure. */
+int64_t nr_dci11_tdd_slot(int64_t mono, int frame, int slot, int spf);
+
 /* ---- per-cell banks (traffic mode only). Feed: any thread (a mutex and a copy). Prove: the scan consumer, never the RX thread. ---- */
-void nr_dci11_bank_feed(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, int64_t abs_slot);
-/* Re-proves rnti's bank when it grew by >= 16 entries since the last proof (the first proof needs 16). The bank is copied under the cell's
- * lock and proved outside it. The layout/offsets are the RNTI's current representative. Returns true when the proven state changed. */
-bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, nr_ul_slot_fn ul);
-/* The split E1 proved for rnti under exactly this layout (pre_ant, ant_ports offset, dci length). False when nothing is proven. */
+typedef struct {
+  uint64_t ident;          /* cell identity key (identity_gen, PCI, carrier): another value drops every bank of the cell */
+  int64_t max_gap_slots;   /* an RNTI silent for longer than this loses its ring (the UE-context expiry) */
+  int64_t max_back_slots;  /* a slot this far BEHIND the newest one of the RNTI also drops it (smaller reorder across consumers is tolerated) */
+} nr_dci11_feed_t;
+void nr_dci11_bank_feed(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, int64_t abs_slot, const nr_dci11_feed_t *f);
+/* Re-proves rnti's bank when it grew by >= 16 entries since the last proof (the first proof needs 16). The bank is copied under the cell's lock and
+ * proved outside it. Every class is proved; the RNTI is PROVEN when exactly one distinct reading (absolute field positions) survives over all classes,
+ * with chance_p < alpha / ncls. A proof stands (hysteresis) until a later look refutes that reading. Returns true when the proven state changed. */
+bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int ncls, nr_ul_slot_fn ul);
+/* The proven reading with the class it was proved in. */
+bool nr_dci11_bank_proven_any(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out);
+/* The same, only when its class reads like (l, o) (a solved RNTI's representative layout). */
 bool nr_dci11_bank_proven(uint16_t rnti, const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, nr_dci11_split_t *out);
 /* New cell identity: forget every bank and proof of this cell. */
 void nr_dci11_bank_reset(void);

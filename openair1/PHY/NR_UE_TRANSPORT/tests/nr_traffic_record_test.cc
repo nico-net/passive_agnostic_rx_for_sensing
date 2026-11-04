@@ -75,19 +75,31 @@ TEST(TrafficRecord, LayoutEvidenceLabels)
   r.layout_evidence = NR_LAYOUT_EV_CRC;  EXPECT_TRUE(has(json(r), "\"layout_evidence\":\"crc\""));
   r.layout_evidence = NR_LAYOUT_EV_BITS; EXPECT_TRUE(has(json(r), "\"layout_evidence\":\"bits\""));
   r.layout_evidence = NR_LAYOUT_EV_PHYS; EXPECT_TRUE(has(json(r), "\"layout_evidence\":\"phys\""));
+  EXPECT_TRUE(has(json(r), "\"fields_evidence\":null"));            // separate key
+  r.fields_evidence = NR_LAYOUT_EV_BITS; EXPECT_TRUE(has(json(r), "\"fields_evidence\":\"bits\""));
+  r.fields_evidence = NR_LAYOUT_EV_CRC;  EXPECT_TRUE(has(json(r), "\"fields_evidence\":\"crc\""));
 }
 TEST(TrafficRecord, BitsEvidencePrintsHarqAckFieldsUnderCandidate)
 {
   auto r = fixture(NR_LAYOUT_CANDIDATE);
   std::string d = json(r);   // no evidence: all null, as before
   for (const char *k : {"\"k1\":null", "\"dai\":null", "\"tpc\":null", "\"pri\":null", "\"mcs\":null"}) EXPECT_TRUE(has(d, k)) << k;
-  r.layout_evidence = NR_LAYOUT_EV_BITS;   // proven split: the HARQ-ACK fields print, the grant fields still do not
+  r.layout_evidence = NR_LAYOUT_EV_BITS; r.fields_evidence = NR_LAYOUT_EV_BITS;   // proven split: the HARQ-ACK fields print, the grant fields still do not
   d = json(r);
   for (const char *k : {"\"k1\":4", "\"dai\":1", "\"tpc\":2", "\"pri\":3", "\"mcs\":null", "\"nb_rb\":null", "\"retx\":null", "\"layout_state\":\"candidate\""})
     EXPECT_TRUE(has(d, k)) << k;
-  r.layout_evidence = NR_LAYOUT_EV_CRC;    // other evidence does not lift the candidate suppression
+  r.layout_evidence = NR_LAYOUT_EV_CRC; r.fields_evidence = NR_LAYOUT_EV_CRC;    // other evidence does not lift the candidate suppression
   d = json(r);
   EXPECT_TRUE(has(d, "\"k1\":null"));
+}
+TEST(TrafficRecord, LegacyRecordsCarryNoEvidenceKeys)
+{
+  // dci records exist only in traffic mode (nr_sense_emit_dci has two callers, traffic_emit_dl/ul, both behind nr_isac_mode() == TRAFFIC); the legacy
+  // grant record formatter is untouched by the new keys
+  auto r = fixture(NR_LAYOUT_SOLVED);
+  char g[2048]; ASSERT_GT(nr_sense_grant_to_json(&r.o, &r.m, g, sizeof g), 0);
+  EXPECT_FALSE(has(g, "evidence"));
+  EXPECT_FALSE(has(g, "\"type\":\"dci\""));
 }
 TEST(TrafficRecord, DecodeRecordShape)
 {

@@ -272,15 +272,24 @@ uint32_t nr_passive_acq_tdd_period_slots(int mu)
     return 0;
   return (uint32_t)t.p1.period_slots + (uint32_t)t.p2.period_slots;
 }
-bool nr_passive_acq_tdd_slot_ul_capable(int64_t abs_slot, int *known)
+void nr_passive_acq_tdd_snapshot(nr_tdd_config_t *out)
 {
   pthread_mutex_lock(&g_lock);
-  const nr_tdd_config_t t = g_tdd;
+  *out = g_tdd;
   pthread_mutex_unlock(&g_lock);
-  if (known) *known = t.valid && abs_slot >= 0;
-  if (!t.valid || abs_slot < 0) return false;
-  const nr_tdd_slot_dir_t d = nr_tdd_slot_direction(&t, (uint32_t)abs_slot);
-  return d == NR_TDD_SLOT_UL || d == NR_TDD_SLOT_MIXED;
+}
+bool nr_passive_acq_tdd_ul_capable_in(const nr_tdd_config_t *t, int64_t abs_slot, int *known)
+{
+  const bool ok = t && t->valid && abs_slot >= 0;
+  if (known) *known = ok;
+  /* every slot that is not pure DL: a common pattern fixes DL-only slots only, FLEXIBLE ones may carry PUCCH (dedicated config, DCI 2_0) */
+  return ok && nr_tdd_slot_direction(t, (uint32_t)abs_slot) != NR_TDD_SLOT_DL;
+}
+bool nr_passive_acq_tdd_slot_ul_capable(int64_t abs_slot, int *known)
+{
+  nr_tdd_config_t t;
+  nr_passive_acq_tdd_snapshot(&t);
+  return nr_passive_acq_tdd_ul_capable_in(&t, abs_slot, known);
 }
 bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
 {

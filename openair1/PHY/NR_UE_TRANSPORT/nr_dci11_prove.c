@@ -129,24 +129,46 @@ static bool ul_masks(const view_t *v, nr_ul_slot_fn ul, uint64_t *ulm)
   return true;
 }
 
-/* per-key feasible offsets of one core; returns false when some used key has none. key_of[i] = key of DCI i. */
-static bool k1_sets(const view_t *v, const nr_dci11_offsets_t *o, int base, const core_t *c, const uint64_t *ulm, uint64_t *feas, bool *used,
-                    int *key_of)
+/* K1 OUTLIER RATE. The true table explains every genuine PDSCH grant, but the bank can hold DCIs that follow no table: a PDCCH CRC false alarm
+ * accepted under a live RNTI (CRC16: about 2^-16 per candidate, thousands of candidates per second), an SPS release/deactivation DCI 1_1 (its K1
+ * counts from the PDCCH slot), an RNTI reused by another UE (its K1 list differs). 1 % is a general upper bound for these together, not a cell
+ * parameter. A split is refuted only when more DCIs than that are infeasible, significantly (binomial tail < alpha). */
+#define K1_OUTLIER_P 0.01
+
+/* per-key best offsets of one core: for each (TDRA, K1) key the offsets c that put the MOST of its DCIs on UL-capable slots (feas), key_of[i] = key of
+ * DCI i. Returns the number of DCIs no single offset per key explains. */
+static int k1_sets(const view_t *v, const nr_dci11_offsets_t *o, int base, const core_t *c, const uint64_t *ulm, uint64_t *feas, bool *used,
+                   int *key_of)
 {
   const int kpos = base + c->tb2 + c->harq + c->dai + 2 + c->tpc2 + 3;
-  for (int k = 0; k < KEYS; k++) { feas[k] = C_ALL; used[k] = false; }
-  bool ok = true;
+  uint8_t cnt[KEYS][C_MAX];
+  int nk[KEYS];
+  memset(cnt, 0, sizeof cnt);
+  memset(nk, 0, sizeof nk);
+  for (int k = 0; k < KEYS; k++) used[k] = false;
   for (int i = 0; i < v->m; i++) {
     const int tda = o->tda_bits ? rd(v->o[i], o->tda, o->tda_bits) : 0;
     const int idx = c->k1 ? rd(v->o[i], kpos, c->k1) : 0;
     const int key = (tda & 15) * 8 + (idx & 7);
     key_of[i] = key;
     used[key] = true;
-    feas[key] &= ulm[i];
+    nk[key]++;
+    for (int b = 0; b < C_MAX; b++) cnt[key][b] += (uint8_t)((ulm[i] >> b) & 1);
   }
-  for (int k = 0; k < KEYS; k++) ok &= !used[k] || feas[k] != 0;
-  return ok;
+  int bad = 0;
+  for (int k = 0; k < KEYS; k++) {
+    feas[k] = C_ALL;
+    if (!used[k]) continue;
+    int best = 0;
+    for (int b = 0; b < C_MAX; b++) best = cnt[k][b] > best ? cnt[k][b] : best;
+    feas[k] = 0;
+    for (int b = 0; b < C_MAX; b++) if (cnt[k][b] == best) feas[k] |= UINT64_C(1) << b;
+    bad += nk[k] - best;
+  }
+  return bad;
 }
+
+static bool k1_refuted(int bad, int m, double alpha) { return bad > 0 && nbs_binom_sf((uint64_t)bad, (uint64_t)m, K1_OUTLIER_P) < alpha; }
 
 uint64_t nr_dci11_k1_feasible(const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, const nr_dci11_obs_t *bank, int n, nr_ul_slot_fn ul,
                               const nr_dci11_split_t *s, int tda_idx, int k1_idx)
@@ -160,7 +182,8 @@ uint64_t nr_dci11_k1_feasible(const nr_dci11_layout_t *l, const nr_dci11_offsets
   int key_of[NR_DCI11_BANK];
   if (!ul_masks(&v, ul, ulm)) return UINT64_MAX;
   const core_t c = {s->tb2, s->harq, s->dai, s->tpc2, s->k1, 0};
-  k1_sets(&v, o, o->ant_ports - l->pre_ant, &c, ulm, feas, used, key_of);
+  const int bad = k1_sets(&v, o, o->ant_ports - l->pre_ant, &c, ulm, feas, used, key_of);
+  if (k1_refuted(bad, v.m, NBS_SIGNIF_ALPHA)) return 0;
   const int key = tda_idx * 8 + k1_idx;
   return used[key] ? feas[key] : UINT64_MAX;
 }
@@ -187,13 +210,11 @@ int nr_dci11_prove(const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, cons
   for (int ci = 0; ci < nc; ci++) {
     const core_t *c = &cores[ci];
     h_p[ci] = d_p[ci] = 1.0;
-    /* K1 vs the TDD pattern: hard refutation */
+    /* K1 vs the TDD pattern: refutation by significantly more infeasible DCIs than the outlier rate */
     uint64_t feas[KEYS];
     bool used[KEYS];
     int key_of[NR_DCI11_BANK];
-    bool k1_ok = true;
-    if (k1_known) k1_ok = k1_sets(&v, o, base, c, ulm, feas, used, key_of);
-    if (!k1_ok) { refuted[ci] = true; continue; }
+    if (k1_known && k1_refuted(k1_sets(&v, o, base, c, ulm, feas, used, key_of), v.m, alpha)) { refuted[ci] = true; continue; }
     /* HARQ pid: steps of 1..3 between consecutive grants */
     if (v.m >= 2) {
       const int mask = (1 << c->harq) - 1, hp = base + c->tb2;
@@ -223,9 +244,14 @@ int nr_dci11_prove(const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, cons
   }
   /* relative tests: only when some split is supported do the unsupported ones fall. A counter at some position can only be the DAI, so every
    * split that does not put a DAI field exactly there falls (a DAI-less one calling it TPC, a longer HARQ field swallowing it, ...). */
+  /* The HARQ test locates the pid FIELD (where it starts), not its width: a 5-bit reading of a 4-bit pid (the extra bit is the next field) steps like a
+   * pid, and a scheduler without the +1..3 habit (lowest free process) makes the true 4-bit reading look no better than noise while the smeared 5-bit one
+   * looks "supported". So a start is supported when any width at it is, and widths are left to the other tests. */
+  bool start_sup[2] = {false, false};
+  for (int ci = 0; ci < nc; ci++) start_sup[cores[ci].tb2 ? 1 : 0] |= h_sup[ci];
   int na = 0;
   for (int ci = 0; ci < nc; ci++) {
-    if (!refuted[ci] && h_any && !h_sup[ci]) refuted[ci] = true;
+    if (!refuted[ci] && h_any && !start_sup[cores[ci].tb2 ? 1 : 0]) refuted[ci] = true;
     if (!refuted[ci] && d_any && !(cores[ci].dai > 0 && d_sup[ci])) refuted[ci] = true;
     if (refuted[ci] || na >= max) continue;
     ext_ctx_t x = {.base = core_split(&cores[ci]), .out = &alive[na], .max = 1, .count = 0, .first_only = true};
@@ -253,6 +279,42 @@ int nr_dci11_mcs28_new_tb(const nr_dci11_layout_t *l, const nr_dci11_offsets_t *
   return cnt;
 }
 
+/* ---- layout classes ---- */
+/* what the prover reads of a layout: where pre_ant starts and how long it is, the TDRA field, the MCS/NDI/RV block and the DCI length */
+bool nr_dci11_class_same(const nr_dci11_layout_t *l1, const nr_dci11_offsets_t *o1, const nr_dci11_layout_t *l2, const nr_dci11_offsets_t *o2)
+{
+  return l1->pre_ant == l2->pre_ant && o1->ant_ports - l1->pre_ant == o2->ant_ports - l2->pre_ant && o1->mcs == o2->mcs && o1->tda == o2->tda &&
+         o1->tda_bits == o2->tda_bits && o1->total == o2->total;
+}
+
+int nr_dci11_classes(const nr_dci11_resolver_t *r, nr_dci11_class_t *out, int max)
+{
+  if (!r || !out || max <= 0) return -1;
+  const int n = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
+  int cnt = 0;
+  for (int i = nr_alive_next(r->alive, 0, n); i < n; i = nr_alive_next(r->alive, i + 1, n)) {
+    int k = 0;
+    while (k < cnt && !nr_dci11_class_same(&out[k].l, &out[k].o, &r->hyp[i], &r->off[i])) k++;
+    if (k < cnt) continue;
+    if (cnt == max) return -1;
+    out[cnt].l = r->hyp[i];
+    out[cnt].o = r->off[i];
+    cnt++;
+  }
+  return cnt;
+}
+
+/* the field reading of a surviving split in absolute bit positions: two classes that read the same bits the same way are one answer */
+typedef struct { uint16_t harq_pos; uint8_t harq, dai, tpc2, k1; } sig_t;   /* the TDRA/MCS offsets only steer the tests, they do not change what is emitted */
+static sig_t sig_of(const nr_dci11_class_t *c, const nr_dci11_split_t *s)
+{
+  sig_t g;
+  memset(&g, 0, sizeof g);
+  g.harq_pos = (uint16_t)(c->o.ant_ports - c->l.pre_ant + s->tb2);
+  g.harq = s->harq; g.dai = s->dai; g.tpc2 = s->tpc2; g.k1 = s->k1;
+  return g;
+}
+
 /* ---- per-cell banks ---- */
 #define BANK_RNTIS 128
 #define BANK_DUE 16
@@ -261,14 +323,14 @@ typedef struct {
   uint16_t rnti;
   uint64_t tick;
   uint32_t fed, proved_at;
+  int64_t last_slot;
   uint8_t head, cnt;
   nr_dci11_obs_t obs[NR_DCI11_BANK];
   bool proven;
+  nr_dci11_class_t cls;
   nr_dci11_split_t split;
-  uint8_t p_pre_ant;
-  uint16_t p_ant_ports, p_total;
 } bank_t;
-typedef struct { bank_t e[BANK_RNTIS]; uint64_t tick; } bank_tab_t;
+typedef struct { bank_t e[BANK_RNTIS]; uint64_t tick, ident; } bank_tab_t;
 NR_CELL_STATIC(bank_tab_t, g_bank)
 #define g_bank NR_CELL_REF(g_bank)
 NR_CELL_STATIC_INIT(pthread_mutex_t, g_bank_mu, PTHREAD_MUTEX_INITIALIZER)
@@ -281,9 +343,13 @@ static bank_t *bank_find(uint16_t rnti)
   return NULL;
 }
 
-void nr_dci11_bank_feed(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, int64_t abs_slot)
+void nr_dci11_bank_feed(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, int64_t abs_slot, const nr_dci11_feed_t *f)
 {
   pthread_mutex_lock(&g_bank_mu);
+  if (f && f->ident != g_bank.ident) {   /* another cell identity: nothing of the old one means anything (K1 counts slots of another pattern) */
+    memset(&g_bank, 0, sizeof g_bank);
+    g_bank.ident = f->ident;
+  }
   bank_t *b = bank_find(rnti);
   if (!b) {   /* a free entry, else the least recently fed */
     b = &g_bank.e[0];
@@ -294,8 +360,16 @@ void nr_dci11_bank_feed(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, int6
     memset(b, 0, sizeof *b);
     b->used = true;
     b->rnti = rnti;
+  } else if (f && b->cnt && (abs_slot < b->last_slot - f->max_back_slots || abs_slot > b->last_slot + f->max_gap_slots)) {
+    /* silent for longer than the UE-context expiry, or the clock went back: the RNTI may belong to another UE now, or to another run */
+    const uint8_t keep_used = b->used;
+    const uint16_t keep_rnti = b->rnti;
+    memset(b, 0, sizeof *b);
+    b->used = keep_used;
+    b->rnti = keep_rnti;
   }
   b->tick = ++g_bank.tick;
+  if (!b->cnt || abs_slot > b->last_slot) b->last_slot = abs_slot;
   b->obs[b->head] = (nr_dci11_obs_t){payload, len, abs_slot};
   b->head = (uint8_t)((b->head + 1) % NR_DCI11_BANK);
   if (b->cnt < NR_DCI11_BANK) b->cnt++;
@@ -303,51 +377,82 @@ void nr_dci11_bank_feed(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, int6
   pthread_mutex_unlock(&g_bank_mu);
 }
 
-bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, nr_ul_slot_fn ul)
+bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int ncls, nr_ul_slot_fn ul)
 {
-  if (!l || !o) return false;
+  if (!cls || ncls <= 0 || ncls > NR_DCI11_CLASS_MAX) return false;
   nr_dci11_obs_t snap[NR_DCI11_BANK];   /* copy under the cell lock, prove outside it */
   int n;
   uint32_t fed;
+  bool was = false;
+  sig_t prev;
+  memset(&prev, 0, sizeof prev);
   pthread_mutex_lock(&g_bank_mu);
   bank_t *b = bank_find(rnti);
   if (!b || b->fed - b->proved_at < BANK_DUE) { pthread_mutex_unlock(&g_bank_mu); return false; }
   n = b->cnt;
   fed = b->fed;
   for (int i = 0; i < n; i++) snap[i] = b->obs[(b->head + NR_DCI11_BANK - n + i) % NR_DCI11_BANK];
+  if (b->proven) { was = true; prev = sig_of(&b->cls, &b->split); }
   pthread_mutex_unlock(&g_bank_mu);
 
-  nr_dci11_split_t alive[NR_DCI11_CORE_MAX];
-  double cp[NR_DCI11_CORE_MAX];
-  const int na = nr_dci11_prove(l, o, snap, n, ul, alive, cp, NR_DCI11_CORE_MAX);
-  const bool proven = na == 1 && cp[0] < NBS_SIGNIF_ALPHA;
+  /* survivors over every class: distinct readings (absolute positions), the first one kept */
+  bool have = false, multi = false, prev_alive = false;
+  nr_dci11_class_t first_c;
+  nr_dci11_split_t first_s;
+  double first_p = 1.0;
+  memset(&first_c, 0, sizeof first_c);
+  memset(&first_s, 0, sizeof first_s);
+  sig_t first_sig;
+  memset(&first_sig, 0, sizeof first_sig);
+  for (int c = 0; c < ncls; c++) {
+    nr_dci11_split_t alive[NR_DCI11_CORE_MAX];
+    double cp[NR_DCI11_CORE_MAX];
+    const int na = nr_dci11_prove(&cls[c].l, &cls[c].o, snap, n, ul, alive, cp, NR_DCI11_CORE_MAX);
+    for (int j = 0; j < na; j++) {
+      const sig_t g = sig_of(&cls[c], &alive[j]);
+      if (was && memcmp(&g, &prev, sizeof g) == 0) prev_alive = true;
+      if (!have) { have = true; first_c = cls[c]; first_s = alive[j]; first_p = cp[j]; first_sig = g; }
+      else if (memcmp(&g, &first_sig, sizeof g) != 0) multi = true;
+    }
+  }
+  /* one answer across all classes, significant at alpha / (classes compared) */
+  const bool proven_now = have && !multi && first_p < NBS_SIGNIF_ALPHA / ncls;
 
   pthread_mutex_lock(&g_bank_mu);
   b = bank_find(rnti);   /* the entry may have been evicted or reset meanwhile */
   bool changed = false;
   if (b) {
-    changed = b->proven != proven || (proven && memcmp(&b->split, &alive[0], sizeof alive[0]) != 0)
-              || (proven && (b->p_pre_ant != l->pre_ant || b->p_ant_ports != o->ant_ports || b->p_total != o->total));
     b->proved_at = fed;
-    b->proven = proven;
-    if (proven) {
-      b->split = alive[0];
-      b->p_pre_ant = l->pre_ant; b->p_ant_ports = o->ant_ports; b->p_total = o->total;
+    if (was && b->proven && prev_alive) {
+      /* HYSTERESIS: a proof stands until the data refute it; losing significance in a later look is not a refutation */
+    } else if (proven_now) {
+      changed = !b->proven || memcmp(&first_sig, &prev, sizeof prev) != 0;
+      b->proven = true; b->cls = first_c; b->split = first_s;
+    } else if (b->proven) {
+      b->proven = false;
+      changed = true;
     }
   }
   pthread_mutex_unlock(&g_bank_mu);
   return changed;
 }
 
-bool nr_dci11_bank_proven(uint16_t rnti, const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, nr_dci11_split_t *out)
+bool nr_dci11_bank_proven_any(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out)
 {
-  if (!l || !o || !out) return false;
+  if (!cls || !out) return false;
   pthread_mutex_lock(&g_bank_mu);
   const bank_t *b = bank_find(rnti);
-  const bool ok = b && b->proven && b->p_pre_ant == l->pre_ant && b->p_ant_ports == o->ant_ports && b->p_total == o->total;
-  if (ok) *out = b->split;
+  const bool ok = b && b->proven;
+  if (ok) { *cls = b->cls; *out = b->split; }
   pthread_mutex_unlock(&g_bank_mu);
   return ok;
+}
+
+bool nr_dci11_bank_proven(uint16_t rnti, const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, nr_dci11_split_t *out)
+{
+  nr_dci11_class_t c;
+  if (!l || !o || !out || !nr_dci11_bank_proven_any(rnti, &c, out)) return false;
+  return nr_dci11_class_same(&c.l, &c.o, l, o);
 }
 
 void nr_dci11_bank_reset(void)
@@ -355,4 +460,13 @@ void nr_dci11_bank_reset(void)
   pthread_mutex_lock(&g_bank_mu);
   memset(&g_bank, 0, sizeof g_bank);
   pthread_mutex_unlock(&g_bank_mu);
+}
+
+int64_t nr_dci11_tdd_slot(int64_t mono, int frame, int slot, int spf)
+{
+  if (mono < 0 || frame < 0 || frame >= 1024 || slot < 0 || spf <= 0 || slot >= spf) return -1;
+  const int64_t w = 1024 * (int64_t)spf, f = (int64_t)frame * spf + slot;
+  int64_t d = ((f - mono) % w + w) % w;
+  if (d > w / 2) d -= w;
+  return mono + d >= 0 ? mono + d : -1;
 }

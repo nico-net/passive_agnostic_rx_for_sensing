@@ -5,18 +5,21 @@
 #include "common/utils/nr_cell.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <random>
 #include <string>
 #include <vector>
 
 static bool g_known = true;
+static int g_ulmask = 0x18;   // residues 3 (special, MIXED) and 4 (UL) of DDDSU; 0x1C adds the FLEXIBLE slot 2
 static bool ul_dddsu(int64_t s, int *known)
 {
   *known = g_known ? 1 : 0;
-  const int r = (int)(((s % 5) + 5) % 5);
-  return r == 3 || r == 4;
+  return (g_ulmask >> (int)(((s % 5) + 5) % 5)) & 1;
 }
+static const nr_dci11_feed_t FEED = {1, 1000000000, 1000000000};
+static nr_dci11_class_t cls_of(const nr_dci11_layout_t &l, const nr_dci11_offsets_t &o) { nr_dci11_class_t c; c.l = l; c.o = o; return c; }
 
 struct Cfg {
   int tb2 = 0, harq = 4, dai = 2, tpc2 = 0, k1 = 2, ext = 0;   // truth widths (ext = total extra bits, never read)
@@ -119,6 +122,15 @@ static bool is_truth(const nr_dci11_split_t &s, const Cfg &c)
 {
   return s.tb2 == c.tb2 && s.harq == c.harq && s.dai == c.dai && s.tpc2 == c.tpc2 && s.k1 == c.k1 && s.tpc == 2 && s.pri == 3;
 }
+
+struct Real {
+  Cfg c;
+  double loss = 0.1, p10 = 0.2, corrupt = 0.01, sps = 0.005;
+  bool lowest_free = false;
+  int pucch_mask = 0x10;   // residues the gNB puts PUCCH on (subset of the UL-capable ones)
+};
+
+static std::vector<Dci> gen_real(const Real &R, int n_kept, std::mt19937 &rng, int64_t first_slot = 1000);
 
 TEST(Dci11Prove, EnumeratesSpecSplits)
 {
@@ -256,6 +268,50 @@ TEST(Dci11Prove, HarqStepRefutesShiftedPid)
   EXPECT_TRUE(truth);
 }
 
+TEST(Dci11Prove, K1ToleratesOutliersButNotAWrongTable)
+{
+  // a few DCIs that follow no table (CRC false alarm, SPS release, reused RNTI) must not refute the truth; a split that mis-reads K1 is still refuted
+  for (int seed = 0; seed < 20; seed++) {
+    std::mt19937 rng(500 + seed);
+    Cfg c;
+    auto v = gen_stream(c, NR_DCI11_BANK, rng);
+    nr_dci11_layout_t l; nr_dci11_offsets_t o;
+    make_layout(c, &l, &o);
+    const int base = o.ant_ports - l.pre_ant;
+    for (int k : {5, 30}) put(v[k].p, o.total, base + 11, 2, (v[k].p.w[0] >> 3) & 3);   // two payloads with arbitrary K1 indices
+    const Res r = run(c, v);
+    bool truth = false;
+    for (const auto &s : r.alive) truth |= is_truth(s, c);
+    EXPECT_TRUE(truth) << seed << " " << dump(r);
+  }
+  // all-DL pattern: every DCI infeasible, tolerance does not save anyone
+  std::mt19937 rng(77);
+  Cfg c;
+  const auto v = gen_stream(c, NR_DCI11_BANK, rng);
+  auto all_dl = [](int64_t, int *known) { *known = 1; return false; };
+  EXPECT_EQ(run(c, v, all_dl).alive.size(), 0u);
+}
+
+TEST(Dci11Prove, FlexibleSlotsCarryPucch)
+{
+  // PUCCH on the FLEXIBLE slot 2 of D D F S U: with FLEXIBLE counted as UL-capable (mask 0x1C) the truth stays; a pattern calling it DL-only would refute it
+  std::mt19937 rng(41);
+  Cfg c;
+  Real R; R.c = c; R.loss = 0; R.p10 = 0; R.corrupt = 0; R.sps = 0; R.pucch_mask = 0x1C;   // the gNB takes the first of slots 2 (FLEXIBLE), 3, 4
+  g_ulmask = 0x1C;
+  auto v = gen_real(R, NR_DCI11_BANK, rng);
+  Res r = run(c, v);
+  bool truth = false;
+  for (const auto &s : r.alive) truth |= is_truth(s, c);
+  EXPECT_TRUE(truth) << dump(r);
+  g_ulmask = 0x18;   // the same stream under a pattern where slot 2 is DL: the K1 test refutes (this is the pre-fix behaviour)
+  r = run(c, v);
+  truth = false;
+  for (const auto &s : r.alive) truth |= is_truth(s, c);
+  EXPECT_FALSE(truth);
+  g_ulmask = 0x18;
+}
+
 TEST(Dci11Prove, UnknownTddAbstains)
 {
   std::mt19937 rng(5);
@@ -301,7 +357,7 @@ TEST(Dci11Prove, IndistinguishableStaysCandidate)
 // ---- per-cell banks ----
 static void feed_all(uint16_t rnti, const std::vector<Dci> &v, int len)
 {
-  for (const Dci &d : v) nr_dci11_bank_feed(rnti, d.p, (uint16_t)len, d.slot);
+  for (const Dci &d : v) nr_dci11_bank_feed(rnti, d.p, (uint16_t)len, d.slot, &FEED);
 }
 
 TEST(Dci11Prove, ReopensOnViolations)
@@ -309,25 +365,67 @@ TEST(Dci11Prove, ReopensOnViolations)
   nr_cell_bind(0);
   nr_dci11_bank_reset();
   std::mt19937 rng(7);
-  Cfg a;                                   // DAI 2 + K1 2
-  Cfg b; b.dai = 4; b.k1 = 0; b.L = {4};   // same sum (13), a different RRC config
+  Cfg a;                                                              // DAI 2 + K1 2
+  Cfg b; b.dai = 0; b.k1 = 3; b.ext = 1; b.L = {1, 2, 3, 4, 6, 7, 8, 9};   // same sum (13), a different RRC config: 3-bit K1, one-shot bit
   ASSERT_EQ(a.pre_ant(), b.pre_ant());
   nr_dci11_layout_t l; nr_dci11_offsets_t o;
   make_layout(a, &l, &o);
+  const nr_dci11_class_t kc = cls_of(l, o);
   const uint16_t rnti = 0x4601;
   feed_all(rnti, gen_stream(a, 64, rng), o.total);
-  EXPECT_TRUE(nr_dci11_bank_maybe_prove(rnti, &l, &o, ul_dddsu));
+  ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));      // precondition: a proof exists
   nr_dci11_split_t s{};
   ASSERT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
   EXPECT_EQ(s.dai, 2); EXPECT_EQ(s.k1, 2);
-  // 64 DCIs of the other config replace the ring: re-proving refutes the old split
+  // 64 DCIs of the other config replace the ring: the old reading violates the K1 table and is refuted (hysteresis ends)
   feed_all(rnti, gen_stream(b, 64, rng, 5000), o.total);
-  EXPECT_TRUE(nr_dci11_bank_maybe_prove(rnti, &l, &o, ul_dddsu));
+  EXPECT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));     // the state changed
   nr_dci11_split_t s2{};
-  if (nr_dci11_bank_proven(rnti, &l, &o, &s2)) { EXPECT_FALSE(s2.dai == 2 && s2.k1 == 2); }
-  // reset forgets everything
+  const bool still = nr_dci11_bank_proven(rnti, &l, &o, &s2);
+  EXPECT_FALSE(still && s2.dai == 2 && s2.k1 == 2);
   nr_dci11_bank_reset();
   EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s2));
+}
+
+TEST(Dci11Prove, HysteresisKeepsAProofThroughAWeakLook)
+{
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  std::mt19937 rng(21);
+  Cfg a;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(a, &l, &o);
+  const nr_dci11_class_t kc = cls_of(l, o);
+  const uint16_t rnti = 0x4603;
+  feed_all(rnti, gen_stream(a, 64, rng), o.total);
+  ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
+  nr_dci11_split_t s{};
+  ASSERT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  // the next 64 DCIs (the whole ring) have arbitrary pids AND arbitrary DAI bits: a fresh proof of that window alone is impossible (no test is significant,
+  // many readings survive), but nothing in it REFUTES the proven reading either. The proof stands.
+  Cfg w = a; w.random_pid = true;
+  auto weak = gen_stream(w, 64, rng, 9000);
+  const int base = o.ant_ports - l.pre_ant;
+  for (auto &d : weak) put(d.p, o.total, base + 4, 2, (unsigned)(rng() & 3));
+  ASSERT_GT(run(w, weak).alive.size(), 1u);   // precondition: on its own the weak window proves nothing
+  feed_all(rnti, weak, o.total);
+  nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu);
+  nr_dci11_split_t s2{};
+  EXPECT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s2));
+  nr_dci11_bank_reset();
+}
+
+TEST(Dci11Prove, DuplicateSlotsAreIgnored)
+{
+  // the same DCI seen twice in one slot (two passes / candidates) is one observation: a doubled bank proves exactly what the plain one does
+  std::mt19937 rng(24);
+  Cfg c;
+  const auto v = gen_stream(c, 32, rng);
+  std::vector<Dci> dbl;
+  for (const Dci &d : v) { dbl.push_back(d); dbl.push_back(d); }
+  const Res r1 = run(c, v), r2 = run(c, dbl);
+  ASSERT_EQ(r1.alive.size(), r2.alive.size());
+  for (size_t i = 0; i < r1.alive.size(); i++) { EXPECT_EQ(0, memcmp(&r1.alive[i], &r2.alive[i], sizeof(nr_dci11_split_t))); EXPECT_EQ(r1.p[i], r2.p[i]); }
 }
 
 TEST(Dci11Prove, ProvesOnlyAfterSixteenMore)
@@ -338,14 +436,26 @@ TEST(Dci11Prove, ProvesOnlyAfterSixteenMore)
   Cfg a;
   nr_dci11_layout_t l; nr_dci11_offsets_t o;
   make_layout(a, &l, &o);
-  const auto v = gen_stream(a, 64, rng);
+  const nr_dci11_class_t kc = cls_of(l, o);
+  const auto v = gen_stream(a, 90, rng);
+  // precondition: this stream IS provable (direct prove of the first 64 DCIs)
+  {
+    std::vector<Dci> v64(v.begin(), v.begin() + 64);
+    ASSERT_EQ(run(a, v64).alive.size(), 1u);
+  }
   const uint16_t rnti = 0x4602;
-  for (int i = 0; i < 15; i++) nr_dci11_bank_feed(rnti, v[i].p, (uint16_t)o.total, v[i].slot);
-  EXPECT_FALSE(nr_dci11_bank_maybe_prove(rnti, &l, &o, ul_dddsu));   // 15 < 16: not due
-  nr_dci11_bank_feed(rnti, v[15].p, (uint16_t)o.total, v[15].slot);
-  nr_dci11_bank_maybe_prove(rnti, &l, &o, ul_dddsu);                 // due now (16)
-  const bool before = nr_dci11_bank_maybe_prove(rnti, &l, &o, ul_dddsu);   // nothing new since
-  EXPECT_FALSE(before);
+  for (int i = 0; i < 15; i++) nr_dci11_bank_feed(rnti, v[i].p, (uint16_t)o.total, v[i].slot, &FEED);
+  EXPECT_FALSE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));   // 15 < 16: not due
+  nr_dci11_split_t s{};
+  EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  nr_dci11_bank_feed(rnti, v[15].p, (uint16_t)o.total, v[15].slot, &FEED);
+  for (int i = 16; i < 64; i++) nr_dci11_bank_feed(rnti, v[i].p, (uint16_t)o.total, v[i].slot, &FEED);
+  EXPECT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));    // due (>= 16 since the start): the proof exists now
+  EXPECT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  EXPECT_FALSE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));   // nothing new since: not due, no change
+  for (int i = 64; i < 79; i++) nr_dci11_bank_feed(rnti, v[i].p, (uint16_t)o.total, v[i].slot, &FEED);
+  EXPECT_FALSE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));   // 15 more: not due, still proven
+  EXPECT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
   nr_dci11_bank_reset();
 }
 
@@ -357,10 +467,11 @@ TEST(Dci11Prove, PerCellBanks)
   ASSERT_EQ(a.pre_ant(), b.pre_ant());
   nr_dci11_layout_t l; nr_dci11_offsets_t o;
   make_layout(a, &l, &o);
+  const nr_dci11_class_t kc = cls_of(l, o);
   const uint16_t rnti = 0x4601;
   nr_cell_bind(0); nr_dci11_bank_reset();
   nr_cell_bind(1); nr_dci11_bank_reset();
-  nr_cell_bind(0); feed_all(rnti, gen_stream(a, 64, rng), o.total); nr_dci11_bank_maybe_prove(rnti, &l, &o, ul_dddsu);
+  nr_cell_bind(0); feed_all(rnti, gen_stream(a, 64, rng), o.total); ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
   nr_cell_bind(1); feed_all(rnti, gen_stream(b, 64, rng), o.total);
   nr_cell_bind(0);
   nr_dci11_split_t s0{}, s1{};
@@ -368,7 +479,7 @@ TEST(Dci11Prove, PerCellBanks)
   EXPECT_EQ(s0.dai, 2); EXPECT_EQ(s0.tpc2, 0);
   nr_cell_bind(1);
   EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s1));   // cell 1 never proved: cell 0's proof must not leak
-  nr_dci11_bank_maybe_prove(rnti, &l, &o, ul_dddsu);
+  nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu);
   // the cell-1 stream (DAI 0, 2nd TPC 2) either proves its own split or stays open, but never cell 0's
   if (nr_dci11_bank_proven(rnti, &l, &o, &s1)) { EXPECT_EQ(s1.dai, 0); EXPECT_EQ(s1.tpc2, 2); }
   nr_cell_bind(0);
@@ -376,6 +487,129 @@ TEST(Dci11Prove, PerCellBanks)
   nr_cell_bind(1);
   nr_dci11_bank_reset();
   nr_cell_bind(0);
+}
+
+TEST(Dci11Prove, IdentityChangeAndSilenceDropTheRing)
+{
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  std::mt19937 rng(22);
+  Cfg a;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(a, &l, &o);
+  const nr_dci11_class_t kc = cls_of(l, o);
+  const uint16_t rnti = 0x4604;
+  const auto v = gen_stream(a, 64, rng);
+  nr_dci11_split_t s{};
+  feed_all(rnti, v, o.total);
+  ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
+  ASSERT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  // another cell identity: the next feed wipes every bank and proof of the cell
+  const nr_dci11_feed_t other = {2, 1000000000, 1000000000};
+  nr_dci11_bank_feed(0x4999, v[0].p, (uint16_t)o.total, v[0].slot, &other);
+  EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  // silence longer than max_gap drops the ring of that RNTI (and its proof); the new DCI starts a fresh ring of 1
+  nr_dci11_bank_reset();
+  const nr_dci11_feed_t gap = {1, 100, 50};
+  for (const Dci &d : v) nr_dci11_bank_feed(rnti, d.p, (uint16_t)o.total, d.slot, &FEED);
+  ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
+  ASSERT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  nr_dci11_bank_feed(rnti, v[0].p, (uint16_t)o.total, v.back().slot + 1000, &gap);   // 1000 > 100 slots of silence
+  EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  for (int i = 1; i < 16; i++) nr_dci11_bank_feed(rnti, v[i].p, (uint16_t)o.total, v.back().slot + 1000 + i, &gap);
+  EXPECT_FALSE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));   // only 16 in the new ring and nothing to prove yet
+  // a backwards jump (more than max_back) also drops it; a small reorder (across scan consumers) does not
+  const nr_dci11_feed_t back = {1, 1000000000, 50};
+  nr_dci11_bank_reset();
+  for (const Dci &d : v) nr_dci11_bank_feed(rnti, d.p, (uint16_t)o.total, d.slot, &back);
+  ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
+  nr_dci11_bank_feed(rnti, v[0].p, (uint16_t)o.total, v.back().slot - 10, &back);
+  EXPECT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  nr_dci11_bank_feed(rnti, v[0].p, (uint16_t)o.total, v.back().slot - 500, &back);
+  EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  nr_dci11_bank_reset();
+}
+
+TEST(Dci11Prove, TddSlotUnwrapsFrames)
+{
+  const int spf = 20;   // 30 kHz
+  const int64_t w = 1024 * spf;
+  EXPECT_EQ(nr_dci11_tdd_slot(5000, 250, 0, spf), 5000);           // frame 250 slot 0 = 5000: already in the pattern's numbering
+  EXPECT_EQ(nr_dci11_tdd_slot(5007, 250, 0, spf), 5000);            // mono ahead of the frame count by 7 slots (d > w/2): back, not a whole wrap forward
+  EXPECT_EQ(nr_dci11_tdd_slot(5000 + w, 250, 0, spf), 5000 + w);   // one wrap later the monotonic value stays next to mono, same residue
+  EXPECT_EQ(nr_dci11_tdd_slot(5003 + 3 * w, 250, 3, spf) % 5, 5003 % 5);
+  // mono offset by a non-multiple of the wrap (counter started mid-run): result is the value congruent to frame*spf+slot nearest to mono
+  const int64_t r = nr_dci11_tdd_slot(123457, 100, 7, spf);
+  EXPECT_EQ((r - (100 * spf + 7)) % w, 0);
+  EXPECT_LE(std::llabs(r - 123457), w / 2);
+  // differences between two DCIs are those of mono
+  EXPECT_EQ(nr_dci11_tdd_slot(123460, 100, 10, spf) - r, 3);
+  // wrap of the frame counter between two DCIs (1023 -> 0): still +1 slot
+  const int64_t a = nr_dci11_tdd_slot(w * 7 + 1023 * spf + 19, 1023, 19, spf), b = nr_dci11_tdd_slot(w * 7 + 1024 * spf, 0, 0, spf);
+  EXPECT_EQ(b - a, 1);
+  EXPECT_EQ(nr_dci11_tdd_slot(-1, 0, 0, spf), -1);
+  EXPECT_EQ(nr_dci11_tdd_slot(10, 1024, 0, spf), -1);
+  EXPECT_EQ(nr_dci11_tdd_slot(10, 0, 20, spf), -1);
+  EXPECT_EQ(nr_dci11_tdd_slot(10, 0, 0, 0), -1);
+}
+
+TEST(Dci11Prove, ClassesAreDistinctReadings)
+{
+  nr_dci11_resolver_t *r = (nr_dci11_resolver_t *)calloc(1, sizeof *r);
+  nr_dci11_layout_t l[3]; nr_dci11_offsets_t o[3];
+  Cfg c13; Cfg c14; c14.k1 = 3;
+  make_layout(c13, &l[0], &o[0]);
+  l[1] = l[0]; o[1] = o[0]; l[1].tail = 1; o[1].total = o[0].total;   // differs only where the prover does not read: same class
+  make_layout(c14, &l[2], &o[2]);
+  r->n_hyp = 3;
+  for (int i = 0; i < 3; i++) { r->hyp[i] = l[i]; r->off[i] = o[i]; r->alive[i] = true; }
+  nr_dci11_class_t out[4];
+  ASSERT_EQ(nr_dci11_classes(r, out, 4), 2);
+  r->alive[2] = false;
+  EXPECT_EQ(nr_dci11_classes(r, out, 4), 1);
+  r->alive[0] = r->alive[1] = false;
+  EXPECT_EQ(nr_dci11_classes(r, out, 4), 0);
+  r->alive[0] = r->alive[2] = true;
+  EXPECT_EQ(nr_dci11_classes(r, out, 1), -1);   // more classes than the cap: the caller skips the round
+  EXPECT_EQ(nr_dci11_classes(nullptr, out, 1), -1);
+  free(r);
+}
+
+TEST(Dci11Prove, UnsolvedRntiProvenOverSeveralClasses)
+{
+  // the resolver still holds two classes of one DCI length: TDRA 4 bits + no VRB bit, or TDRA 3 bits + one pre-MCS bit (same MCS offset). Both read the
+  // same HARQ-ACK bits: one distinct answer over both classes, proven. A third class with another pre_ant and the same length disagrees: no proof.
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  std::mt19937 rng(23);
+  Cfg c13;
+  nr_dci11_layout_t la, lb, lc; nr_dci11_offsets_t oa, ob, oc;
+  make_layout(c13, &la, &oa);
+  lb = la; lb.pre_mcs = 1;
+  ASSERT_TRUE(nr_dci11_layout_offsets(&lb, 11, 3, &ob));
+  ASSERT_EQ(ob.total, oa.total);
+  lc = la; lc.pre_ant = 14; lc.tail = 0; lc.pre_mcs = 0;
+  ASSERT_TRUE(nr_dci11_layout_offsets(&lc, 11, 3, &oc));   // one bit longer pre_ant, one bit shorter TDRA
+  ASSERT_EQ(oc.total, oa.total);
+  const uint16_t rnti = 0x4605;
+  const auto v = gen_stream(c13, 64, rng);
+  nr_dci11_class_t two[2] = {cls_of(la, oa), cls_of(lb, ob)}, three[3] = {two[0], two[1], cls_of(lc, oc)};
+  nr_dci11_class_t pc; nr_dci11_split_t ps;
+  for (const Dci &d : v) nr_dci11_bank_feed(rnti, d.p, (uint16_t)oa.total, d.slot, &FEED);
+  ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, two, 2, ul_dddsu));
+  ASSERT_TRUE(nr_dci11_bank_proven_any(rnti, &pc, &ps));
+  EXPECT_EQ(ps.dai, 2); EXPECT_EQ(ps.k1, 2); EXPECT_EQ(ps.harq, 4);
+  // the proof belongs to its class: asked for under a layout of another class (pre_ant 14) it is not returned
+  nr_dci11_split_t other{};
+  EXPECT_TRUE(nr_dci11_bank_proven(rnti, &pc.l, &pc.o, &other));
+  EXPECT_FALSE(nr_dci11_bank_proven(rnti, &lc, &oc, &other));
+  nr_dci11_bank_reset();
+  for (const Dci &d : v) nr_dci11_bank_feed(rnti, d.p, (uint16_t)oa.total, d.slot, &FEED);
+  nr_dci11_bank_maybe_prove(rnti, three, 3, ul_dddsu);
+  // class c reads bits one position off (pre_ant 14 starts a bit earlier): whatever it keeps alive must be a different reading, so no proof
+  const bool p3 = nr_dci11_bank_proven_any(rnti, &pc, &ps);
+  if (p3) { EXPECT_EQ(ps.dai, 2); EXPECT_EQ(ps.k1, 2); EXPECT_TRUE(nr_dci11_class_same(&pc.l, &pc.o, &la, &oa) || nr_dci11_class_same(&pc.l, &pc.o, &lb, &ob)); }
+  nr_dci11_bank_reset();
 }
 
 TEST(Dci11Prove, ProvenSplitFeedsFieldExtraction)
@@ -483,4 +717,127 @@ TEST(Dci11Prove, SweepNeverProvesWrongSplit)
   EXPECT_EQ(truth_lost, 0);
   EXPECT_EQ(wrong, 0);
   EXPECT_GT(proven0, 0);
+}
+
+// ---- realistic sweep: what a passive receiver really sees ----
+// Per-DCI loss 0-30 %, DCI 1_0 of the same RNTI interleaved (they take counter-DAI values and HARQ pids but are not in the bank), a lowest-free-pid
+// scheduler or a round-robin one, 1 % corrupted payloads, 0.5 % SPS-release-like DCIs (pid 0, K1 field arbitrary), FLEXIBLE slots as PUCCH slots.
+static std::vector<Dci> gen_real(const Real &R, int n_kept, std::mt19937 &rng, int64_t first_slot)
+{
+  const Cfg &c = R.c;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(c, &l, &o);
+  const int base = o.ant_ports - l.pre_ant, len = o.total;
+  std::uniform_real_distribution<double> U(0.0, 1.0);
+  std::vector<Dci> out;
+  int pid = 0, ndi[32] = {0};
+  int64_t busy[32] = {0};
+  std::map<int64_t, int> win;
+  for (int64_t s = first_slot; (int)out.size() < n_kept && s < first_slot + 200000; s++) {
+    if (s % 5 == 4 || U(rng) > 0.5) continue;
+    const bool is10 = U(rng) < R.p10;
+    const int tda = (int)(rng() % 4);
+    const int64_t m = s + (tda >= 2 ? c.k0_hi : 0);
+    int bi = -1, bc = 99;
+    for (size_t i = 0; i < c.L.size(); i++) {
+      const int r = (int)((m + c.L[i]) % 5);
+      if (((R.pucch_mask >> r) & 1) && c.L[i] < bc) { bc = c.L[i]; bi = (int)i; }
+    }
+    if (bi < 0) continue;
+    const int64_t f = m + bc;
+    int p;
+    if (R.lowest_free) {
+      p = -1;
+      for (int q = 0; q < (1 << c.harq); q++) if (busy[q] <= s) { p = q; break; }
+      if (p < 0) continue;
+      busy[p] = f + 2;
+    } else {
+      pid = (pid + 1) & ((1 << c.harq) - 1);
+      p = pid;
+    }
+    ndi[p] ^= 1;
+    const unsigned dai = (unsigned)((win[f]++) & 3);   // every DCI of the UE in this window, 1_0 and 1_1, lost or not
+    if (is10 || U(rng) < R.loss) continue;
+    nr_dci_bits_t pl{};
+    for (int i = 0; i < len; i++) put(pl, len, i, 1, rng() & 1);
+    const double x = U(rng);
+    if (x < R.corrupt) { out.push_back({pl, s}); continue; }     // every bit random
+    put(pl, len, o.tda, o.tda_bits, (unsigned)tda);
+    put(pl, len, o.mcs, 5, (unsigned)(rng() % 28)); put(pl, len, o.mcs + 5, 1, (unsigned)ndi[p]);
+    int pos = base + c.tb2;
+    const bool sps = x < R.corrupt + R.sps;
+    put(pl, len, pos, c.harq, sps ? 0u : (unsigned)p); pos += c.harq;
+    if (c.dai) put(pl, len, pos, 2, dai);
+    pos += c.dai + 2 + c.tpc2 + 3;
+    if (c.k1) put(pl, len, pos, c.k1, sps ? (unsigned)(rng() % (1u << c.k1)) : (unsigned)bi);
+    out.push_back({pl, s});
+  }
+  return out;
+}
+
+TEST(Dci11Prove, SweepRealistic)
+{
+  int cases = 0, proven = 0, truth_lost = 0, wrong = 0, cases0 = 0, proven0 = 0;
+  const int N = 1200;
+  for (int seed = 1000; seed < 1000 + N; seed++) {
+    std::mt19937 rng(seed);
+    Real R;
+    Cfg &c = R.c;
+    c.tb2 = (rng() % 4 == 0) ? 8 : 0;
+    c.harq = (rng() % 4 == 0) ? 5 : 4;
+    const int dw[] = {0, 2, 2, 4};
+    c.dai = dw[rng() % 4];
+    c.tpc2 = (rng() % 4 == 0) ? 2 : 0;
+    c.k1 = 1 + (int)(rng() % 3);
+    c.ext = (rng() % 3 == 0) ? (int)(rng() % 3) : 0;
+    static const std::vector<int> Ls[] = {{4}, {4, 3}, {1, 2, 3, 4}, {1, 2, 3, 4, 6, 7, 8, 9}};
+    c.L = Ls[c.k1];
+    c.k0_hi = (int)(rng() % 3);
+    R.loss = 0.3 * (double)(rng() % 1000) / 1000.0;
+    R.p10 = 0.3 * (double)(rng() % 1000) / 1000.0;
+    R.lowest_free = rng() % 2;
+    // UL-capable residues: DDDSU (3,4), with the FLEXIBLE slot 2 (2,3,4), or the special slot absent (4); PUCCH on a subset of them
+    const int masks[] = {0x18, 0x1C, 0x10};
+    g_ulmask = masks[rng() % 3];
+    R.pucch_mask = (rng() % 2) ? 0x10 : g_ulmask;
+    if (c.pre_ant() > 63) continue;
+    const int n = 16 + (int)(rng() % 49);
+    const auto v = gen_real(R, n, rng);
+    if ((int)v.size() < 16) { g_ulmask = 0x18; continue; }
+    const Res r = run(c, v);
+    g_ulmask = 0x18;
+    cases++;
+    cases0 += c.ext == 0;
+    bool truth = false;
+    for (const auto &s : r.alive) truth |= is_truth(s, c);
+    if (!truth) { truth_lost++; ADD_FAILURE() << "seed " << seed << " truth refuted: " << dump(r); }
+    if (r.alive.size() == 1 && r.p[0] < 1e-3) { proven++; proven0 += c.ext == 0; if (!is_truth(r.alive[0], c)) { wrong++; ADD_FAILURE() << "seed " << seed << " WRONG proof " << dump(r); } }
+  }
+  g_ulmask = 0x18;
+  printf("realistic sweep: %d configs, %d proven (%.1f %%; ext 0: %d of %d), %d truth refuted, %d wrong proofs\n", cases, proven, 100.0 * proven / cases, proven0, cases0,
+         truth_lost, wrong);
+  EXPECT_GE(cases, 1000);
+  EXPECT_EQ(truth_lost, 0);
+  EXPECT_EQ(wrong, 0);
+}
+
+TEST(Dci11Prove, BenchProveCost)
+{
+  // CPU per proof on the scan consumer, 64 DCIs: one class, and the 16-class cap
+  std::mt19937 rng(31);
+  Cfg c; c.dai = 4; c.k1 = 3; c.L = {1, 2, 3, 4, 6, 7, 8, 9};
+  const auto v = gen_stream(c, NR_DCI11_BANK, rng);
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(c, &l, &o);
+  const auto b = obs_of(v, o.total);
+  nr_dci11_split_t al[NR_DCI11_CORE_MAX]; double cp[NR_DCI11_CORE_MAX];
+  auto now = [] { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; };
+  const int reps = 200;
+  double t0 = now();
+  int na = 0;
+  for (int i = 0; i < reps; i++) na += nr_dci11_prove(&l, &o, b.data(), (int)b.size(), ul_dddsu, al, cp, NR_DCI11_CORE_MAX);
+  const double one = (now() - t0) / reps;
+  printf("prove cost: %.1f us per class (64 DCIs, %d survivors/prove) -> %.1f us for 16 classes\n", one, na / reps, 16 * one);
+  EXPECT_GT(na, 0);
+  EXPECT_LT(one, 20000.0);
 }

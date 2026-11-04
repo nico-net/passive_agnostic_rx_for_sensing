@@ -54,6 +54,8 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
     static const char *const ev[] = {NULL, "bits", "phys", "crc"};
     if (r->layout_evidence >= 1 && r->layout_evidence <= 3) tput(&j, ",\"layout_evidence\":\"%s\"", ev[r->layout_evidence]);
     else tput(&j, ",\"layout_evidence\":null");
+    if (r->fields_evidence >= 1 && r->fields_evidence <= 3) tput(&j, ",\"fields_evidence\":\"%s\"", ev[r->fields_evidence]);
+    else tput(&j, ",\"fields_evidence\":null");
   }
   tput(&j, ",\"layout_checks_ok\":%u,\"layout_checks_fail\":%u", r->layout_checks_ok, r->layout_checks_fail);
   if (r->m.identity_gen < 0 || r->m.dedicated_epoch < 0) tput(&j, ",\"cfg_ref\":null");
@@ -63,7 +65,7 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   L("vrb_prb", vrb_prb); L("tda_index", tda_index); L("k0", k0);
 #undef L
   /* the HARQ-ACK fields of a split proven from bits are exact whatever the rest of the layout is */
-  const bool hq = !nolayout || r->layout_evidence == NR_LAYOUT_EV_BITS;
+  const bool hq = !nolayout || r->fields_evidence == NR_LAYOUT_EV_BITS;
   tint(&j, "k1", hq ? r->k1 : -1); tint(&j, "dai", hq ? r->dai : -1); tint(&j, "tpc", hq ? r->tpc : -1); tint(&j, "pri", hq ? r->pri : -1);
   tint(&j, "srs_req", r->srs_req); tint(&j, "csi_req", r->csi_req); tint(&j, "ulsch_ind", r->ulsch_ind);
   tint(&j, "cbgti", r->cbgti); tint(&j, "retx", nolayout ? -1 : r->retx);
@@ -103,7 +105,7 @@ void nr_sense_emit_decode(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti
 #include <stdatomic.h>
 #include <stdlib.h>
 #define TS_RING 512
-typedef struct { _Atomic uint64_t accepted[4], state[4], cnt[7]; _Atomic uint32_t emit_us[TS_RING]; _Atomic uint32_t w; } traffic_ctr_t;
+typedef struct { _Atomic uint64_t accepted[4], state[4], cnt[9]; _Atomic uint32_t emit_us[TS_RING]; _Atomic uint32_t w; } traffic_ctr_t;
 NR_CELL_STATIC(traffic_ctr_t, g_traffic_ctr)
 #define g_traffic_ctr NR_CELL_REF(g_traffic_ctr)
 
@@ -118,7 +120,7 @@ void nr_traffic_count_dci(int fmt, nr_layout_state_t ls, uint64_t emit_ns)
 
 void nr_traffic_count(int what)
 {
-  if (what >= 0 && what < 7) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
+  if (what >= 0 && what < 9) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
 }
 
 static int cmp_u32(const void *a, const void *b) { const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return (x > y) - (x < y); }
@@ -129,6 +131,8 @@ void nr_traffic_stats_get(nr_traffic_stats_t *s)
   traffic_ctr_t *c = &g_traffic_ctr;
   for (int i = 0; i < 4; i++) { s->accepted[i] = atomic_load_explicit(&c->accepted[i], memory_order_relaxed); s->state[i] = atomic_load_explicit(&c->state[i], memory_order_relaxed); }
   s->dup = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_DUP], memory_order_relaxed);
+  s->e1_changes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_CHANGE], memory_order_relaxed);
+  s->e1_skip_classes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_SKIP], memory_order_relaxed);
   s->traffic_skip = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_SKIP], memory_order_relaxed);
   s->check_decodes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK], memory_order_relaxed);
   s->check_fail = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK_FAIL], memory_order_relaxed);

@@ -4652,15 +4652,13 @@ static int traffic_fdra_bits(int n)
   return b;
 }
 
-/* The DCI's slot in the numbering of the SIB1 TDD pattern (frame * slots_per_frame + slot, as the PDCCH slot gate uses), unwrapped to sit next to the
- * monotonic `mono` (same difference between DCIs): the E1 prover adds K1 offsets to it and asks the pattern about the sum. -1 when unknown. */
-static int64_t traffic_tdd_slot(int64_t mono, int frame, int slot, int spf)
+/* E1: one consistent copy of the TDD pattern per proof (the prover asks the callback thousands of times) */
+static __thread nr_tdd_config_t t_e1_tdd;
+static __thread bool t_e1_tdd_valid;
+static bool e1_ul_capable(int64_t abs_slot, int *known)
 {
-  if (mono < 0 || frame < 0 || slot < 0 || spf <= 0) return -1;
-  const int64_t w = 1024 * (int64_t)spf, f = (int64_t)frame * spf + slot;
-  int64_t d = ((f - mono) % w + w) % w;
-  if (d > w / 2) d -= w;
-  return mono + d >= 0 ? mono + d : -1;
+  if (!t_e1_tdd_valid) { nr_passive_acq_tdd_snapshot(&t_e1_tdd); t_e1_tdd_valid = true; }
+  return nr_passive_acq_tdd_ul_capable_in(&t_e1_tdd, abs_slot, known);
 }
 
 /* DL: out = the grant's reading (1_1: the representative layout), payload/dci_len = its raw bits. Returns the layout state used.
@@ -4700,22 +4698,39 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
   nr_dci_harq_fields_t hf = {-1, -1, -1, -1};
   if (is10 && payload && (out->rnti_class == NR_BLIND_RNTI_CLASS_C || out->rnti_class == NR_BLIND_RNTI_CLASS_TC))
     nr_dci10_harq_fields(*payload, dci_len, (uint16_t)traffic_fdra_bits(c10->n_rb_riv), &hf);
-  else if (!is10 && payload && rep >= 0 && g_dci11_resolver != NULL && rep < (int)__atomic_load_n(&g_dci11_resolver->n_hyp, __ATOMIC_ACQUIRE)) {
-    /* E1: the bank of this C-RNTI's DCI 1_1 payloads (copied, the resolver's tables may change) proves the pre_ant split from bits. */
-    const nr_dci11_layout_t hl = g_dci11_resolver->hyp[rep];
-    const nr_dci11_offsets_t ho = g_dci11_resolver->off[rep];
+  else if (!is10 && payload && g_dci11_resolver != NULL) {
+    /* E1: every C-RNTI DCI 1_1 payload goes into the RNTI's bank, solved or not; the prover (off the receive thread only) proves the HARQ-ACK field split
+     * over the distinct classes of the resolver's alive layouts. The representative layout of a solved RNTI keeps its legacy reading unless E1 proved a
+     * split in that same class. */
+    const bool have_rep = rep >= 0 && rep < (int)__atomic_load_n(&g_dci11_resolver->n_hyp, __ATOMIC_ACQUIRE);
+    nr_dci11_class_t pc;
     nr_dci11_split_t ps;
     bool e1 = false;
     if (out->rnti_class == NR_BLIND_RNTI_CLASS_C) {
-      const int64_t ts = traffic_tdd_slot(abs_slot, frame, slot, fp->slots_per_frame);
+      const int spf = fp->slots_per_frame;
+      const int64_t ts = nr_dci11_tdd_slot(abs_slot, frame, slot, spf);
       if (ts >= 0) {
-        nr_dci11_bank_feed(out->rnti, *payload, dci_len, ts);
-        if (off_rx) nr_dci11_bank_maybe_prove(out->rnti, &hl, &ho, nr_passive_acq_tdd_slot_ul_capable);
+        const nr_dci11_feed_t fd = {.ident = ((uint64_t)nr_cfg_epoch_identity_gen() << 40) | ((uint64_t)(uint16_t)fp->Nid_cell << 24) |
+                                             ((uint64_t)(fp->dl_CarrierFreq / 1000) & 0xFFFFFF),
+                                    .max_gap_slots = (int64_t)(NR_RECONF_INACTIVE_NS / 1000000000ull) * 100 * spf, .max_back_slots = spf};
+        nr_dci11_bank_feed(out->rnti, *payload, dci_len, ts, &fd);
+        if (off_rx) {
+          nr_dci11_class_t cls[NR_DCI11_CLASS_MAX];
+          const int nc = nr_dci11_classes(g_dci11_resolver, cls, NR_DCI11_CLASS_MAX);
+          if (nc < 0) nr_traffic_count(NR_TRAFFIC_CNT_E1_SKIP);
+          else if (nc > 0) {
+            t_e1_tdd_valid = false;
+            if (nr_dci11_bank_maybe_prove(out->rnti, cls, nc, e1_ul_capable)) nr_traffic_count(NR_TRAFFIC_CNT_E1_CHANGE);
+          }
+        }
       }
-      e1 = nr_dci11_bank_proven(out->rnti, &hl, &ho, &ps);
+      e1 = nr_dci11_bank_proven_any(out->rnti, &pc, &ps);
+      if (e1 && have_rep && !nr_dci11_class_same(&pc.l, &pc.o, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep])) e1 = false;
     }
-    nr_dci11_harq_fields_proven(*payload, dci_len, &hl, &ho, e1 ? &ps : NULL, &hf);
+    if (e1) nr_dci11_harq_fields_proven(*payload, dci_len, &pc.l, &pc.o, &ps, &hf);
+    else if (have_rep) nr_dci11_harq_fields(*payload, dci_len, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep], &hf);
     r.layout_evidence = ls == NR_LAYOUT_SOLVED ? NR_LAYOUT_EV_CRC : e1 ? NR_LAYOUT_EV_BITS : NR_LAYOUT_EV_NONE;
+    r.fields_evidence = e1 ? NR_LAYOUT_EV_BITS : (ls == NR_LAYOUT_SOLVED && hf.k1 + hf.dai + hf.tpc + hf.pri > -4) ? NR_LAYOUT_EV_CRC : NR_LAYOUT_EV_NONE;
   }
   r.dai = hf.dai; r.tpc = hf.tpc; r.pri = hf.pri; r.k1 = hf.k1;
   r.retx = no_harq ? -1 : (int8_t)nr_traffic_retx(0, out->rnti, out->harq_pid, out->ndi);

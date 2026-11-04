@@ -212,6 +212,7 @@ int main(int argc,char **argv) { logInit(); testing::InitGoogleTest(&argc,argv);
 TEST(AcqStateTdd, PdschLastSymbolsNeedTheSib1PatternAndItsNumerology)
 {
   int8_t last[33];
+  { int k = 1; EXPECT_FALSE(nr_passive_acq_tdd_slot_ul_capable(5, &k)); EXPECT_EQ(k, 0); } /* E1: no pattern = unknown, never "UL" */
   EXPECT_FALSE(nr_passive_acq_tdd_pdsch_last_symbols(7, 1, 33, last)); /* nothing from SIB1: no exclusion (NSA, phy-test) */
   nr_tdd_pattern_t p1{};
   p1.period_slots = 10; p1.dl_slots = 7; p1.dl_symbols = 6; p1.ul_symbols = 4; p1.ul_slots = 2;
@@ -236,4 +237,27 @@ TEST(AcqStateTdd, FlexibleSlotsAreMonitored)
     EXPECT_TRUE(nr_passive_acq_tdd_slot_has_downlink(s)) << s;
   EXPECT_FALSE(nr_passive_acq_tdd_slot_has_downlink(8));
   EXPECT_FALSE(nr_passive_acq_tdd_slot_has_downlink(9));
+}
+
+/* E1 K1 test: UL-capable = anything but pure DL (UL, MIXED, FLEXIBLE); unknown pattern / negative slot = not known. */
+TEST(AcqStateTdd, UlCapableIsEverythingButPureDl)
+{
+  nr_tdd_pattern_t p1{};
+  p1.period_slots = 10; p1.dl_slots = 3; p1.dl_symbols = 6; p1.ul_symbols = 4; p1.ul_slots = 2;   // D D D S F F F F U U
+  nr_tdd_config_t t{};
+  ASSERT_TRUE(nr_tdd_config_init(&t, &p1, nullptr));
+  const bool expect[10] = {false, false, false, true /*MIXED*/, true, true, true, true /*FLEXIBLE*/, true, true /*UL*/};
+  for (int s = 0; s < 30; s++) {
+    int known = 0;
+    EXPECT_EQ(nr_passive_acq_tdd_ul_capable_in(&t, s, &known), expect[s % 10]) << s;
+    EXPECT_EQ(known, 1) << s;
+  }
+  int known = 1;
+  EXPECT_FALSE(nr_passive_acq_tdd_ul_capable_in(&t, -1, &known)); EXPECT_EQ(known, 0);
+  nr_tdd_config_t none{};
+  EXPECT_FALSE(nr_passive_acq_tdd_ul_capable_in(&none, 8, &known)); EXPECT_EQ(known, 0);
+  EXPECT_FALSE(nr_passive_acq_tdd_ul_capable_in(nullptr, 8, &known)); EXPECT_EQ(known, 0);
+  // the process-wide form follows the SIB1 pattern
+  nr_passive_acq_note_sib1_tdd(&p1, nullptr);
+  for (int s = 0; s < 10; s++) { known = 0; EXPECT_EQ(nr_passive_acq_tdd_slot_ul_capable(s, &known), expect[s]) << s; EXPECT_EQ(known, 1); }
 }
