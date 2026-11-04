@@ -4195,3 +4195,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4657	t_e1_tdd_valid	tls
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1275	g_cdmrs_skipq	file_static	nr_admit_skipq_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC; S1 skip backlog of the class worker of one cell
 openair1/PHY/TOOLS/nr_admit.c	11	g_cls	file_static	struct {}[ADMIT_CELLS][NR_ADMIT_N]	PER_CELL	B3	S1 per-class admission counters, one row per cell (cur_cell(), atomics)
 openair1/PHY/TOOLS/nr_admit.c	133	nr_admit_stats::nm	func_static	const char *const[NR_ADMIT_N]	CONST	B3	auto
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	155	t_slotbuf_key	tls	int64_t	TLS	TRAFFIC	E3: key of the slot held in t_slotbuf (scan consumer thread)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	156	t_slotbuf_done	tls	uint16_t	TLS	TRAFFIC	E3: symbols already FEP'd into t_slotbuf for that slot (scan consumer thread)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4838	g_e3	file_static	e3_cell_t [converted]	PER_CELL	TRAFFIC	E3: scoring and Qm CPU budgets and per-RNTI rate limits of one cell
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4838	g_e3_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	E3: guards g_e3
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4866	t_e3g	tls	e3_grid_t	TLS	TRAFFIC	E3: carrier grid and noise estimate of the slot being scored (scan consumer thread)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	154	t_slotbuf	tls	c16_t *	TLS	TRAFFIC	E3: per-thread slot FFT buffer shared by the DM-RS fit and the E3 scorer (scan consumer thread)
