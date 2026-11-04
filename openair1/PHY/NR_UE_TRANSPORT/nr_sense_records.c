@@ -330,6 +330,7 @@ void nr_sense_emit_rs(nr_sense_src_t src, const nr_sense_rs_meta_t *in, uint64_t
       (!m.srs_attribution || strnlen(m.srs_attribution,256)<256)) {
     if (nr_sense_push_rs_binary(src,&m,frame_id)>=0) return;
   }
+  if (m.want_q) nr_sense_q_miss_note(); /* JSON fallback: formatted here without quality */
   const uint64_t t_rec=nr_sense_now_ns();
   char line[3072];
   if (nr_sense_rs_to_json(src,&m,frame_id,line,sizeof line)>0) nr_sense_push_record(line);

@@ -6,7 +6,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "nr_sense_quality.h" /* NR_SENSE_MAX_PRB, NR_SENSE_PRB_RECON_MIN */
+#include "nr_blind_stats.h"   /* nbs_binom_sf: exact binomial tail */
+#include "nr_sense_quality.h" /* NR_SENSE_MAX_PRB, NR_SENSE_PRB_RECON_ALPHA */
 
 /* Per-RE symbol accuracy of a data-aided reconstruction (spec 4(d)).
  *
@@ -26,15 +27,38 @@
  * cross-checked against the unit implied by the symbols' mean energy (the modulator normalises to unit mean energy): a mismatch > 15 %
  * or too few symbols (< 64, < 256 for 256QAM, so the innermost level is present) gives NAN and no PRB verdicts.
  *
+ * PER-PRB VERDICT IS RELATIVE (spec 4(d)), not an absolute agreement level. CRC passes at low code rate with raw symbol agreement far below 1,
+ * so a fixed threshold would remove good PRBs. Instead each RE has an EXPECTED success probability from the record's SNR and Qm, and a PRB
+ * fails only when its agreement is significantly BELOW the expectation:
+ *   gamma      = Es/N0 of the data REs = the record's post-estimation SNR (snr_db, linear) minus the DM-RS boost (the caller subtracts
+ *                TS 38.214 Table 4.1-1: 0 / 3 / 4.77 dB for 1 / 2 / 3 CDM groups); no array gain is assumed (conservative).
+ *   gamma_i    = gamma / (1 + |X_i|^2 / sum_w)   the local estimate Hs has variance N / sum_w (sum_w = sum of the window's |X_n|^2, pairs counted
+ *                twice), which adds |X_i|^2 N / sum_w to the equalised noise (first order). Edge subcarriers and edge symbols have fewer
+ *                pairs, hence a larger penalty, so they are not punished for the noisier local estimate.
+ *   P_axis     = 2 (1 - 1/sqrt(M)) Q( sqrt(3 gamma_i / (M - 1)) ),  p_i = (1 - P_axis)^2           (square M-QAM, AWGN, nearest-level decision;
+ *                Proakis, Digital Communications 5th ed., eq. 4.3-30 and 4.3-31; Goldsmith, Wireless Communications, eq. 6.23; Q(x) = erfc(x/sqrt 2)/2)
+ *   test       = with n scored REs, m agreements and pbar = mean p_i:  P(Binomial(n, 1-pbar) >= n-m) < NR_SENSE_PRB_RECON_ALPHA (1e-3)  => fail
+ *                (exact lower tail of the agreement count, nbs_binom_sf; the Poisson-binomial is approximated by the binomial with the same mean, which
+ *                has the larger variance, i.e. the test errs towards keeping a PRB).
+ * A low-SNR record has a low expectation and is NOT rejected for being low SNR; a wrong channel model or interference decides near chance
+ * and is rejected whenever the expectation is clearly above chance. snr_db NaN gives NAN and no verdicts (validity unchanged).
+ *
  * h: antenna-major complex float H = Y/X, stride in complex REs. k/l: subcarrier (absolute) and symbol of each RE, REs ordered symbol by
  * symbol with k ascending (the data-aided enumeration). x: interleaved int16 (re,im) of the re-encoded symbols, RE ordinal i <-> x[2i].
- * ok_abs (out, (NR_SENSE_MAX_PRB+7)/8 bytes): bit p = PRB p passes (>= 6 scored REs and agreement >= NR_SENSE_PRB_RECON_MIN).
- * Returns the grant-level agreement (all scored REs), NAN when not computable. Stack use < 2 KB. */
+ * ok_abs (out, (NR_SENSE_MAX_PRB+7)/8 bytes): bit p = PRB p passes (>= 6 scored REs and not significantly below expectation).
+ * scored_out (optional): number of scored REs. Returns the grant-level agreement (all scored REs), NAN when not computable. Stack use < 2 KB. */
+/* Backlog bound of the data-aided worker pool: skip the recon when at least half the pool is in flight. */
+static inline bool nr_da_recon_skip(unsigned in_flight, unsigned pool) { return pool && 2u * in_flight >= pool; }
 #define NR_DA_RECON_MAXSYM 16
 static inline float nr_da_recon(const float *h, uint32_t stride, uint32_t nant, const uint32_t *k, const uint32_t *l, uint32_t n,
-                                const int16_t *x, uint32_t qm, uint8_t ok_abs[(NR_SENSE_MAX_PRB + 7) / 8])
+                                const int16_t *x, uint32_t qm, float snr_db, uint8_t ok_abs[(NR_SENSE_MAX_PRB + 7) / 8],
+                                uint32_t *scored_out)
 {
   memset(ok_abs, 0, (NR_SENSE_MAX_PRB + 7) / 8);
+  if (scored_out)
+    *scored_out = 0;
+  if (!(snr_db > -40.0f && snr_db < 100.0f))
+    return NAN;
   if (qm < 2 || (qm & 1) || qm > 8 || nant < 1 || n < (qm >= 8 ? 256u : 64u))
     return NAN;
   if (nant > 8)
@@ -55,6 +79,7 @@ static inline float nr_da_recon(const float *h, uint32_t stride, uint32_t nant, 
     return NAN;
   const float u = (float)umin;
   const int maxlev = M - 1;
+  const double gamma = pow(10.0, snr_db / 10.0), qam_m = (double)M * M;
   struct { uint32_t b, e; uint32_t l; } sp[NR_DA_RECON_MAXSYM];
   int ns = 0;
   for (uint32_t i = 0; i < n;) {
@@ -65,6 +90,7 @@ static inline float nr_da_recon(const float *h, uint32_t stride, uint32_t nant, 
     i = j;
   }
   uint16_t seen[NR_SENSE_MAX_PRB] = {0}, match[NR_SENSE_MAX_PRB] = {0};
+  float pexp[NR_SENSE_MAX_PRB] = {0};
   for (int s = 0; s < ns; s++) {
     const int up = (s > 0 && sp[s - 1].l + 1 == sp[s].l) ? s - 1 : -1, dn = (s + 1 < ns && sp[s].l + 1 == sp[s + 1].l) ? s + 1 : -1;
     for (uint32_t i = sp[s].b; i < sp[s].e; i++) {
@@ -111,6 +137,11 @@ static inline float nr_da_recon(const float *h, uint32_t stride, uint32_t nant, 
       lr = lr > maxlev ? maxlev : (lr < -maxlev ? -maxlev : lr);
       li = li > maxlev ? maxlev : (li < -maxlev ? -maxlev : li);
       const int xr = 2 * (int)floor((double)x[2 * i] / u / 2.0) + 1, xi = 2 * (int)floor((double)x[2 * i + 1] / u / 2.0) + 1;
+      {
+        const double gi = gamma / (1.0 + ((double)x[2 * i] * x[2 * i] + (double)x[2 * i + 1] * x[2 * i + 1]) / den);
+        const double pax = 2.0 * (1.0 - 1.0 / (double)M) * 0.5 * erfc(sqrt(3.0 * gi / (qam_m - 1.0)) / sqrt(2.0));
+        pexp[p] += (float)((1.0 - pax) * (1.0 - pax));
+      }
       seen[p]++;
       match[p] += (lr == xr && li == xi);
     }
@@ -118,8 +149,12 @@ static inline float nr_da_recon(const float *h, uint32_t stride, uint32_t nant, 
   uint32_t S = 0, Mt = 0;
   for (uint32_t p = 0; p < NR_SENSE_MAX_PRB; p++) {
     S += seen[p]; Mt += match[p];
-    if (seen[p] >= 6 && (float)match[p] >= NR_SENSE_PRB_RECON_MIN * (float)seen[p]) ok_abs[p >> 3] |= (uint8_t)(1u << (p & 7));
+    if (seen[p] < 6) continue;
+    const double pbar = (double)pexp[p] / seen[p];
+    if (nbs_binom_sf(seen[p] - match[p], seen[p], 1.0 - pbar) >= NR_SENSE_PRB_RECON_ALPHA) ok_abs[p >> 3] |= (uint8_t)(1u << (p & 7));
   }
+  if (scored_out)
+    *scored_out = S;
   return S ? (float)Mt / (float)S : NAN;
 }
 #endif

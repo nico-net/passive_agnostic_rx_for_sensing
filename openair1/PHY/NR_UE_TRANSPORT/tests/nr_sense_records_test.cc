@@ -683,3 +683,17 @@ TEST(SenseRecordsS3, ProducersNeverBlockWhenTheWriterStalls)
   EXPECT_GT(st.rec_dropped,0u);
   nr_sense_test_pause_writer(false);
 }
+
+TEST(SenseRecordsS3, JsonFallbackRecordCountsAsQualityMiss)
+{
+  const S3Cfr c=s3_cfr(20,4.f);
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  S3Sink sink;
+  std::string longname(300,'x');   /* >= 256: the binary job path is unavailable, the record is formatted on the pushing thread */
+  nr_sense_rs_meta_t m=s3_meta(0,7); m.csirs_resource=longname.c_str();
+  const uint64_t id=nr_sense_push_cfr(NR_SENSE_SRC_CSIRS,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),42,0,1.f,0,0,nullptr);
+  nr_sense_emit_rs(NR_SENSE_SRC_CSIRS,&m,id);
+  nr_sense_stats_t st; nr_sense_stats(&st);
+  EXPECT_EQ(st.q_miss,1u);
+  nr_sense_close();
+}

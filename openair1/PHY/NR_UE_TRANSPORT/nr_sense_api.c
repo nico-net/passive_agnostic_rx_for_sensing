@@ -602,6 +602,9 @@ void nr_sense_async_note(nr_sense_src_t src, int queued)
   __atomic_fetch_add(queued ? &stats.async_queued[src] : &stats.async_dropped[src], 1, __ATOMIC_RELAXED);
 }
 
+void nr_sense_recon_skip_note(void) { __atomic_fetch_add(&stats.recon_skip, 1, __ATOMIC_RELAXED); }
+void nr_sense_q_miss_note(void) { pthread_mutex_lock(&mu); stats.q_miss++; pthread_mutex_unlock(&mu); }
+
 void nr_sense_stats(nr_sense_stats_t *out)
 {
   if (!out) return;

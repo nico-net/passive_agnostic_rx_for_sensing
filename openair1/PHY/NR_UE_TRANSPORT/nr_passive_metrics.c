@@ -299,6 +299,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   if (nr_sense_stats) {
     nr_sense_stats_t sense;
     nr_sense_stats(&sense);
+    m->sense_recon_skip = sense.recon_skip;
     for (int source = 0; source < NR_SENSE_SRC_COUNT; ++source) {
       m->sense_cfr_drop += sense.cfr_dropped[source];
       m->sense_cfr_drop_src[source] = sense.cfr_dropped[source];

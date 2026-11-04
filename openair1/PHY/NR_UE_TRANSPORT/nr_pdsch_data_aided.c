@@ -168,6 +168,7 @@ static uint32_t da_tap_G(const fapi_nr_dl_cw_info_t *cw, const fapi_nr_dl_config
   return nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len, 0, cw->qamModOrder, cw->Nl);
 }
 
+static bool da_recon_backlogged(void);
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
                                      const fapi_nr_dl_cw_info_t *cw,
@@ -512,9 +513,15 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     rs_meta.prg_valid = prg >= 0;
     rs_meta.prg_size = prg >= 0 ? prg : 0;
     if (nl == 1 && mod_idx == nof_re) { /* RE ordinal i <-> mod_syms[i] only when no RE was skipped */
-      rs_meta.q.recon_conf = nr_da_recon(isac_h, isac_max_re, isac_nof_ant, isac_k, isac_l, nof_re, (const int16_t *)mod_syms, cw->qamModOrder,
-                                         rs_meta.recon_prb_ok);
-      rs_meta.recon_valid = rs_meta.q.recon_conf == rs_meta.q.recon_conf;
+      if (da_recon_backlogged()) { /* bound by backlog only (no RE cap: big grants are the most valuable): recon_conf null, validity unchanged */
+        nr_sense_recon_skip_note();
+      } else {
+        /* data Es/N0 = the DM-RS post-estimation SNR minus the DM-RS power boost of the CDM groups without data (TS 38.214 Table 4.1-1) */
+        const float boost_db = dlsch_config->n_dmrs_cdm_groups >= 3 ? 4.77f : (dlsch_config->n_dmrs_cdm_groups == 2 ? 3.0f : 0.0f);
+        rs_meta.q.recon_conf = nr_da_recon(isac_h, isac_max_re, isac_nof_ant, isac_k, isac_l, nof_re, (const int16_t *)mod_syms, cw->qamModOrder,
+                                           rs_meta.snr_valid ? rs_meta.snr_db - boost_db : NAN, rs_meta.recon_prb_ok, NULL);
+        rs_meta.recon_valid = rs_meta.q.recon_conf == rs_meta.q.recon_conf;
+      }
     }
   }
   /* the demodulator's noise estimate in the units of the exported |Y/X|^2; 0 = none measured (prints null) */
@@ -650,6 +657,13 @@ typedef struct {
 } da_qs_t;
 NR_CELL_STATIC(da_qs_t, g_da_qs)
 #define g_da_qs NR_CELL_REF(g_da_qs)
+/* recon runs on a daBg worker only and is shed when the backlog (jobs in the pool = queued + running) is at least half the pool */
+static bool da_recon_backlogged(void)
+{
+  if (!da_on_worker)
+    return false;
+  return nr_da_recon_skip((unsigned)(DA_POOL - __builtin_popcount(__atomic_load_n(&g_da.free_mask, __ATOMIC_RELAXED))), DA_POOL);
+}
 static const char *const da_wname[DA_NW_MAX] = {"daBg0", "daBg1", "daBg2", "daBg3"};
 
 /* workers: the load at the design point over a planned share of a core, capped by the background lane's cores shared by every cell of the process */

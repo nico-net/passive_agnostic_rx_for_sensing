@@ -8,12 +8,10 @@ extern "C" {
 /* Provisional (spec §9.1): set only from general principles or sens6 lab references, never from DEIB/OTA cells. */
 #define NR_SENSE_PRB_SNR_MIN_DB 3.0f
 #define NR_SENSE_PRB_RESID_MAX 0.25f
-/* Spec 4(d), data-aided only: a PRB passes when at least this share of its data REs have a hard decision (of the locally equalised symbol)
- * equal to the CRC-verified re-encoded symbol. Provisional, from general principles: with a wrong channel model (precoder/PRG mismatch,
- * interference) the decision is close to random, agreement ~1/M per axis pair (<= 0.25 for 16QAM and above, 0.5 for QPSK at best), while a
- * model-consistent PRB at the SNR where the CRC still passes agrees on a clear majority; 0.5 separates "model fails" from "noisy".
- * To be calibrated on sens6 references (spec 9.1), never per cell. */
-#define NR_SENSE_PRB_RECON_MIN 0.5f
+/* Spec 4(d), data-aided only: a PRB fails the reconstruction check when its symbol agreement is SIGNIFICANTLY BELOW the agreement expected from the
+ * record's own SNR and Qm (one-sided exact binomial tail < alpha, nr_pdsch_da_recon.h). alpha is a false-reject bound, not a calibrated level;
+ * there is no absolute agreement threshold. */
+#define NR_SENSE_PRB_RECON_ALPHA 1e-3
 typedef struct {
   uint16_t allocated_prbs, estimated_usable_prbs, valid_cfr_prbs;
   uint8_t valid_mask[(NR_SENSE_MAX_PRB + 7) / 8]; /* bit p = PRB (k_abs/12 - first_prb) valid */
