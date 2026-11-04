@@ -532,6 +532,102 @@ TEST(Dci11Prove, SolvedRntiProvesInItsOwnClassWhateverTheResolverHolds)
   nr_dci11_bank_reset();
 }
 
+TEST(Dci11Prove, EmitRuleScopedUnscopedAndLength)
+{
+  nr_dci11_layout_t la, lb; nr_dci11_offsets_t oa, ob;
+  Cfg c13, c14; c14.k1 = 3;
+  make_layout(c13, &la, &oa); make_layout(c14, &lb, &ob);
+  const nr_dci11_class_t pc = cls_of(la, oa);
+  const uint16_t len = oa.total;
+  // unsolved (no rep): scoped never, unscoped only with a usable current set
+  EXPECT_FALSE(nr_dci11_emit_ok(true, true, len, &pc, nullptr, nullptr, true));       // D1: solve -> prove -> unsolve -> no emission
+  EXPECT_TRUE(nr_dci11_emit_ok(true, false, len, &pc, nullptr, nullptr, true));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, false, len, &pc, nullptr, nullptr, false));
+  // solved: scoped only while the rep still has the stored class; unscoped also needs the same class under a rep
+  EXPECT_TRUE(nr_dci11_emit_ok(true, true, len, &pc, &la, &oa, false));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, true, len, &pc, &lb, &ob, true));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, false, len, &pc, &lb, &ob, true));
+  EXPECT_TRUE(nr_dci11_emit_ok(true, false, len, &pc, &la, &oa, true));
+  // D4: a DCI of another length is never read with this class
+  EXPECT_FALSE(nr_dci11_emit_ok(true, true, (uint16_t)(len + 1), &pc, &la, &oa, true));
+  EXPECT_FALSE(nr_dci11_emit_ok(true, false, (uint16_t)(len - 1), &pc, nullptr, nullptr, true));
+  EXPECT_FALSE(nr_dci11_emit_ok(false, false, len, &pc, &la, &oa, true));
+}
+
+TEST(Dci11Prove, SolvedProofSurvivesTheUnsolvedClassSetChurn)
+{
+  // D3: an unsolved look that finds no usable class set drops the UNSCOPED proofs only; the solved RNTI keeps its own-class proof
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  nr_dci11_budget_reset();
+  std::mt19937 rng(28);
+  Cfg c;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(c, &l, &o);
+  const nr_dci11_class_t own = cls_of(l, o);
+  nr_dci11_resolver_t *r = (nr_dci11_resolver_t *)calloc(1, sizeof *r);
+  r->hyp[0] = l; r->off[0] = o; r->alive[0] = true; r->n_hyp = 1; r->n_alive = 1;
+  const uint16_t solved = 0x4701, unsolved = 0x4702, other = 0x4703;
+  feed_all(solved, gen_stream(c, 64, rng), o.total);
+  feed_all(unsolved, gen_stream(c, 64, rng), o.total);
+  int tot = 0;
+  EXPECT_TRUE(nr_dci11_bank_service(solved, r, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);
+  EXPECT_TRUE(nr_dci11_bank_service(unsolved, r, nullptr, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);
+  nr_dci11_class_t pc; nr_dci11_split_t ps; bool scoped = false;
+  ASSERT_TRUE(nr_dci11_bank_proven_scope(solved, &pc, &ps, &scoped)); EXPECT_TRUE(scoped);
+  ASSERT_TRUE(nr_dci11_bank_proven_scope(unsolved, &pc, &ps, &scoped)); EXPECT_FALSE(scoped);
+  // the resolver widens to 20 classes and keeps narrowing: every unsolved look finds TOO_MANY
+  for (int i = 1; i < 21; i++) { r->hyp[i] = l; r->off[i] = o; r->off[i].mcs = (uint16_t)(o.mcs + i); r->alive[i] = true; }
+  r->n_hyp = 21; r->n_alive = 21;
+  for (int k = 0; k < 3; k++) {
+    feed_all(other, gen_stream(c, 16, rng, 100000 + 1000 * k), o.total);
+    const unsigned fl = nr_dci11_bank_service(other, r, nullptr, ul_dddsu, &tot);
+    EXPECT_TRUE(fl & NR_DCI11_SVC_SKIPPED);
+    EXPECT_GE(tot, 16);                                            // histogram input: more than 16 classes
+    r->alive[20 - k] = false; r->n_alive--;                       // n_alive changes between looks
+  }
+  EXPECT_TRUE(nr_dci11_bank_proven_scope(solved, &pc, &ps, &scoped));    // still there
+  EXPECT_FALSE(nr_dci11_bank_proven_scope(unsolved, &pc, &ps, &scoped)); // the unscoped one went with the set
+  // a scoped proof is replaced, not carried, by an unscoped look of the same RNTI that cannot prove (set unusable): it drops at that look
+  free(r);
+  nr_dci11_bank_reset();
+}
+
+static uint64_t g_fake_t = 0;
+static uint64_t fake_clock(void) { const uint64_t v = g_fake_t; g_fake_t += 15000000ull; return v; }   // every reading advances 15 ms
+
+TEST(Dci11Prove, ProveBudgetDefersAndIsCounted)
+{
+  // 20 ms per second of wall time per cell: each service reads the clock twice (start, end) and is charged the difference (15 ms here), so two looks fit and
+  // the third is held back; it stays due and is counted once; a new window lets it run
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  nr_dci11_budget_reset();
+  g_fake_t = 1000000000ull;
+  nr_dci11_set_clock(fake_clock);
+  std::mt19937 rng(29);
+  Cfg c;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(c, &l, &o);
+  const nr_dci11_class_t own = cls_of(l, o);
+  uint16_t rn[3] = {0x4711, 0x4712, 0x4713};
+  for (uint16_t r : rn) feed_all(r, gen_stream(c, 64, rng), o.total);
+  int tot;
+  EXPECT_TRUE(nr_dci11_bank_service(rn[0], nullptr, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);   // spent 15 ms
+  EXPECT_TRUE(nr_dci11_bank_service(rn[1], nullptr, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);   // spent 30 ms (a look that starts under budget may overshoot)
+  unsigned fl = nr_dci11_bank_service(rn[2], nullptr, &own, ul_dddsu, &tot);
+  EXPECT_EQ(fl, (unsigned)NR_DCI11_SVC_DEFERRED);                      // over budget: held back, counted
+  EXPECT_TRUE(nr_dci11_bank_due(rn[2]));                                // and still due
+  EXPECT_EQ(nr_dci11_bank_service(rn[2], nullptr, &own, ul_dddsu, &tot), 0u);   // counted once per episode, not per accept
+  EXPECT_TRUE(nr_dci11_bank_due(rn[2]));
+  g_fake_t += 2000000000ull;                                            // two seconds later: a fresh window
+  EXPECT_TRUE(nr_dci11_bank_service(rn[2], nullptr, &own, ul_dddsu, &tot) & NR_DCI11_SVC_CHANGED);
+  EXPECT_FALSE(nr_dci11_bank_due(rn[2]));
+  nr_dci11_set_clock(nullptr);
+  nr_dci11_budget_reset();
+  nr_dci11_bank_reset();
+}
+
 TEST(Dci11Prove, ChangedClassSetIsRecomputedOnlyWhenItChanges)
 {
   // the cache key is (resolver, n_hyp, n_alive, n_truncated): another alive count is a fresh scan, the same one is not

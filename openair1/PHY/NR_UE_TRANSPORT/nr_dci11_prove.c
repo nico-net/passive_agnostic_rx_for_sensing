@@ -3,6 +3,8 @@
 #include "common/utils/nr_cell.h"
 #include "nr_blind_stats.h"
 #include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
 #include <string.h>
 
 #define NSW_EXT 6          /* ONESHOT .. ENHT3 in nr_dci11_switch_t order */
@@ -359,10 +361,13 @@ typedef struct {
   int64_t last_slot;
   uint8_t head, cnt;
   nr_dci11_obs_t obs[NR_DCI11_BANK];
-  bool proven;
+  bool proven, scoped, deferred;   /* scoped: proved within a CRC-solved RNTI's own class only (not unique over the resolver's set); deferred: counted as budget-deferred since the last look */
   nr_dci11_class_t cls;
   nr_dci11_split_t split;
 } bank_t;
+/* ring generation: process-wide and never reset (a reset of the bank must not let a proof taken before it match a ring created after it) */
+static _Atomic uint32_t g_ring_rev;
+static uint32_t next_rev(void) { return atomic_fetch_add_explicit(&g_ring_rev, 1, memory_order_relaxed) + 1u; }
 typedef struct { bank_t e[BANK_RNTIS]; uint64_t tick, ident; } bank_tab_t;
 NR_CELL_STATIC(bank_tab_t, g_bank)
 #define g_bank NR_CELL_REF(g_bank)
@@ -393,7 +398,7 @@ void nr_dci11_bank_feed(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, int6
     memset(b, 0, sizeof *b);
     b->used = true;
     b->rnti = rnti;
-    b->rev = (uint32_t)++g_bank.tick;
+    b->rev = next_rev();
   } else if (f && b->cnt && (abs_slot < b->last_slot - f->max_back_slots || abs_slot > b->last_slot + f->max_gap_slots)) {
     /* silent for longer than the UE-context expiry, or the clock went back: the RNTI may belong to another UE now, or to another run */
     const uint8_t keep_used = b->used;
@@ -401,7 +406,7 @@ void nr_dci11_bank_feed(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, int6
     memset(b, 0, sizeof *b);
     b->used = keep_used;
     b->rnti = keep_rnti;
-    b->rev = (uint32_t)++g_bank.tick;
+    b->rev = next_rev();
   }
   b->tick = ++g_bank.tick;
   if (!b->cnt || abs_slot > b->last_slot) b->last_slot = abs_slot;
@@ -422,7 +427,7 @@ bool nr_dci11_bank_due(uint16_t rnti)
   return due;
 }
 
-bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int ncls, nr_ul_slot_fn ul)
+static bool bank_prove_impl(uint16_t rnti, const nr_dci11_class_t *cls, int ncls, nr_ul_slot_fn ul, bool scoped)
 {
   if (ncls > NR_DCI11_CLASS_MAX) return false;
   nr_dci11_obs_t snap[NR_DCI11_BANK];   /* copy under the cell lock, prove outside it */
@@ -436,6 +441,7 @@ bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int n
   if (!bank_due_locked(b)) { pthread_mutex_unlock(&g_bank_mu); return false; }
   if (!cls || ncls <= 0) {   /* a skipped round (no usable class set): look again after 16 more */
     b->proved_at = b->fed;
+    b->deferred = false;
     pthread_mutex_unlock(&g_bank_mu);
     return false;
   }
@@ -443,7 +449,7 @@ bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int n
   fed = b->fed;
   rev = b->rev;
   for (int i = 0; i < n; i++) snap[i] = b->obs[(b->head + NR_DCI11_BANK - n + i) % NR_DCI11_BANK];
-  if (b->proven) { was = true; prev = sig_of(&b->cls, &b->split); }
+  if (b->proven && b->scoped == scoped) { was = true; prev = sig_of(&b->cls, &b->split); }   /* a proof of the other kind of look is not carried over */
   pthread_mutex_unlock(&g_bank_mu);
 
   /* survivors over every class: distinct readings (absolute positions), the first one kept. A class the prover cannot examine (-1) is AMBIGUOUS, not refuted. */
@@ -477,12 +483,13 @@ bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int n
   bool changed = false;
   if (b && b->rev == rev) {
     b->proved_at = fed <= b->fed ? fed : b->fed;
+    b->deferred = false;
     if (was && b->proven && prev_alive && !multi) {
       /* HYSTERESIS: a proof stands until the data refute it; losing significance in a later look is not a refutation. A surviving rival (multi) is
        * ambiguity and ends it. */
     } else if (proven_now) {
       changed = !b->proven || memcmp(&first_sig, &prev, sizeof prev) != 0;
-      b->proven = true; b->cls = first_c; b->split = first_s;
+      b->proven = true; b->scoped = scoped; b->cls = first_c; b->split = first_s;
     } else if (b->proven) {
       b->proven = false;
       changed = true;
@@ -492,15 +499,25 @@ bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int n
   return changed;
 }
 
-bool nr_dci11_bank_proven_any(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out)
+bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int ncls, nr_ul_slot_fn ul)
+{
+  return bank_prove_impl(rnti, cls, ncls, ul, false);
+}
+
+bool nr_dci11_bank_proven_scope(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out, bool *scoped)
 {
   if (!cls || !out) return false;
   pthread_mutex_lock(&g_bank_mu);
   const bank_t *b = bank_find(rnti);
   const bool ok = b && b->proven;
-  if (ok) { *cls = b->cls; *out = b->split; }
+  if (ok) { *cls = b->cls; *out = b->split; if (scoped) *scoped = b->scoped; }
   pthread_mutex_unlock(&g_bank_mu);
   return ok;
+}
+
+bool nr_dci11_bank_proven_any(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out)
+{
+  return nr_dci11_bank_proven_scope(rnti, cls, out, NULL);
 }
 
 bool nr_dci11_bank_proven(uint16_t rnti, const nr_dci11_layout_t *l, const nr_dci11_offsets_t *o, nr_dci11_split_t *out)
@@ -513,7 +530,7 @@ bool nr_dci11_bank_proven(uint16_t rnti, const nr_dci11_layout_t *l, const nr_dc
 static void bank_clear_proofs(void)
 {
   pthread_mutex_lock(&g_bank_mu);
-  for (int i = 0; i < BANK_RNTIS; i++) g_bank.e[i].proven = false;
+  for (int i = 0; i < BANK_RNTIS; i++) if (!g_bank.e[i].scoped) g_bank.e[i].proven = false;   /* a solved RNTI's scoped proof belongs to its known layout, not to this set */
   pthread_mutex_unlock(&g_bank_mu);
 }
 
@@ -558,7 +575,7 @@ int nr_dci11_class_set(const nr_dci11_resolver_t *r, nr_dci11_class_t *out, bool
   g_cls.ncls = st > 0 ? st : 0;
   if (st > 0) memcpy(g_cls.cls, tmp, (size_t)st * sizeof tmp[0]);
   pthread_mutex_unlock(&g_cls_mu);
-  if (st <= 0) bank_clear_proofs();   /* no usable class set: every stored reading is stale until a fresh proof */
+  if (st <= 0) bank_clear_proofs();   /* no usable class set: every reading proved over a set is stale until a fresh proof (scoped ones are not) */
   if (total) *total = tot;
   if (out && st > 0) memcpy(out, tmp, (size_t)st * sizeof tmp[0]);
   return st;
@@ -581,4 +598,82 @@ int64_t nr_dci11_tdd_slot(int64_t mono, int frame, int slot, int spf)
   int64_t d = ((f - mono) % w + w) % w;
   if (d > w / 2) d -= w;
   return mono + d >= 0 ? mono + d : -1;
+}
+
+/* ---- CPU budget and the service entry the scan consumer calls ---- */
+static uint64_t clock_real(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+static uint64_t (*g_clock)(void) = clock_real;   /* test hook only (process-wide) */
+void nr_dci11_set_clock(uint64_t (*fn)(void)) { g_clock = fn ? fn : clock_real; }
+
+/* PROVE BUDGET: 20 ms of prover and class-scan time per second of wall time per cell = 2 % of one core on the scan consumers (a general bound on what an
+ * optional evidence stage may take). Fixed 1 s windows; a look that starts under budget may overshoot by one proof (< 1 ms). */
+#define BUDGET_NS 20000000ull
+#define BUDGET_WINDOW_NS 1000000000ull
+typedef struct { uint64_t start_ns, spent_ns; } budget_t;
+NR_CELL_STATIC(budget_t, g_budget)
+#define g_budget NR_CELL_REF(g_budget)
+NR_CELL_STATIC_INIT(pthread_mutex_t, g_budget_mu, PTHREAD_MUTEX_INITIALIZER)
+#define g_budget_mu NR_CELL_REF(g_budget_mu)
+
+static bool budget_ok(uint64_t now)
+{
+  pthread_mutex_lock(&g_budget_mu);
+  if (now - g_budget.start_ns >= BUDGET_WINDOW_NS || now < g_budget.start_ns) { g_budget.start_ns = now; g_budget.spent_ns = 0; }
+  const bool ok = g_budget.spent_ns < BUDGET_NS;
+  pthread_mutex_unlock(&g_budget_mu);
+  return ok;
+}
+static void budget_charge(uint64_t ns)
+{
+  pthread_mutex_lock(&g_budget_mu);
+  g_budget.spent_ns += ns;
+  pthread_mutex_unlock(&g_budget_mu);
+}
+void nr_dci11_budget_reset(void)
+{
+  pthread_mutex_lock(&g_budget_mu);
+  memset(&g_budget, 0, sizeof g_budget);
+  pthread_mutex_unlock(&g_budget_mu);
+}
+
+unsigned nr_dci11_bank_service(uint16_t rnti, const nr_dci11_resolver_t *r, const nr_dci11_class_t *own, nr_ul_slot_fn ul, int *total_classes)
+{
+  unsigned fl = 0;
+  if (total_classes) *total_classes = -1;
+  if (!nr_dci11_bank_due(rnti)) return 0;
+  const uint64_t t0 = g_clock();
+  if (!budget_ok(t0)) {   /* over budget: it stays due (looked at again on the next accept), counted once per episode */
+    pthread_mutex_lock(&g_bank_mu);
+    bank_t *b = bank_find(rnti);
+    if (b && !b->deferred) { b->deferred = true; fl |= NR_DCI11_SVC_DEFERRED; }
+    pthread_mutex_unlock(&g_bank_mu);
+    return fl;
+  }
+  bool changed;
+  if (own) {
+    changed = bank_prove_impl(rnti, own, 1, ul, true);   /* the layout is CRC-solved: its one class */
+  } else {
+    nr_dci11_class_t cls[NR_DCI11_CLASS_MAX];
+    int tot = 0;
+    const int nc = nr_dci11_class_set(r, cls, true, &tot);
+    if (total_classes && nc != NR_DCI11_CLS_INCOMPLETE) *total_classes = tot;
+    if (nc < 0) fl |= NR_DCI11_SVC_SKIPPED;
+    changed = bank_prove_impl(rnti, cls, nc > 0 ? nc : 0, ul, false);
+  }
+  budget_charge(g_clock() - t0);
+  return fl | (changed ? NR_DCI11_SVC_CHANGED : 0);
+}
+
+bool nr_dci11_emit_ok(bool proven, bool scoped, uint16_t dci_len, const nr_dci11_class_t *pc, const nr_dci11_layout_t *rep_l, const nr_dci11_offsets_t *rep_o,
+                      bool set_usable)
+{
+  if (!proven || !pc || dci_len != pc->o.total) return false;                                     /* only DCIs of the length the proof was made for */
+  const bool rep = rep_l && rep_o;
+  if (scoped) return rep && nr_dci11_class_same(&pc->l, &pc->o, rep_l, rep_o);                   /* a solved RNTI's own-class proof: only while it is still that class */
+  return set_usable && (!rep || nr_dci11_class_same(&pc->l, &pc->o, rep_l, rep_o));              /* an unscoped one: only over the current usable class set */
 }

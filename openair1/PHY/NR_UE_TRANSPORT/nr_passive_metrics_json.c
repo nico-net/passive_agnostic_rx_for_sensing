@@ -216,11 +216,11 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
                   ",\"dci_state_fixed\":%" PRIu64 ",\"dci_state_solved\":%" PRIu64 ",\"dci_state_cand\":%" PRIu64 ",\"dci_state_unsolved\":%" PRIu64
                   ",\"dci_rec_generated\":%" PRIu64 ",\"dci_rec_persisted\":%" PRIu64 ",\"dci_rec_lost\":%" PRIu64
                   ",\"dci_dup\":%" PRIu64 ",\"traffic_skip\":%" PRIu64 ",\"check_decodes\":%" PRIu64 ",\"check_fail\":%" PRIu64
-                  ",\"probe_decodes\":%" PRIu64 ",\"reopens\":%" PRIu64 ",\"reopens_ul\":%" PRIu64 ",\"dci_emit_us_p50\":%" PRIu64 ",\"dci_emit_us_p99\":%" PRIu64 ",\"e1_changes\":%" PRIu64 ",\"e1_skip_classes\":%" PRIu64 ",\"e1_unfed\":%" PRIu64 ",\"e1_cls_1\":%" PRIu64 ",\"e1_cls_2_4\":%" PRIu64 ",\"e1_cls_5_16\":%" PRIu64 ",\"e1_cls_17_64\":%" PRIu64 ",\"e1_cls_gt64\":%" PRIu64,
+                  ",\"probe_decodes\":%" PRIu64 ",\"reopens\":%" PRIu64 ",\"reopens_ul\":%" PRIu64 ",\"dci_emit_us_p50\":%" PRIu64 ",\"dci_emit_us_p99\":%" PRIu64 ",\"e1_changes\":%" PRIu64 ",\"e1_skip_classes\":%" PRIu64 ",\"e1_unfed\":%" PRIu64 ",\"e1_prove_deferred\":%" PRIu64 ",\"e1_cls_1\":%" PRIu64 ",\"e1_cls_2_4\":%" PRIu64 ",\"e1_cls_5_16\":%" PRIu64 ",\"e1_cls_17_64\":%" PRIu64 ",\"e1_cls_gt64\":%" PRIu64,
                   tr->accepted[NR_DCI_REC_FMT_10], tr->accepted[NR_DCI_REC_FMT_11], tr->accepted[NR_DCI_REC_FMT_00], tr->accepted[NR_DCI_REC_FMT_01],
                   tr->state[NR_LAYOUT_FIXED], tr->state[NR_LAYOUT_SOLVED], tr->state[NR_LAYOUT_CANDIDATE], tr->state[NR_LAYOUT_UNSOLVED],
                   m->dci_rec_generated, m->dci_rec_persisted, m->dci_rec_lost, tr->dup, tr->traffic_skip, tr->check_decodes,
-                  tr->check_fail, tr->probe_decodes, tr->reopens, tr->reopens_ul, tr->emit_us_p50, tr->emit_us_p99, tr->e1_changes, tr->e1_skip_classes, tr->e1_unfed, tr->e1_cls[0], tr->e1_cls[1], tr->e1_cls[2], tr->e1_cls[3], tr->e1_cls[4]);
+                  tr->check_fail, tr->probe_decodes, tr->reopens, tr->reopens_ul, tr->emit_us_p50, tr->emit_us_p99, tr->e1_changes, tr->e1_skip_classes, tr->e1_unfed, tr->e1_deferred, tr->e1_cls[0], tr->e1_cls[1], tr->e1_cls[2], tr->e1_cls[3], tr->e1_cls[4]);
   }
   for (int i = 0; i < 2 && t > 0 && (size_t)t < sizeof(tail); i++) {
     static const char *const an[2] = {"janon", "dmrs_id"};

@@ -4178,6 +4178,10 @@ openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	334	g_bank	file_static	bank_tab_t 
 openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	336	g_bank_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_bank (copy under it, prove outside)
 openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	529	g_cls	file_static	cls_cache_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, cached layout-class set of this cell's resolver (keyed by n_hyp/n_alive/n_truncated)
 openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	529	g_cls_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_cls
+openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	369	g_ring_rev	file_static	_Atomic uint32_t	PROCESS	TRAFFIC	process-wide never-reset counter: unique id of a bank ring's life (a proof made on an older ring is discarded)
+openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	610	g_clock	file_static	uint64_t (*)(void)	PROCESS	TRAFFIC	test hook for the prove-budget clock (CLOCK_MONOTONIC by default)
+openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	618	g_budget	file_static	budget_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, E1 prove-time budget window of this cell (20 ms per s)
+openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	618	g_budget_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_budget
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	94	g_traffic_ctr	file_static	traffic_ctr_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, traffic-mode counters + emit-time ring of this cell
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	134	g_retx_tab	file_static	rx_tab_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, last NDI per (dir, RNTI, HARQ pid) of this cell
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	136	g_retx_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_retx_tab

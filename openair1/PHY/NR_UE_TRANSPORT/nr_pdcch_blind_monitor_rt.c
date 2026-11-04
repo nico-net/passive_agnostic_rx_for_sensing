@@ -4717,28 +4717,26 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
         nr_dci11_bank_feed(out->rnti, *payload, dci_len, ts, &fd);
         /* cheapest test first: nothing else happens unless this RNTI's bank grew by 16. The class set is cached (a scan of the alive layouts only when the
          * resolver's set changed) and only a scan consumer computes it. */
-        if (off_rx && nr_dci11_bank_due(out->rnti)) {
+        if (off_rx) {
+          /* one call: due test first, then the cell's prove budget, then the class set (cached) or the solved RNTI's own class; the TDD copy is per proof */
           t_e1_tdd_valid = false;
-          if (have_rep) {
-            /* a CRC-SOLVED layout is known: prove the split within that one class (sound, the layout is proven; independent of the resolver's alive set) */
-            const nr_dci11_class_t one = {g_dci11_resolver->hyp[rep], g_dci11_resolver->off[rep]};
-            if (nr_dci11_bank_maybe_prove(out->rnti, &one, 1, e1_ul_capable)) nr_traffic_count(NR_TRAFFIC_CNT_E1_CHANGE);
-          } else {
-            nr_dci11_class_t cls[NR_DCI11_CLASS_MAX];
-            int tot = 0;
-            const int nc = nr_dci11_class_set(g_dci11_resolver, cls, true, &tot);
-            if (nc != NR_DCI11_CLS_INCOMPLETE)   /* histogram of what E2/E3 must reduce */
-              nr_traffic_count(tot <= 1 ? NR_TRAFFIC_CNT_E1_CLS_1 : tot <= 4 ? NR_TRAFFIC_CNT_E1_CLS_2_4 : tot <= 16 ? NR_TRAFFIC_CNT_E1_CLS_5_16
-                                : tot <= 64 ? NR_TRAFFIC_CNT_E1_CLS_17_64 : NR_TRAFFIC_CNT_E1_CLS_GT64);
-            if (nc < 0) nr_traffic_count(NR_TRAFFIC_CNT_E1_SKIP);   /* too many classes, or an incomplete resolver set: no proof this round */
-            if (nr_dci11_bank_maybe_prove(out->rnti, cls, nc > 0 ? nc : 0, e1_ul_capable)) nr_traffic_count(NR_TRAFFIC_CNT_E1_CHANGE);
-          }
+          const nr_dci11_class_t one = {have_rep ? g_dci11_resolver->hyp[rep] : (nr_dci11_layout_t){0}, have_rep ? g_dci11_resolver->off[rep] : (nr_dci11_offsets_t){0}};
+          int tot = -1;
+          const unsigned fl = nr_dci11_bank_service(out->rnti, g_dci11_resolver, have_rep ? &one : NULL, e1_ul_capable, &tot);
+          if (fl & NR_DCI11_SVC_CHANGED) nr_traffic_count(NR_TRAFFIC_CNT_E1_CHANGE);
+          if (fl & NR_DCI11_SVC_DEFERRED) nr_traffic_count(NR_TRAFFIC_CNT_E1_DEFERRED);
+          if (fl & NR_DCI11_SVC_SKIPPED) nr_traffic_count(NR_TRAFFIC_CNT_E1_SKIP);   /* too many classes, or an incomplete resolver set: no proof this round */
+          if (tot >= 0)   /* histogram of what E2/E3 must reduce */
+            nr_traffic_count(tot <= 1 ? NR_TRAFFIC_CNT_E1_CLS_1 : tot <= 4 ? NR_TRAFFIC_CNT_E1_CLS_2_4 : tot <= 16 ? NR_TRAFFIC_CNT_E1_CLS_5_16
+                              : tot <= 64 ? NR_TRAFFIC_CNT_E1_CLS_17_64 : NR_TRAFFIC_CNT_E1_CLS_GT64);
         }
       }
-      /* an UNSOLVED RNTI's stored reading is emitted only while the cached class set is the resolver's CURRENT one and usable (none alive, too many, incomplete,
-       * or the set changed since the last due look: no reading until re-examined); this test never scans. A SOLVED RNTI's reading belongs to its known layout. */
-      e1 = (have_rep || nr_dci11_class_set(g_dci11_resolver, NULL, false, NULL) > 0) && nr_dci11_bank_proven_any(out->rnti, &pc, &ps);
-      if (e1 && have_rep && !nr_dci11_class_same(&pc.l, &pc.o, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep])) e1 = false;
+      /* Emission. A proof taken in a solved RNTI's own class (scoped) is emitted only while the current representative has that very class; an unscoped one only
+       * while the cached class set is the resolver's CURRENT usable one (this test never scans). Both only for a DCI of the length the proof was made for. */
+      bool scoped = false;
+      const bool proven = nr_dci11_bank_proven_scope(out->rnti, &pc, &ps, &scoped);
+      e1 = nr_dci11_emit_ok(proven, scoped, dci_len, &pc, have_rep ? &g_dci11_resolver->hyp[rep] : NULL, have_rep ? &g_dci11_resolver->off[rep] : NULL,
+                            proven && !scoped && nr_dci11_class_set(g_dci11_resolver, NULL, false, NULL) > 0);
     }
     if (e1) nr_dci11_harq_fields_proven(*payload, dci_len, &pc.l, &pc.o, &ps, &hf);
     else if (have_rep) nr_dci11_harq_fields(*payload, dci_len, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep], &hf);
