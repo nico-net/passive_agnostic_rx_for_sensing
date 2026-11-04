@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include "common/utils/nr_cell.h"
+#include "nr_lockhold.h"
 
 /* ---- Phase-2 lock (Task A7 design point 2) -------------------------------------------------------
  * One occasion = Phase 1 (FEP, LLR, demap, pre-pass, candidate decode: the ~80 % of the cost) and
@@ -34,14 +35,22 @@
 NR_CELL_STATIC_INIT(pthread_mutex_t, g_phase2_mu, PTHREAD_MUTEX_INITIALIZER);
 #define g_phase2_mu NR_CELL_REF(g_phase2_mu)
 
-void nr_pdcch_blind_phase2_lock(void)
+NR_CELL_STATIC(nr_lockhold_t, g_phase2_lh); /* hold diagnostics, guarded by g_phase2_mu */
+#define g_phase2_lh NR_CELL_REF(g_phase2_lh)
+
+void nr_pdcch_blind_phase2_lock_at(const char *site, int line)
 {
-  pthread_mutex_lock(&g_phase2_mu);
+  nr_lockhold_lock(&g_phase2_lh, &g_phase2_mu, site, line);
 }
 
 void nr_pdcch_blind_phase2_unlock(void)
 {
-  pthread_mutex_unlock(&g_phase2_mu);
+  nr_lockhold_unlock(&g_phase2_lh, &g_phase2_mu, "phase2");
+}
+
+void nr_pdcch_blind_phase2_note_split(int i, uint64_t ns)
+{
+  nr_lh_split(&g_phase2_lh, i, ns);
 }
 
 // ---- RNTI persistence tracking (2026-07-28): a real UE's RNTI recurs across many grants; a noise
