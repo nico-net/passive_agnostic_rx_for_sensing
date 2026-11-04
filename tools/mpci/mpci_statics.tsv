@@ -2025,6 +2025,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	476	g_ctl_votes	file_stat
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	478	g_discarded	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	480	g_tied	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	482	g_tp_spec_refuted	file_static	uint64_t [converted]	PER_CELL	A6	converted (fix1031)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	463	g_epoch	file_static	uint64_t [converted]	PER_CELL	A6	bumped by reset_locked: invalidates the unlocked snapshot of nr_ul_layout_hyp_list
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	465	g_hyp_discard	file_static	uint64_t [converted]	PER_CELL	A6	hyp_list results discarded after a reset during the unlocked enumeration
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1677	nr_ul_layout_hyp_list_gap_hook	global	void (*)(void)	PROCESS	A6	test-only hook between the snapshot and apply sections of nr_ul_layout_hyp_list; NULL in the receiver
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	484	g_votes_total	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	486	g_probes_fed	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	488	g_probes_booked	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)

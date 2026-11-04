@@ -460,6 +460,10 @@ NR_CELL_STATIC(g_occ_cell_t, g_occ);
 #define g_occ NR_CELL_REF(g_occ)
 NR_CELL_STATIC_INIT(uint64_t, g_gen, 1);
 #define g_gen NR_CELL_REF(g_gen)
+NR_CELL_STATIC(uint64_t, g_epoch);      /* bumped by every reset_locked(): a snapshot taken before it describes a wiped state; guarded by g_mu */
+#define g_epoch NR_CELL_REF(g_epoch)
+NR_CELL_STATIC(uint64_t, g_hyp_discard); /* nr_ul_layout_hyp_list results dropped because the state was reset/regenerated during the unlocked enumeration; guarded by g_mu */
+#define g_hyp_discard NR_CELL_REF(g_hyp_discard)
 typedef hyp_state_t g_hyp_cell_t[NR_UL_LAYOUT_MAX_HYP];
 NR_CELL_STATIC(g_hyp_cell_t, g_hyp);
 #define g_hyp NR_CELL_REF(g_hyp)
@@ -535,6 +539,7 @@ static void reset_locked(void)
   g_npend = 0;
   g_first_slot = g_lock_slot = g_trial_slot = -1;
   g_have_cell = false;
+  g_epoch++;
 }
 
 /* Allocate cell `cell`'s heap objects (call for every active cell before nr_cell_alloc_fence(); cell 0 included). */
@@ -1423,14 +1428,20 @@ static int pre_for_hyp_sel(const len_state_t *ls, int h, int sel)
   return -1;
 }
 
+/* pure: the opts of one hypothesis from explicit inputs (shared by the locked path and the unlocked snapshot walk of nr_ul_layout_hyp_list); false when it does not read `len` */
+static bool trial_opts_build(const nr_ul_layout_prefix_t *pre, const nr_ul_layout_tail_t *tail, int start, int n, const uint8_t *k2row, int addpos, int pci,
+                             int mu, int typeA_pos, int var, int len, nr_pdcch_blind_ul_opts_t *o)
+{
+  nr_ul_layout_build_opts(pre, tail, start, n, k2row, addpos, pci, mu, typeA_pos, o);
+  apply_variant(o, var);
+  return nr_pdcch_blind_dci01_size(o) == len;
+}
+
 /* caller holds mu: build the opts of hypothesis (h, prefix k, tail t); false when it does not read `ls->len` */
 static bool trial_opts_ap_locked(const len_state_t *ls, int h, int k, int t, int var, int addpos, nr_pdcch_blind_ul_opts_t *o)
 {
   if (h < 0 || h >= g_nhyp || k < 0 || k >= ls->npre || t < 0 || t >= ls->ntail) return false;
-  nr_ul_layout_build_opts(&ls->pre[k], &ls->tail[t], g_hyp[h].start, g_hyp[h].n, ls->k2row, addpos, g_cell.pci,
-                          g_cell.mu, g_cell.typeA_pos, o);
-  apply_variant(o, var);
-  return nr_pdcch_blind_dci01_size(o) == ls->len;
+  return trial_opts_build(&ls->pre[k], &ls->tail[t], g_hyp[h].start, g_hyp[h].n, ls->k2row, addpos, g_cell.pci, g_cell.mu, g_cell.typeA_pos, var, ls->len, o);
 }
 static bool trial_opts_locked(const len_state_t *ls, int h, int k, int t, int var, nr_pdcch_blind_ul_opts_t *o)
 {
@@ -1570,7 +1581,9 @@ int nr_ul_layout_crc_trials(uint16_t rnti, uint16_t len, long abs_slot, nr_dci_b
  * grant builder as nr_ul_layout_crc_trials(), so a CRC pass found in the background carries the same tag (h, k, t, var) and is fed to the lock through
  * nr_ul_layout_crc_verdict(). The locked BWP hypothesis leads the ranking; at most `nhyp` BWP hypotheses are walked. `first` is a cursor over the
  * `*total` combinations; the cursor wraps. Returns the number of grants written (<= cap). */
-int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
+/* TEST-ONLY reference: the pre-fix implementation, enumerating under g_mu for the whole call. Kept verbatim so a unit test can compare it bit for bit
+ * with nr_ul_layout_hyp_list(); nothing in the receiver calls it. */
+int nr_ul_layout_hyp_list_ref(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
                           uint32_t *total, uint32_t *next)
 {
   if (total) *total = 0;
@@ -1637,6 +1650,148 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
   if (next && tot) *next = (first + c) % tot;
   nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
   return n;
+}
+
+/* Everything the enumeration of nr_ul_layout_hyp_list reads, copied under g_mu (about 1.9 KiB with MAX_HYP 192): g_cell, the leading g_nhyp entries of g_hyp
+ * (n, start, votes), g_locked_hyp, the current dmrs-AdditionalPosition reading, and from the length state: len, ntail/tail, npre/pre, k2row, ev_dec, tp_ill, tp_ok.
+ * tp_ill/tp_ok are advanced on the copy exactly as the old code advanced them on the live state; the deltas are applied in the second section. */
+typedef struct {
+  nr_ul_layout_cell_t cell;
+  struct { uint16_t n, start; uint32_t votes; } hyp[NR_UL_LAYOUT_MAX_HYP];
+  int nhyp, locked_hyp, cur_ap, li, len, npre, ntail;
+  nr_ul_layout_prefix_t pre[NR_UL_LAYOUT_MAX_PRE];
+  nr_ul_layout_tail_t tail[NR_UL_LAYOUT_MAX_TAIL];
+  uint8_t k2row[16];
+  bool ev_dec;
+  uint32_t tp_ill, tp_ok;
+  uint64_t gen, epoch;
+} hyp_snap_t;
+
+static int snap_pre_for_hyp(const hyp_snap_t *s, int h)
+{
+  const int w = nr_ul_layout_riv_bits(s->hyp[h].n);
+  for (int k = 0; k < s->npre; k++) if (s->pre[k].riv == w) return k;
+  return -1;
+}
+
+void (*nr_ul_layout_hyp_list_gap_hook)(void); /* test only: runs between the snapshot and the apply section, with g_mu released */
+
+int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uint32_t first, int nhyp, int ap_n, nr_pdcch_blind_ul_result_t *out, int cap,
+                          uint32_t *total, uint32_t *next)
+{
+  if (total) *total = 0;
+  if (next) *next = first;
+  if (!out || cap < 1) return 0;
+  hyp_snap_t S;
+  hyp_snap_t *s = &S;
+  /* section 1 (g_mu): copy */
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
+  int li = -1;
+  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len) li = l;
+  const len_state_t *ls = li >= 0 ? &g_len[li] : NULL;
+  if (!g_have_cell || !ls || !ls->fitted || g_nhyp == 0) {
+    nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+    return 0;
+  }
+  s->cell = g_cell;
+  s->nhyp = g_nhyp;
+  for (int h = 0; h < g_nhyp; h++) { s->hyp[h].n = g_hyp[h].n; s->hyp[h].start = g_hyp[h].start; s->hyp[h].votes = g_hyp[h].votes; }
+  s->locked_hyp = g_locked_hyp;
+  s->cur_ap = cur_addpos_locked();
+  s->li = li;
+  s->len = ls->len;
+  s->npre = ls->npre;
+  memcpy(s->pre, ls->pre, sizeof(s->pre));
+  s->ntail = ls->ntail;
+  memcpy(s->tail, ls->tail, sizeof(s->tail));
+  memcpy(s->k2row, ls->k2row, sizeof(s->k2row));
+  s->ev_dec = ls->ev_dec;
+  s->tp_ill = ls->tp_ill;
+  s->tp_ok = ls->tp_ok;
+  s->gen = g_gen & NR_UL_LAYOUT_GEN_MASK;
+  s->epoch = g_epoch;
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+
+  /* section 2 (no lock): the enumeration, on the copy; same statements and order as nr_ul_layout_hyp_list_ref() */
+  const uint32_t tp_ill0 = s->tp_ill, tp_ok0 = s->tp_ok;
+  uint64_t d_spec = 0;
+  int rk[NR_UL_LAYOUT_MAX_HYP], nr = 0;
+  for (int h = 0; h < s->nhyp; h++) if (snap_pre_for_hyp(s, h) >= 0) rk[nr++] = h;
+  const bool sib1 = s->cell.sib1_ul_size > 0;
+  for (int i = 1; i < nr; i++)
+    for (int j = i; j > 0; j--) {
+      const int a = rk[j], b = rk[j - 1];
+      const bool sa = sib1 && s->hyp[a].n == s->cell.sib1_ul_size && s->hyp[a].start == s->cell.sib1_ul_start;
+      const bool sb = sib1 && s->hyp[b].n == s->cell.sib1_ul_size && s->hyp[b].start == s->cell.sib1_ul_start;
+      if (!(sa > sb || (sa == sb && s->hyp[a].votes > s->hyp[b].votes))) break;
+      rk[j] = b; rk[j - 1] = a;
+    }
+  for (int i = 1; i < nr && s->locked_hyp >= 0; i++) /* the locked hypothesis leads */
+    if (rk[i] == s->locked_hyp) { for (int j = i; j > 0; j--) rk[j] = rk[j - 1]; rk[0] = s->locked_hyp; break; }
+  if (nhyp > 0 && nr > nhyp) nr = nhyp;
+  if (nr > 0 && s->cell.sib1_ul_cfg && s->hyp[rk[0]].n == s->cell.sib1_ul_size && s->hyp[rk[0]].start == s->cell.sib1_ul_start) nr = 1; /* a CONFIGURED UL BWP is certain (as in the CRC trials) */
+  uint32_t tot = 0, base[2] = {0, 0};
+  int nt = s->ntail < 2 ? s->ntail : 2;
+  const int rows = s->ev_dec ? 2 : NR_UL_TDA_ROWS; /* all allocations until a decisive CRC pass of this length; then the two-row core */
+  for (int t = 0; t < nt; t++) {
+    base[t] = tot;
+    tot += (uint32_t)nr * (uint32_t)nr_ul_variant_count_rows(true, true, rows, s->tail[t].tp) * (uint32_t)ap_n;
+  }
+  const uint64_t gen = s->gen;
+  int n = 0;
+  uint32_t c = 0;
+  for (; c < tot && n < cap; c++) {
+    const uint32_t ix = (first + c) % tot;
+    int t = nt - 1;
+    while (t > 0 && ix < base[t]) t--;
+    const int cnt = nr_ul_variant_count_rows(true, true, rows, s->tail[t].tp);
+    const uint32_t r = ix - base[t];
+    const int i = (int)(r / (uint32_t)(cnt * ap_n)), v = (int)((r / (uint32_t)ap_n) % (uint32_t)cnt), ai = (int)(r % (uint32_t)ap_n);
+    const int addpos = ai == 0 ? s->cur_ap : (s->cur_ap + ai) % 3; /* the current reading first, then the other dmrs-AdditionalPosition values */
+    int tbl, k2d, tda;
+    nr_ul_variant_get_rows(v, true, true, rows, s->tail[t].tp, &tbl, &k2d, &tda);
+    const int var = (tbl + 1) | k2d << 3 | tda << 4;
+    const int h = rk[i], k = snap_pre_for_hyp(s, h);
+    nr_pdcch_blind_ul_opts_t o;
+    if (s->tail[t].tp && nr_ul_tp_tail_refuted(s->tp_ill, s->tp_ok)) continue;
+    if (h < 0 || h >= s->nhyp || k < 0 || k >= s->npre || t < 0 || t >= s->ntail) continue;
+    if (!trial_opts_build(&s->pre[k], &s->tail[t], s->hyp[h].start, s->hyp[h].n, s->k2row, addpos, s->cell.pci, s->cell.mu, s->cell.typeA_pos, var, s->len, &o)
+        || !nr_pdcch_blind_extract_01(payload, len, rnti, &o, &out[n])) continue;
+    if (out[n].transform_precoding) {
+      if (!nr_ul_tp_nrb_legal(out[n].num_rb)) { if (i == 0) s->tp_ill++; d_spec++; continue; }
+      if (i == 0) s->tp_ok++;
+    }
+    out[n].data_scrambling_id = s->cell.pci;
+    out[n].data_id_advance = false;
+    out[n].hyp_generation = NR_UL_LAYOUT_TAG | NR_UL_LAYOUT_TRIAL | ((uint64_t)(uint32_t)(h | k << 8 | t << 11 | var << 13) << 40) | gen;
+    n++;
+  }
+  const uint32_t nxt = tot ? (first + c) % tot : first;
+
+  if (nr_ul_layout_hyp_list_gap_hook) nr_ul_layout_hyp_list_gap_hook();
+
+  /* section 3 (g_mu): side effects, only if the state is the one that was copied */
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
+  if (g_epoch != s->epoch || (g_gen & NR_UL_LAYOUT_GEN_MASK) != s->gen || !g_have_cell || s->li >= g_nlen || g_len[s->li].len != s->len) {
+    g_hyp_discard++;
+    nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+    return 0; /* total = 0 and next = first stay as set on entry: the caller stops */
+  }
+  g_len[s->li].tp_ill += s->tp_ill - tp_ill0;
+  g_len[s->li].tp_ok += s->tp_ok - tp_ok0;
+  g_tp_spec_refuted += d_spec;
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+  if (total) *total = tot;
+  if (next) *next = nxt;
+  return n;
+}
+
+uint64_t nr_ul_layout_hyp_list_discarded(void)
+{
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
+  const uint64_t d = g_hyp_discard;
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+  return d;
 }
 
 /* the background search tried `n` more candidates (data ids) under the hypothesis of this tagged grant: the CRC16 false-alarm accounting of the evidence rule counts them */

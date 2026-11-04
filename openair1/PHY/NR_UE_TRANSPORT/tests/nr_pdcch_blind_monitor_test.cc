@@ -34,6 +34,7 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -6659,6 +6660,130 @@ TEST(UlLayoutLock, TransformPrecodingTrialsNeverCarryAnIllegalWidth)
   }
   EXPECT_GT(all, 0);
   RecordProperty("tp_trials", tp_seen);
+  nr_ul_layout_lock_reset();
+}
+
+namespace {
+struct HypRec { int n; uint32_t tot, next; nr_pdcch_blind_ul_result_t g; };
+typedef int (*HypFn)(uint16_t, uint16_t, nr_dci_bits_t, uint32_t, int, int, nr_pdcch_blind_ul_result_t *, int, uint32_t *, uint32_t *);
+// one deterministic state, then every hyp_list call of a cursor walk (cap 1 and cap 3) on 40 DCIs; the tp counters evolve across calls on both versions
+std::vector<HypRec> UllHypWalk(HypFn fn, int nhyp, int ap_n, int *ncalls_with_grant)
+{
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
+  UllGen g;
+  UllFit(g, cell);
+  std::vector<HypRec> v;
+  for (int d = 0; d < 40; d++) {
+    nr_pdcch_blind_ul_result_t o;
+    const nr_ul_layout_dci_t x = g.next();
+    nr_ul_layout_on_dci(x.rnti, 44, x.slot, x.p, &cell, &o);
+    for (int cap : {1, 3}) {
+      uint32_t next = 0;
+      for (int step = 0; step < 400; step++) {
+        HypRec r;
+        memset(&r, 0, sizeof(r));
+        nr_pdcch_blind_ul_result_t out[3];
+        memset(out, 0, sizeof(out));
+        r.n = fn(x.rnti, 44, x.p, next, nhyp, ap_n, out, cap, &r.tot, &r.next);
+        if (r.n > 0) { r.g = out[0]; (*ncalls_with_grant)++; }
+        v.push_back(r);
+        if (r.tot == 0 || r.next == 0 || r.next == next) break;
+        next = r.next;
+      }
+    }
+  }
+  nr_ul_layout_lock_reset();
+  return v;
+}
+}  // namespace
+
+TEST(UlLayoutLock, HypListUnlockedEnumerationEqualsTheAllUnderLockReference)
+{
+  const int cfg[][2] = {{1, 1}, {8, 1}, {8, 3}, {64, 3}, {0, 1}};
+  for (const auto &c : cfg) {
+    int na = 0, nb = 0;
+    const auto a = UllHypWalk(nr_ul_layout_hyp_list_ref, c[0], c[1], &na);
+    const auto b = UllHypWalk(nr_ul_layout_hyp_list, c[0], c[1], &nb);
+    ASSERT_EQ(a.size(), b.size()) << c[0] << "/" << c[1];
+    EXPECT_EQ(na, nb);
+    EXPECT_GT(na, 0) << "no grant produced: the comparison would be vacuous";
+    for (size_t i = 0; i < a.size(); i++) {
+      ASSERT_EQ(a[i].n, b[i].n) << i;
+      ASSERT_EQ(a[i].tot, b[i].tot) << i;
+      ASSERT_EQ(a[i].next, b[i].next) << i;
+      ASSERT_EQ(0, memcmp(&a[i].g, &b[i].g, sizeof(a[i].g))) << "call " << i << " cfg " << c[0] << "/" << c[1];
+    }
+  }
+  EXPECT_EQ(nr_ul_layout_hyp_list_discarded(), 0u);
+}
+
+static void UllHookReset(void) { nr_ul_layout_lock_reset(); }
+
+TEST(UlLayoutLock, HypListResultIsDiscardedWhenTheStateIsResetDuringTheEnumeration)
+{
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
+  UllGen g;
+  UllFit(g, cell);
+  nr_pdcch_blind_ul_result_t o, out[1];
+  const nr_ul_layout_dci_t x = g.next();
+  nr_ul_layout_on_dci(x.rnti, 44, x.slot, x.p, &cell, &o);
+  uint32_t tot = 0, next = 0;
+  ASSERT_EQ(nr_ul_layout_hyp_list(x.rnti, 44, x.p, 0, 8, 1, out, 1, &tot, &next), 1); // undisturbed: a grant
+  const uint64_t d0 = nr_ul_layout_hyp_list_discarded();
+  nr_ul_layout_hyp_list_gap_hook = UllHookReset;
+  tot = 7; next = 7;
+  const int n = nr_ul_layout_hyp_list(x.rnti, 44, x.p, 5, 8, 1, out, 1, &tot, &next);
+  nr_ul_layout_hyp_list_gap_hook = nullptr;
+  EXPECT_EQ(n, 0);
+  EXPECT_EQ(tot, 0u);
+  EXPECT_EQ(next, 5u) << "the cursor stays where it was";
+  EXPECT_EQ(nr_ul_layout_hyp_list_discarded(), d0 + 1);
+  nr_ul_layout_lock_reset();
+}
+
+// Manual bench (--gtest_also_run_disabled_tests): g_mu hold of 720 hyp_list calls per job, seen by a second thread taking g_mu (note_pdcch_slot) as fast as it can
+TEST(UlLayoutLock, DISABLED_HypListLockHoldBench)
+{
+  nr_ul_layout_cell_t cell = {.carrier_rb = 217, .dl_bwp_size = 217, .pci = 415, .mu = 1, .typeA_pos = 0,
+                              .slots_per_frame = 20, .sib1_ul_start = 1, .sib1_ul_size = 216};
+  UllGen g;
+  UllFit(g, cell);
+  nr_pdcch_blind_ul_result_t o, out[1];
+  const nr_ul_layout_dci_t x = g.next();
+  nr_ul_layout_on_dci(x.rnti, 44, x.slot, x.p, &cell, &o);
+  for (int variant = 0; variant < 4; variant++) { // 0/1: ref/new on a payload that yields a grant at once; 2/3: ref/new on an all-ones payload (most combinations fail: long walk)
+    HypFn fn = (variant & 1) ? nr_ul_layout_hyp_list : nr_ul_layout_hyp_list_ref;
+    nr_dci_bits_t pay = x.p;
+    if (variant >= 2) memset(&pay, 0xff, sizeof(pay));
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> maxw{0}, nw{0}, sumw{0};
+    std::thread w([&] {
+      while (!stop) {
+        const auto t0 = std::chrono::steady_clock::now();
+        nr_ul_layout_note_pdcch_slot(1000);
+        const uint64_t d = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        nw++; sumw += d;
+        uint64_t m = maxw; while (d > m && !maxw.compare_exchange_weak(m, d)) {}
+      }
+    });
+    uint64_t maxcall = 0, sumcall = 0, calls = 0;
+    for (int job = 0; job < (variant >= 2 ? 2 : 200); job++) {
+      uint32_t tot = 0, next = 0;
+      for (int c = 0; c < 720; c++) {
+        const auto t0 = std::chrono::steady_clock::now();
+        fn(x.rnti, 44, pay, next, 64, 3, out, 1, &tot, &next);
+        const uint64_t d = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        sumcall += d; calls++; if (d > maxcall) maxcall = d;
+        if (!tot) break;
+      }
+    }
+    stop = true;
+    w.join();
+    printf("BENCH payload=%s %s: hyp_list calls=%lu mean_call_us=%.2f max_call_us=%.2f | waiter takes=%lu mean_wait_us=%.2f max_wait_us=%.2f\n", variant >= 2 ? "allones" : "valid", (variant & 1) ? "new" : "ref(old, all under g_mu)",
+           (unsigned long)calls, sumcall / 1e3 / calls, maxcall / 1e3, (unsigned long)nw.load(), sumw.load() / 1e3 / (nw ? nw.load() : 1), maxw.load() / 1e3);
+  }
   nr_ul_layout_lock_reset();
 }
 

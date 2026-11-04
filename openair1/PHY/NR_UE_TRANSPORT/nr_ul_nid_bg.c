@@ -593,6 +593,7 @@ static void print_stats(const char *tag)
 static void *worker(void *a)
 {
   (void)a;
+  pthread_setname_np(pthread_self(), "ulNidBg"); /* visible in LOCKHOLD and top -H */
   if (nice(19) == -1) { /* best effort */ }
   { /* SCHED_IDLE: runs only on a core nothing else wants */
     const struct sched_param sp0 = {0};
