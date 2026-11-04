@@ -17,7 +17,12 @@ typedef struct {
   float sym_consist;            /* 0..1 correlation of per-symbol estimates on shared k; NAN with < 2 symbols */
   float recon_conf;             /* data-aided only, set by the producer; NAN otherwise */
 } nr_sense_quality_t;
-/* iq antenna-major complex float pairs, ant_stride in complex RE (as nr_sense_push_cfr). Pure, no allocation,
+/* noise_var: variance of the same quantity as H (post-estimation, per RE, same scaling); producers own that.
+ * Per-PRB SNR = (mean|H|^2 over antennas and all REs - noise_var) / noise_var, -100 dB when the signal is <= 0.
+ * The caller passes one estimate per (k, l); REs with l >= 16 or PRB >= 275 above the lowest are ignored in the fit.
+ * Cost: O(n_re * n_ant), measured ~29 us for DM-RS-only input (128 PRB x 4 ant x 6 RE/PRB x 2 sym); a data-aided
+ * full grid (~170k samples) is estimated at ~0.8-1.5 ms per record: S3 must measure it on the real input size.
+ * iq antenna-major complex float pairs, ant_stride in complex RE (as nr_sense_push_cfr). Pure, no allocation,
  * O(n_ant * n_re). Every computation is per PRB: nothing fits/smooths/correlates across a PRG boundary. At most 8
  * antennas are used. */
 void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,

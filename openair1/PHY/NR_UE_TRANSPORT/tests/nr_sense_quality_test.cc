@@ -32,7 +32,7 @@ template <class F> static Cfr make(int nprb, F snr_db, float noise_var, unsigned
   c.iq.resize(2 * c.n_ant * c.n_re);
   for (int a = 0; a < c.n_ant; a++)
     for (int i = 0; i < c.n_re; i++) {
-      float amp = std::sqrt(noise_var * std::pow(10.f, snr_db(c.k[i] / 12) / 10.f) / 1.25f);
+      float amp = std::sqrt(noise_var * std::pow(10.f, snr_db(c.k[i] / 12) / 10.f) / std::norm(cf(1.f, 0.f) + 0.5f * std::polar(1.f, 0.7f * a)));
       float th = -2.f * float(M_PI) * 2.f * c.k[i] / 4096.f + 0.7f * a;
       cf h = amp * (cf(1.f, 0.f) + 0.5f * cf(std::cos(th), std::sin(th)));
       h += std::sqrt(noise_var / 2) * cf(n(g), n(g));
@@ -136,6 +136,38 @@ TEST(SenseQuality, DegeneratePrbInvalid)
   for (unsigned char b : z.valid_mask)
     EXPECT_EQ(b, 0);
   EXPECT_TRUE(std::isnan(z.snr_db_p50));
+}
+TEST(SenseQuality, SnrGateAt6And1Db)
+{
+  auto q6 = run(make(128, [](int) { return 6.f; }, 1.f), 1.f);
+  EXPECT_GE(q6.valid_cfr_prbs, 90); /* per-PRB estimate noise (6 RE x 4 ant) rejects ~20 % at 6 dB; p50 is of the survivors */
+  EXPECT_NEAR(q6.snr_db_p50, 6.f, 1.f);
+  EXPECT_NEAR(q6.snr_db_p10, 6.f, 1.5f);
+  auto q1 = run(make(128, [](int) { return 1.f; }, 1.f), 1.f);
+  EXPECT_LE(q1.valid_cfr_prbs, 12); /* only estimate-noise outliers; the old (S+N)/N SNR reads 3.5 dB here and passes many more */
+  EXPECT_TRUE(std::isnan(q1.snr_db_p50) || q1.snr_db_p50 >= 3.f);
+}
+TEST(SenseQuality, NonZeroFirstPrbMaskOffset)
+{
+  Cfr c = make(64, [](int p) { return p < 10 ? -10.f : 20.f; }, 1.f);
+  for (auto &k : c.k)
+    k += 12 * 40;
+  auto q = run(c, 1.f);
+  EXPECT_EQ(q.first_prb, 40);
+  EXPECT_EQ(q.valid_cfr_prbs, 54);
+  for (int p = 0; p < 64; p++)
+    EXPECT_EQ(bit(q, p), p >= 10) << p;
+  EXPECT_FALSE(bit(q, 64));
+}
+TEST(SenseQuality, InfInFitSymbolInvalid)
+{
+  Cfr c = make(16, [](int) { return 20.f; }, 1.f);
+  for (int i = 0; i < c.n_re; i++)
+    if (c.k[i] / 12 == 3)
+      c.iq[2 * i] = INFINITY;
+  auto q = run(c, 1.f);
+  EXPECT_FALSE(bit(q, 3));
+  EXPECT_EQ(q.valid_cfr_prbs, 15);
 }
 TEST(SenseQuality, SingleSymbolConsistNan)
 {
