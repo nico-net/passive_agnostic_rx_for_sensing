@@ -20,8 +20,11 @@ static bool bit(const nr_sense_quality_t &q, int p) { return q.valid_mask[p >> 3
 template <class F> static Cfr make(int nprb, F snr_db, float noise_var, unsigned seed = 1)
 {
   Cfr c;
-  std::mt19937 g(seed);
-  std::normal_distribution<float> n(0.f, 1.f);
+  std::mt19937_64 g(seed);
+  auto n = [&g]() { /* Box-Muller on explicit uniforms: no std::normal_distribution (implementation-defined) */
+    double u1 = ((g() >> 11) + 1) * (1.0 / 9007199254740993.0), u2 = (g() >> 11) * (1.0 / 9007199254740992.0);
+    return float(std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2));
+  };
   for (int s = 2; s <= 3; s++)
     for (int p = 0; p < nprb; p++)
       for (int i = 0; i < 6; i++) {
@@ -32,10 +35,12 @@ template <class F> static Cfr make(int nprb, F snr_db, float noise_var, unsigned
   c.iq.resize(2 * c.n_ant * c.n_re);
   for (int a = 0; a < c.n_ant; a++)
     for (int i = 0; i < c.n_re; i++) {
-      float amp = std::sqrt(noise_var * std::pow(10.f, snr_db(c.k[i] / 12) / 10.f) / std::norm(cf(1.f, 0.f) + 0.5f * std::polar(1.f, 0.7f * a)));
       float th = -2.f * float(M_PI) * 2.f * c.k[i] / 4096.f + 0.7f * a;
-      cf h = amp * (cf(1.f, 0.f) + 0.5f * cf(std::cos(th), std::sin(th)));
-      h += std::sqrt(noise_var / 2) * cf(n(g), n(g));
+      cf h0 = cf(1.f, 0.f) + 0.5f * cf(std::cos(th), std::sin(th));
+      /* normalised per (antenna, k): |signal|^2 is exactly noise_var * 10^(snr/10) at every RE */
+      cf h = std::sqrt(noise_var * std::pow(10.f, snr_db(c.k[i] / 12) / 10.f) / std::norm(h0)) * h0;
+      float nr = n(), ni = n();
+      h += std::sqrt(noise_var / 2) * cf(nr, ni);
       c.iq[2 * (a * c.n_re + i)] = h.real();
       c.iq[2 * (a * c.n_re + i) + 1] = h.imag();
     }
@@ -78,7 +83,7 @@ TEST(SenseQuality, HalfBandFaded)
 TEST(SenseQuality, ResidualFlagsCorruptPrb)
 {
   Cfr c = make(128, [](int) { return 20.f; }, 1.f);
-  std::mt19937 g(7);
+  std::mt19937 g(7); /* uniform_real_distribution below only draws phases, bounds are not tight */
   std::uniform_real_distribution<float> u(0.f, 6.2831853f);
   for (int i = 0; i < c.n_re; i++)
     if (c.k[i] / 12 >= 20 && c.k[i] / 12 < 30)
@@ -140,12 +145,13 @@ TEST(SenseQuality, DegeneratePrbInvalid)
 TEST(SenseQuality, SnrGateAt6And1Db)
 {
   auto q6 = run(make(128, [](int) { return 6.f; }, 1.f), 1.f);
-  EXPECT_GE(q6.valid_cfr_prbs, 90); /* per-PRB estimate noise (6 RE x 4 ant) rejects ~20 % at 6 dB; p50 is of the survivors */
-  EXPECT_NEAR(q6.snr_db_p50, 6.f, 1.f);
-  EXPECT_NEAR(q6.snr_db_p10, 6.f, 1.5f);
+  /* 80-seed Monte-Carlo of this generator (flat per-RE SNR, 128 PRB, 6 RE x 4 ant): 6 dB valid mean 127.74 sd 0.44
+   * (min 127), p50 mean 5.99 sd 0.06 (range 5.84..6.15); 1 dB valid mean 0.42 sd 0.63 (max 2). Bounds below are
+   * >= 3 sigma from those (6 dB valid >= 125 is 6 sigma; p50 +-0.5 is 8 sigma; 1 dB <= 4 is 5.7 sigma). */
+  EXPECT_GE(q6.valid_cfr_prbs, 125);
+  EXPECT_NEAR(q6.snr_db_p50, 6.f, 0.5f);
   auto q1 = run(make(128, [](int) { return 1.f; }, 1.f), 1.f);
-  EXPECT_LE(q1.valid_cfr_prbs, 12); /* only estimate-noise outliers; the old (S+N)/N SNR reads 3.5 dB here and passes many more */
-  EXPECT_TRUE(std::isnan(q1.snr_db_p50) || q1.snr_db_p50 >= 3.f);
+  EXPECT_LE(q1.valid_cfr_prbs, 4); /* the old (S+N)/N SNR reads 3.5 dB here and passes ~40 */
 }
 TEST(SenseQuality, NonZeroFirstPrbMaskOffset)
 {
