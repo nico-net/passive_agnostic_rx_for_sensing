@@ -142,6 +142,11 @@ past its operator checkpoint. From it this plan uses:
   - **SNR**: mean |H|² over antennas and REs, divided by `noise_var`.
   - **Residual**: fit H on the PRB's REs of one symbol with a first-order (linear in k) model, per antenna. The
     residual is the mean |H - fit|² divided by the mean |H|².
+  - **Precoding boundaries (operator 2026-11-04)**: DM-RS CFR is the precoded channel H·W, and W may change at every
+    PRG boundary (PRB bundling: 2, 4 PRB or wideband, learned per RNTI by the PRG sweep in nr_pdsch_passive_decode.c).
+    No S2 computation may fit, smooth or correlate across a PRG boundary. The per-PRB fit above already holds this,
+    because PRG boundaries are PRB boundaries. Any future multi-PRB step must use the learned PRG size, and must
+    assume the smallest PRG (2 PRB) when the size is unknown, never wideband.
   - **Valid** when all of these hold:
     - SNR >= `NR_SENSE_PRB_SNR_MIN_DB` (3.0);
     - residual <= `NR_SENSE_PRB_RESID_MAX` (0.25);
@@ -187,6 +192,8 @@ past its operator checkpoint. From it this plan uses:
 - Test: `tests/nr_sense_records_test.cc`, `tests/nr_sense_api_test.cc`
 
 **Interfaces:**
+- Precoding context (operator 2026-11-04): every DM-RS CFR record carries `prg_size` (2, 4, 0 = wideband, null =
+  unknown) from the PRG sweep, so post-processing never treats a CFR as one channel across PRGs.
 - Consumes: S2.
 - JSON keys added to RS records:
   - `allocated_prbs`, `estimated_usable_prbs`, `valid_cfr_prbs`, `valid_mask` (hex), `first_prb`;
