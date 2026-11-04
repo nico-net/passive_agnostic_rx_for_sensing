@@ -7,6 +7,7 @@
 #include "nr_sense_ul.h"
 #include "nr_srs_export.h"
 #include "nr_sense_api.h"
+#include "nr_sense_unit.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_passive_cfg_epoch.h"
@@ -338,10 +339,15 @@ static void *srs_worker(void *arg)
       struct timespec ts={.tv_nsec=1000000};nanosleep(&ts,NULL);continue;
     }
     struct timespec begin,end;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&begin);
+    const uint64_t t_start=nr_isac_mode()==NR_ISAC_MODE_SENSING?nr_sense_now_ns():0; /* per-unit wait (sensing mode only) */
     process_srs(job);
     clock_gettime(CLOCK_THREAD_CPUTIME_ID,&end);
     const uint64_t elapsed_ns=(int64_t)(end.tv_sec-begin.tv_sec)*1000000000+end.tv_nsec-begin.tv_nsec;
     atomic_fetch_add(&sr.elapsed_us,elapsed_ns/1000);
+    if(t_start) { /* per-unit cost: the thread-CPU pair above is reused; the blind search has no RNTI: unit rnti 0 */
+      const uint64_t t_end=nr_sense_now_ns(),t_cap=job->meta.t_mono_ns;
+      nr_sense_unit_job(NR_UNIT_SRS,0,elapsed_ns,t_cap && t_start>t_cap?t_start-t_cap:0,t_cap && t_end>t_cap && t_end-t_cap>NR_UNIT_LATE_NS,0,t_end);
+    }
     atomic_store(&sr.pregate_skip,sr.idle.pregate_skip);
     atomic_store(&sr.backoff_skip,sr.idle.backoff_skip);
     atomic_store(&sr.budget_skip,sr.idle.budget_skip);

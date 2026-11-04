@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include "nr_sense_api.h"
 #include "nr_traffic_record.h"
+#include "nr_sense_records.h"
+#include "nr_sense_unit.h"
+#include "common/utils/nr_cell.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include <algorithm>
 #include <chrono>
@@ -355,6 +358,34 @@ TEST_F(QRing, QualityMatchesComputeAndWideU32Path)
   EXPECT_EQ(memcmp(got.valid_mask,want.valid_mask,sizeof want.valid_mask),0);
   EXPECT_EQ(got.valid_cfr_prbs,want.valid_cfr_prbs);
   EXPECT_EQ(got.snr_db_p50,want.snr_db_p50);
+}
+/* S5: the writer reports each formatted RS record of a sensing-mode frame to its unit; legacy and traffic leave the unit table untouched */
+TEST_F(QRing, UnitCfrFromWriter)
+{
+  nr_cell_bind(0);
+  nr_sense_unit_reset(0);
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+  open(8);
+  nr_sense_rs_meta_t m{};
+  m.rnti = 0x4601; m.ssb_index = -1; m.k_ssb = -1; m.ta_est_samples = -1; m.transform_precoding = -1; m.dmrs_type = 1; m.dmrs_add_pos = -1; m.dmrs_n_scid = -1;
+  m.nb_rb = 4; m.n_re = (int)k.size(); m.n_ant = 1; m.ports = 1;
+  for (nr_isac_mode_t md : {NR_ISAC_MODE_LEGACY, NR_ISAC_MODE_TRAFFIC}) {
+    nr_isac_mode_set(md);
+    nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DMRS, &m, push(1));
+    usleep(300000);
+    nr_sense_unit_view_t v[4];
+    EXPECT_EQ(nr_sense_unit_snapshot(0, v, 4), 0) << "mode " << md << " must not touch the unit table";
+  }
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DMRS, &m, push(2));
+  nr_sense_unit_view_t v[4];
+  int n = 0;
+  for (int i = 0; i < 400 && !(n = nr_sense_unit_snapshot(0, v, 4)); i++) usleep(5000);
+  ASSERT_EQ(n, 1);
+  EXPECT_EQ(v[0].rnti, 0x4601);
+  EXPECT_EQ(v[0].src, NR_UNIT_PDSCH_DMRS);
+  EXPECT_GT(v[0].valid_ratio, 0.f);
+  nr_sense_unit_reset(0);
 }
 TEST_F(QRing, LegacyPushComputesNothing)
 {

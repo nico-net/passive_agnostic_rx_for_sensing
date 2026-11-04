@@ -54,6 +54,7 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "nr_pdsch_mimo_ls.h"
 #include "nr_sense_api.h"
+#include "nr_sense_unit.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_prg_latched
 #include "executables/nr-uesoftmodem.h"
@@ -813,11 +814,16 @@ static void da_run(void *arg)
     int b = w_us ? 64 - __builtin_clzll(w_us) : 0; /* 0, 1, 2-3, 4-7, ... us */
     atomic_fetch_add(&P->wait_hist[b > 23 ? 23 : b], 1);
   }
+  const uint64_t unit_c0 = nr_sense_unit_cpu_ns(); /* sensing mode: re-encode, recon, CFR export are the cost of the RNTI's PDSCH_DATA unit */
   nr_isac_abs_slot_override = j->abs_slot;
   nr_isac_pdsch_data_aided_submit(j->ue, &j->proc, &j->cw, &j->dlsch, &j->fa, j->rnti, j->tb, j->harq_tag, (const c16_t(*)[P->stride])j->rx, j->nvar, j->G,
                                   j->dmrs_snr_db);
   nr_isac_abs_slot_override = 0;
-  atomic_fetch_add(&P->run_ns, da_now_ns() - t0);
+  const uint64_t t1 = da_now_ns();
+  if (unit_c0)
+    nr_sense_unit_job(NR_UNIT_PDSCH_DATA, j->rnti, nr_sense_unit_cpu_ns() - unit_c0, t0 - j->t_enq_ns, t1 - j->t_enq_ns > NR_UNIT_LATE_NS,
+                      (uint16_t)j->fa.num_rbs, t1);
+  atomic_fetch_add(&P->run_ns, t1 - t0);
   const uint64_t n = atomic_fetch_add(&P->done, 1) + 1;
   if (n == 1 || n % 2000 == 0) {
     uint64_t q, d_, d, sv;

@@ -4,6 +4,7 @@
 #include "common/utils/nr_cell.h"
 #include "nr_sense_api.h"
 #include "nr_sense_records.h"
+#include "nr_sense_unit.h"
 #include "nr_traffic_record.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 /* The standalone core test links without the receiver record module. The receiver
@@ -277,6 +278,11 @@ static void *run_writer(void *arg)
         rs_job_t *job=&rs_jobs[at];
         char *line=records+(size_t)at*RECORD_BYTES;
         if (!job_quality(job,i>0) ) { count=i; break; }   /* frame still queued: stop the batch, the frame stream runs next */
+        if (job->meta.q_valid) { /* per-unit view of the record (sensing mode only: the call is a no-op otherwise) */
+          const int us=job->src==NR_SENSE_SRC_PDSCH_DMRS?NR_UNIT_PDSCH_DMRS:job->src==NR_SENSE_SRC_PDSCH_DATA?NR_UNIT_PDSCH_DATA:
+                       job->src==NR_SENSE_SRC_PUSCH_DMRS?NR_UNIT_PUSCH_DMRS:job->src==NR_SENSE_SRC_SRS?NR_UNIT_SRS:-1;
+          if (us>=0) nr_sense_unit_cfr((nr_unit_src_t)us,(uint16_t)job->meta.rnti,job->meta.q.valid_cfr_prbs,job->meta.q.snr_db_p50,nr_sense_now_ns());
+        }
         length=nr_sense_rs_to_json(job->src,&job->meta,job->frame_id,line,RECORD_BYTES-1);
         if (length>0) { line[length]='\n'; record_lengths[at]=(uint32_t)length+1; }
         else { record_lengths[at]=0; format_drops++; }

@@ -103,6 +103,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "nr_traffic_decode.h"
 #include "nr_traffic_dci_fields.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
+#include "nr_sense_unit.h"
 #include "nr_pusch_passive_decode.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_gating.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
@@ -10184,6 +10185,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
     // Full-slot FEP for the PDSCH's own DMRS symbol -- separate from the CORESET FEP above (a
     // different symbol in general; the PDSCH allocation starts after the PDCCH region).
     const uint64_t t_sense_chest=nr_sense_blind_extra_chest(dmrs_source,cfg->min_snr_lin) ? nr_sense_now_ns() : 0;
+    const uint64_t uc_chest = t_sense_chest ? nr_sense_unit_cpu_ns() : 0; /* per-unit cost (sensing mode): the chest that only the DM-RS tap needs */
     const uint64_t btim_t_che = btim_on ? btim_now() : 0;
     __attribute__((aligned(32))) c16_t rxdataF_pdsch[fp->nb_antennas_rx][rxdataF_sz];
     nr_slot_fep(ue, fp, proc->nr_slot_rx, dmrs_sym, rxdataF_pdsch, link_type_dl, 0, ue->common_vars.rxdata);
@@ -10195,6 +10197,10 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
     if (t_sense_chest)
       nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PDSCH_DMRS,nr_sense_now_ns()-t_sense_chest);
     btim_add(BTIM_CHEST, btim_t_che);
+    const uint64_t uc_mark = (uc_chest || want_dmrs) ? nr_sense_unit_cpu_ns() : 0; /* 0 outside the sensing mode */
+    const uint64_t uc_acc = uc_chest && uc_mark ? uc_mark - uc_chest : 0;
+    if (uc_mark && !want_dmrs) /* chest only: no extraction follows */
+      nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, out.rnti, uc_acc, 0, false, (uint16_t)chest_alloc.num_rbs, nr_sense_now_ns());
 
     const int num_sc = chest_alloc.num_rbs * NR_NB_SC_PER_RB;
     if (num_sc >= 2) {
@@ -10233,6 +10239,8 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       }
       if (t_sense_extract)
         nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PDSCH_DMRS,nr_sense_now_ns()-t_sense_extract);
+      if (uc_mark && want_dmrs) /* the grant's chest (if extra) + extraction: one message of the RNTI's PDSCH_DMRS unit */
+        nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, out.rnti, uc_acc + (nr_sense_unit_cpu_ns() - uc_mark), 0, false, (uint16_t)chest_alloc.num_rbs, nr_sense_now_ns());
       // ---- Gate 3 (last, most expensive to reach): the actual DMRS channel estimate itself looks
       // like noise even though every payload-level check passed by chance. mean|H|^2/nvar is
       // scale-invariant (both come from the SAME nr_pdsch_channel_estimation() call), so no absolute
@@ -10262,8 +10270,11 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
           /* exported slot index: the producer's un-wrapped clock (hyper-frame extended), the one SSB/CSI-RS/pdsch_data/UL rows use; the
            * frame-derived abs_slot above stays the internal key (rings, hashes) */
           const uint32_t export_slot = (uint32_t)nr_sense_abs_slot_align(source_absolute_slot, proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame);
+          const uint64_t uc_sub = nr_sense_unit_cpu_ns();
           nr_isac_submit_cfr_multi_meta(export_slot, 0.0f, dmrs_source, &carrier, isac_h, nof_ant,
                                         273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, nvar > 0 ? (float)nvar : NAN, &rs_meta);
+          if (uc_sub) /* the hand-off into the sense ring: cost only (the message was counted above) */
+            nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, out.rnti, nr_sense_unit_cpu_ns() - uc_sub, 0, false, 0, nr_sense_now_ns());
           NR_BLIND_CTR_INC(g_cfr_submits);
         }
 
