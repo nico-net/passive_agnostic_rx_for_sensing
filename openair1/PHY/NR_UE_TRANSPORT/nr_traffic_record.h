@@ -41,6 +41,7 @@ void nr_sense_emit_decode(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti
 /* Traffic-mode counters of this cell (ISAC_METRICS). accepted[] is indexed by NR_DCI_REC_FMT_*, state[] by nr_layout_state_t. */
 typedef struct {
   uint64_t accepted[4], state[4], dup, traffic_skip, check_decodes, check_fail, probe_decodes, reopens, reopens_ul;
+  uint64_t check_dl, check_ul, probe_dl, probe_ul, probe_skip, ul_decode_skip;   /* E4: check/probe_decodes are the DL+UL sums */
   uint64_t e1_changes, e1_skip_classes, e1_unfed;
   uint64_t e1_deferred_scoped;   /* the same, of a solved RNTI's own-class (scoped) looks */
   uint64_t e1_deferred;   /* E1 looks held back by the per-cell prove budget (20 ms per s), once per RNTI episode */
@@ -50,7 +51,8 @@ typedef struct {
 void nr_traffic_count_dci(int fmt, nr_layout_state_t ls, uint64_t emit_ns);   /* one emitted DCI record + its fill+emit time */
 void nr_traffic_count(int what);   /* NR_TRAFFIC_CNT_* */
 enum { NR_TRAFFIC_CNT_DUP, NR_TRAFFIC_CNT_SKIP, NR_TRAFFIC_CNT_CHECK, NR_TRAFFIC_CNT_CHECK_FAIL, NR_TRAFFIC_CNT_PROBE, NR_TRAFFIC_CNT_REOPEN, NR_TRAFFIC_CNT_REOPEN_UL, NR_TRAFFIC_CNT_E1_CHANGE, NR_TRAFFIC_CNT_E1_SKIP, NR_TRAFFIC_CNT_E1_UNFED,
-       NR_TRAFFIC_CNT_E1_CLS_1, NR_TRAFFIC_CNT_E1_CLS_2_4, NR_TRAFFIC_CNT_E1_CLS_5_16, NR_TRAFFIC_CNT_E1_CLS_17_64, NR_TRAFFIC_CNT_E1_CLS_GT64, NR_TRAFFIC_CNT_E1_DEFERRED, NR_TRAFFIC_CNT_E1_DEFERRED_SCOPED };
+       NR_TRAFFIC_CNT_E1_CLS_1, NR_TRAFFIC_CNT_E1_CLS_2_4, NR_TRAFFIC_CNT_E1_CLS_5_16, NR_TRAFFIC_CNT_E1_CLS_17_64, NR_TRAFFIC_CNT_E1_CLS_GT64, NR_TRAFFIC_CNT_E1_DEFERRED, NR_TRAFFIC_CNT_E1_DEFERRED_SCOPED,
+       NR_TRAFFIC_CNT_CHECK_UL, NR_TRAFFIC_CNT_PROBE_UL, NR_TRAFFIC_CNT_PROBE_SKIP, NR_TRAFFIC_CNT_UL_SKIP, NR_TRAFFIC_CNT_N };   /* CHECK/PROBE = DL */
 void nr_traffic_stats_get(nr_traffic_stats_t *s);
 /* Traffic mode: one decode outcome (probe or full decode, crc < 0 = no verdict) -> the "decode" record, the check/probe counters and the
  * reopen decision. Returns true after K consecutive counted failures. dir 0: the caller then calls nr_pdsch_solver_reopen (reopens). dir 1: the

@@ -360,6 +360,23 @@ static void feed_all(uint16_t rnti, const std::vector<Dci> &v, int len)
   for (const Dci &d : v) nr_dci11_bank_feed(rnti, d.p, (uint16_t)len, d.slot, &FEED);
 }
 
+TEST(Dci11Prove, BankAliveCountForTriage)
+{
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  std::mt19937 rng(11);
+  Cfg a;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(a, &l, &o);
+  const nr_dci11_class_t kc = cls_of(l, o);
+  const uint16_t rnti = 0x4602;
+  EXPECT_EQ(nr_dci11_bank_alive(rnti), -1);                            // never looked at
+  feed_all(rnti, gen_stream(a, 64, rng), o.total);
+  EXPECT_EQ(nr_dci11_bank_alive(rnti), -1);                            // fed, not proved yet
+  ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
+  EXPECT_EQ(nr_dci11_bank_alive(rnti), 1);                             // exactly the proven split
+}
+
 TEST(Dci11Prove, ReopensOnViolations)
 {
   nr_cell_bind(0);

@@ -1,4 +1,5 @@
 #include "nr_traffic_record.h"
+#include "nr_traffic_decode.h"
 #include <gtest/gtest.h>
 #include <cstdlib>
 #include <cstring>
@@ -115,6 +116,31 @@ TEST(TrafficRecord, DecodeRecordShape)
   std::string l2; ASSERT_TRUE(std::getline(f,l2)); EXPECT_TRUE(has(l2,"\"dci_abs_slot\":null"));
   EXPECT_TRUE(has(line,"\"rnti\":17767")); EXPECT_TRUE(has(line,"\"crc\":1")); EXPECT_TRUE(has(line,"\"learned\":\"dci_len\""));
   unlink(path);
+}
+// E4: a probe the triage skipped changes nothing in the DCI record (the record is written at accept, with the decode verdict "none")
+TEST(TrafficRecord, SkippedProbeStillHasItsDciRecord)
+{
+  auto r=fixture(NR_LAYOUT_UNSOLVED); r.decode=NR_DCI_DECODE_NONE;
+  const std::string d=json(r);
+  EXPECT_TRUE(has(d,"\"type\":\"dci\"")); EXPECT_TRUE(has(d,"\"rnti\":4660")); EXPECT_TRUE(has(d,"\"dci_bits\":\"ab01ff001080\""));
+  EXPECT_FALSE(nr_traffic_probe_wanted(0, 0x1234, 0, 1, 1, false, 40.f, 9, 1));   // the very case: first DCI, no family, no probe
+}
+TEST(TrafficRecord, CountersSplitByDirection)
+{
+  nr_traffic_stats_t a, b;
+  nr_traffic_stats_get(&a);
+  nr_traffic_decode_outcome(1, -1, 0x300, 0, true, 0, 0, 10.f);
+  nr_traffic_decode_outcome(1, -1, 0x300, 1, true, 0, 0, 10.f);
+  nr_traffic_decode_outcome(1, -1, 0x300, 1, true, 0, 1, 10.f);
+  nr_traffic_decode_outcome(1, -1, 0x300, 0, false, 0, 1, 10.f);
+  nr_traffic_decode_outcome(1, -1, 0x300, 1, false, 0, 1, 10.f);
+  nr_traffic_decode_outcome(1, -1, 0x300, 1, false, 0, 0, 10.f);
+  nr_traffic_count(NR_TRAFFIC_CNT_PROBE_SKIP); nr_traffic_count(NR_TRAFFIC_CNT_UL_SKIP);
+  nr_traffic_stats_get(&b);
+  EXPECT_EQ(b.probe_dl - a.probe_dl, 1u); EXPECT_EQ(b.probe_ul - a.probe_ul, 2u);
+  EXPECT_EQ(b.check_dl - a.check_dl, 1u); EXPECT_EQ(b.check_ul - a.check_ul, 2u);
+  EXPECT_EQ(b.probe_decodes - a.probe_decodes, 3u); EXPECT_EQ(b.check_decodes - a.check_decodes, 3u);
+  EXPECT_EQ(b.probe_skip - a.probe_skip, 1u); EXPECT_EQ(b.ul_decode_skip - a.ul_decode_skip, 1u);
 }
 TEST(TrafficRecord, BitsUnavailablePrintsNull)
 {

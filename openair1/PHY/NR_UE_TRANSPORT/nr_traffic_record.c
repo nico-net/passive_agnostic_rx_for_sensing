@@ -105,7 +105,7 @@ void nr_sense_emit_decode(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti
 #include <stdatomic.h>
 #include <stdlib.h>
 #define TS_RING 512
-typedef struct { _Atomic uint64_t accepted[4], state[4], cnt[17]; _Atomic uint32_t emit_us[TS_RING]; _Atomic uint32_t w; } traffic_ctr_t;
+typedef struct { _Atomic uint64_t accepted[4], state[4], cnt[NR_TRAFFIC_CNT_N]; _Atomic uint32_t emit_us[TS_RING]; _Atomic uint32_t w; } traffic_ctr_t;
 NR_CELL_STATIC(traffic_ctr_t, g_traffic_ctr)
 #define g_traffic_ctr NR_CELL_REF(g_traffic_ctr)
 
@@ -120,7 +120,7 @@ void nr_traffic_count_dci(int fmt, nr_layout_state_t ls, uint64_t emit_ns)
 
 void nr_traffic_count(int what)
 {
-  if (what >= 0 && what < 17) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
+  if (what >= 0 && what < NR_TRAFFIC_CNT_N) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
 }
 
 static int cmp_u32(const void *a, const void *b) { const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return (x > y) - (x < y); }
@@ -138,9 +138,15 @@ void nr_traffic_stats_get(nr_traffic_stats_t *s)
   s->e1_deferred_scoped = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_DEFERRED_SCOPED], memory_order_relaxed);
   for (int i = 0; i < 5; i++) s->e1_cls[i] = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_CLS_1 + i], memory_order_relaxed);
   s->traffic_skip = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_SKIP], memory_order_relaxed);
-  s->check_decodes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK], memory_order_relaxed);
+  s->check_dl = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK], memory_order_relaxed);
+  s->check_ul = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK_UL], memory_order_relaxed);
+  s->probe_dl = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_PROBE], memory_order_relaxed);
+  s->probe_ul = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_PROBE_UL], memory_order_relaxed);
+  s->probe_skip = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_PROBE_SKIP], memory_order_relaxed);
+  s->ul_decode_skip = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_UL_SKIP], memory_order_relaxed);
+  s->check_decodes = s->check_dl + s->check_ul;
   s->check_fail = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK_FAIL], memory_order_relaxed);
-  s->probe_decodes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_PROBE], memory_order_relaxed);
+  s->probe_decodes = s->probe_dl + s->probe_ul;
   s->reopens = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_REOPEN], memory_order_relaxed);
   s->reopens_ul = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_REOPEN_UL], memory_order_relaxed);
   uint32_t v[TS_RING]; int n = 0;
@@ -180,8 +186,10 @@ void nr_traffic_retx_reset(void)
 bool nr_traffic_decode_outcome(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db)
 {
   nr_sense_emit_decode(abs_slot, dci_abs_slot, rnti, dir, probe, crc, snr_db, NULL);
-  if (probe) { nr_traffic_count(NR_TRAFFIC_CNT_PROBE); return false; }
-  nr_traffic_count(NR_TRAFFIC_CNT_CHECK);
+  /* backoff of the probe/UL-decode triage (nr_traffic_decode.h): a UL trial/probe failure is not a failure of the UL decode gate, a pass is */
+  if (crc >= 0 && (dir == 0 ? probe : (!probe || crc == 1))) nr_traffic_probe_result(dir, rnti, crc == 1);
+  if (probe) { nr_traffic_count(dir ? NR_TRAFFIC_CNT_PROBE_UL : NR_TRAFFIC_CNT_PROBE); return false; }
+  nr_traffic_count(dir ? NR_TRAFFIC_CNT_CHECK_UL : NR_TRAFFIC_CNT_CHECK);
   if (crc == 0) nr_traffic_count(NR_TRAFFIC_CNT_CHECK_FAIL);
   const bool reopen = crc >= 0 && nr_traffic_decode_result(dir, rnti, rv, snr_db, crc == 1);
   if (reopen) nr_traffic_count(dir ? NR_TRAFFIC_CNT_REOPEN_UL : NR_TRAFFIC_CNT_REOPEN);

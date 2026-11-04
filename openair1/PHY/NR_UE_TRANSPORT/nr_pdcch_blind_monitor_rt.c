@@ -4807,6 +4807,7 @@ static void traffic_emit_ul(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
 
 /* The decode gate of a non-probe C-RNTI job (see nr_traffic_decode.h); other RNTI classes are always decoded. */
 static bool traffic_skip_note(void) { nr_traffic_count(NR_TRAFFIC_CNT_SKIP); return true; }
+static bool traffic_ul_skip_note(void) { nr_traffic_count(NR_TRAFFIC_CNT_UL_SKIP); return traffic_skip_note(); }
 static bool traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_learned)
 {
   const bool hv = dir == 0 && rnti_class == NR_BLIND_RNTI_CLASS_C && nr_pdsch_solver_take_hrv_alert(rnti);
@@ -8569,7 +8570,8 @@ constdiag_done:;
         if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
           const uint64_t tt0 = btim_now_ns();
           const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
-          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti));
+          /* E4: with the lock off there is no lock to wait for (the layout is as known as it gets) */
+          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, nr_ul_layout_lock_enabled() ? uls : NR_LAYOUT_SOLVED, nr_pusch_passive_ul_table_learned(u->rnti));
           traffic_emit_ul(cfg, fp, u, &ul_opts, cand_task[ti].L, cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot, source_absolute_slot,
                           uls, ul_dec, tt0);
         }
@@ -8647,7 +8649,7 @@ constdiag_done:;
           /* UL-LAYOUT: until this length is locked only its DM-RS probe (booked above) reaches the PUSCH worker; the
            * width/U3 readings of an unlocked layout are logged but not decoded. */
         } else if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce)) {
-          if (nr_cfg_epoch_work_current() && (ul_dec || !traffic_skip_note())) nr_pusch_grant_book_add(u, source_absolute_slot);
+          if (nr_cfg_epoch_work_current() && (ul_dec || !traffic_ul_skip_note())) nr_pusch_grant_book_add(u, source_absolute_slot);
         } else if (ul_verdict == NR_DCI01_FDRA_REFUSE && ul_oracle) {
           /* Gap item 1 (PUSCH RA type 0 / dynamicSwitch). Type 1 is refuted for this class; rather than
            * drop the already-CRC-verified payload, re-extract it under each FDRA mode that reproduces
@@ -8669,7 +8671,7 @@ constdiag_done:;
                     nb, u->rnti, n_cand);
             /* One queue job preserves all interpretations through book deduplication.
              * Only the consumer's TB CRC may stop the bounded (at most four) search. */
-            if (nr_cfg_epoch_work_current() && (ul_dec || !traffic_skip_note())) nr_pusch_grant_book_add(&alternatives, source_absolute_slot);
+            if (nr_cfg_epoch_work_current() && (ul_dec || !traffic_ul_skip_note())) nr_pusch_grant_book_add(&alternatives, source_absolute_slot);
           }
 #undef s_ul_type0_booked
         }
@@ -8720,7 +8722,7 @@ constdiag_done:;
             else traffic_emit_ul(cfg, fp, &ul00, &ul_opts, cand_task[ti].L, cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot,
                                  source_absolute_slot, NR_LAYOUT_FIXED, ul00_dec, tt0);
           }
-          if (nr_cfg_epoch_work_current() && (ul00_dec || !traffic_skip_note())) nr_pusch_grant_book_add(&ul00, source_absolute_slot);
+          if (nr_cfg_epoch_work_current() && (ul00_dec || !traffic_ul_skip_note())) nr_pusch_grant_book_add(&ul00, source_absolute_slot);
         } else {
 #undef logged00
           NR_BLIND_CTR_INC(g_ul00_rejects);
@@ -8896,6 +8898,7 @@ constdiag_done:;
                                     out.mismatched_bits, ue->dci_thres))
       nr_cfg_epoch_note_si_modification(cfg_abs_slot, nr_cfg_epoch_si_period());
     NR_BLIND_CTR_INC(g_accepts);
+    int t_seen = 0; /* traffic mode only: DCIs of this DL RNTI seen so far (probe triage) */
     int tw = -1; /* traffic mode only: 1 = a non-probe decode of this DCI is wanted, 0 = suppressed (-1 in legacy mode: never read) */
     if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
       const uint64_t tt0 = btim_now_ns();
@@ -8909,7 +8912,9 @@ constdiag_done:;
       /* DL 1_1 of dl_auto already went through the dir-0 dedupe (not in a discovered pass: no dir-0 dedupe there); every other accept can repeat (other passes / AL / CORESET hypotheses) */
       if (!(cand_task[ti].dl_auto && !t_discovered_token && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) && dedupe_hit(abs_slot, source_absolute_slot, out.rnti, 2)) {
         nr_traffic_count(NR_TRAFFIC_CNT_DUP);
+        t_seen = nr_traffic_note_dci(0, out.rnti, false);
       } else {
+        t_seen = nr_traffic_note_dci(0, out.rnti, true);
         const int dbs = cand_task[ti].bwp_entry > 0 && pbwp_snap[cand_task[ti].bwp_entry].start >= 0 ? pbwp_snap[cand_task[ti].bwp_entry].start : cfg->bwp_start;
         const int dbz = is10t ? (int)dci10_ctx.n_rb_riv : cand_task[ti].bwp_size;
         /* 1_1 payload exists only for dl_auto / bwp_probe tasks (dl_raw); other 1_1 extractions keep no payload: bits unavailable (null) */
@@ -9799,11 +9804,25 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
                                                     cfg->dmrs_typeA_position + 2, sv_nrm > 0, rd, nrd, sv_budget, var) : 0;
       int v = 0;
       bool tf_noted = false;
+      int tprobe = -1; /* traffic mode: probe triage verdict of THIS grant (-1 not asked yet), asked once for all its variants */
       for (; v < nv && decodes_this_occasion < cfg->pdsch_max_per_slot; v++) {
         const nr_pdcch_blind_result_t *o = &rparsed[var[v].reading];
-        if (tw == 0 && !var[v].probe && traffic_skip_note()) { /* traffic mode: a full decode the policy does not want; probes always run */
+        if (tw == 0 && !var[v].probe && traffic_skip_note()) { /* traffic mode: a full decode the policy does not want */
           nr_pdsch_solver_feedback(var[v].token, false, false);
           continue;
+        }
+        if (tw >= 0 && var[v].probe && out.rnti_class == NR_BLIND_RNTI_CLASS_C) { /* E4 probe triage (traffic mode only: tw is -1 in legacy) */
+          if (tprobe < 0) {
+            float tsnr = -100.f;
+            if (!nr_pdsch_solver_snr(out.rnti, &tsnr)) tsnr = -100.f;
+            const int na = nr_dci11_bank_alive(out.rnti);
+            tprobe = nr_traffic_probe_wanted(0, out.rnti, 0, t_seen, na < 0 ? 1 : na, false, tsnr, (int)o->mcs, (int)var[v].table) ? 1 : 0;
+          }
+          if (tprobe == 0) {
+            nr_traffic_count(NR_TRAFFIC_CNT_PROBE_SKIP);
+            nr_pdsch_solver_feedback(var[v].token, false, false);
+            continue;
+          }
         }
         if (var[v].probe && nr_admit_on()) { /* ISAC_BG_LANE: a solver probe waits for an idle critical lane */
           const uint64_t t_now = nr_admit_now_ns();

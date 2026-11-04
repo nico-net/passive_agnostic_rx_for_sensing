@@ -366,6 +366,7 @@ typedef struct {
   bool proven, scoped, deferred;   /* scoped: proved within a CRC-solved RNTI's own class only (not unique over the resolver's set); deferred: counted as budget-deferred since the last look */
   nr_dci11_class_t cls;
   nr_dci11_split_t split;
+  int alive1;                      /* 1 + splits alive over all classes at the last look (0: no look, or a class the prover could not examine) */
 } bank_t;
 /* ring generation: process-wide and never reset (a reset of the bank must not let a proof taken before it match a ring created after it) */
 static _Atomic uint32_t g_ring_rev;
@@ -460,6 +461,7 @@ static bool bank_prove_impl(uint16_t rnti, const nr_dci11_class_t *cls, int ncls
   nr_dci11_class_t first_c;
   nr_dci11_split_t first_s;
   double first_p = 1.0;
+  int n_alive = 0;
   memset(&first_c, 0, sizeof first_c);
   memset(&first_s, 0, sizeof first_s);
   sig_t first_sig;
@@ -470,7 +472,8 @@ static bool bank_prove_impl(uint16_t rnti, const nr_dci11_class_t *cls, int ncls
     nr_dci11_split_t alive[NR_DCI11_CORE_MAX];
     double cp[NR_DCI11_CORE_MAX];
     const int na = prove_impl(&cls[c].l, &cls[c].o, snap, n, ul, alive, cp, NR_DCI11_CORE_MAX, &cx);
-    if (na < 0) { multi = true; continue; }
+    if (na < 0) { multi = true; n_alive = -1000000; continue; }
+    n_alive += na;
     for (int j = 0; j < na; j++) {
       const sig_t g = sig_of(&cls[c], &alive[j]);
       if (was && memcmp(&g, &prev, sizeof g) == 0) prev_alive = true;
@@ -488,6 +491,7 @@ static bool bank_prove_impl(uint16_t rnti, const nr_dci11_class_t *cls, int ncls
     b->proved_at = fed <= b->fed ? fed : b->fed;
     b->deferred = false;
     b->due_since = 0;
+    b->alive1 = n_alive < 0 ? 0 : n_alive + 1;
     if (was && b->proven && prev_alive && !multi) {
       /* HYSTERESIS: a proof stands until the data refute it; losing significance in a later look is not a refutation. A surviving rival (multi) is
        * ambiguity and ends it. */
@@ -517,6 +521,15 @@ bool nr_dci11_bank_proven_scope(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_s
   if (ok) { *cls = b->cls; *out = b->split; if (scoped) *scoped = b->scoped; }
   pthread_mutex_unlock(&g_bank_mu);
   return ok;
+}
+
+int nr_dci11_bank_alive(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_bank_mu);
+  const bank_t *b = bank_find(rnti);
+  const int a = b && b->alive1 > 0 ? b->alive1 - 1 : -1;
+  pthread_mutex_unlock(&g_bank_mu);
+  return a;
 }
 
 bool nr_dci11_bank_proven_any(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out)

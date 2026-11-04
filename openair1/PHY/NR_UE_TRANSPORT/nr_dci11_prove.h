@@ -98,6 +98,8 @@ void nr_dci11_bank_feed(uint16_t rnti, nr_dci_bits_t payload, uint16_t len, int6
  * proved outside it. Every class is proved; the RNTI is PROVEN when exactly one distinct reading (absolute field positions) survives over all classes,
  * with chance_p < alpha / ncls. A proof stands (hysteresis) until a later look refutes that reading. Returns true when the proven state changed. */
 bool nr_dci11_bank_maybe_prove(uint16_t rnti, const nr_dci11_class_t *cls, int ncls, nr_ul_slot_fn ul);
+/* Splits alive over every class at the last look of rnti (E4 triage: 0 = every split refuted); -1 = no look yet, or a class the prover could not examine. */
+int nr_dci11_bank_alive(uint16_t rnti);
 /* The proven reading with the class it was proved in. */
 bool nr_dci11_bank_proven_any(uint16_t rnti, nr_dci11_class_t *cls, nr_dci11_split_t *out);
 /* The same, only when its class reads like (l, o) (a solved RNTI's representative layout). */
