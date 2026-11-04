@@ -30,6 +30,7 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   if (!r || !buf || !n) return -1;
   static const char *const lname[] = {"fixed", "solved", "candidate", "unsolved"};
   const bool nolayout = r->layout_state == NR_LAYOUT_CANDIDATE || r->layout_state == NR_LAYOUT_UNSOLVED;
+  const bool unproven = !nolayout && r->layout_evidence == NR_LAYOUT_EV_PHYS && r->grant_unproven;
   nr_passive_obs_t o = r->o;
   if (nolayout) o.start_rb = o.nb_rb = o.start_sym = o.nb_sym = o.mcs = o.mcs_table = o.qm = o.nl = o.tbs =
       o.harq_pid = o.ndi = o.rv = -1;
@@ -41,6 +42,15 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   }
   char g[2048];
   if (nr_sense_grant_to_json(&o, &r->m, g, sizeof g) < 0) return -1;
+  if (!nolayout && r->layout_evidence == NR_LAYOUT_EV_PHYS) {   /* the DM-RS symbols come from S and L, which physics never proves: the unsigned field prints null */
+    char *d = strstr(g, "\"dmrs_symb_pos\":");
+    if (d) {
+      char *v = d + 16, *e = v;
+      while (*e >= '0' && *e <= '9') e++;
+      memmove(v + 4, e, strlen(e) + 1);
+      memcpy(v, "null", 4);
+    }
+  }
   char *t = strstr(g, "\"type\":\"grant\"");
   const size_t gl = strlen(g);
   if (!t || gl < 2) return -1;
@@ -70,19 +80,18 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   if (r->m.identity_gen < 0 || r->m.dedicated_epoch < 0) tput(&j, ",\"cfg_ref\":null");
   else tput(&j, ",\"cfg_ref\":\"%d.%d.%u\"", r->m.identity_gen, r->m.dedicated_epoch, r->cfg_ref_ver);
   tint(&j, "bwp_start", r->bwp_start); tint(&j, "bwp_size", r->bwp_size); tint(&j, "start_rb_bwp", r->start_rb_bwp);
-#define L(k, f) tint(&j, k, nolayout ? -1 : r->f)
+#define L(k, f) tint(&j, k, (nolayout || unproven) ? -1 : r->f)
   L("vrb_prb", vrb_prb); L("tda_index", tda_index); L("k0", k0);
 #undef L
   /* the HARQ-ACK fields of a split proven from bits are exact whatever the rest of the layout is */
-  const bool unproven = !nolayout && r->layout_evidence == NR_LAYOUT_EV_PHYS && r->grant_unproven;
   const bool hq = (!nolayout && !unproven) || r->fields_evidence == NR_LAYOUT_EV_BITS;
   tint(&j, "k1", hq ? r->k1 : -1); tint(&j, "dai", hq ? r->dai : -1); tint(&j, "tpc", hq ? r->tpc : -1); tint(&j, "pri", hq ? r->pri : -1);
-  tint(&j, "srs_req", r->srs_req); tint(&j, "csi_req", r->csi_req); tint(&j, "ulsch_ind", r->ulsch_ind);
-  tint(&j, "cbgti", r->cbgti); tint(&j, "retx", (nolayout || unproven) ? -1 : r->retx);
+  tint(&j, "srs_req", unproven ? -1 : r->srs_req); tint(&j, "csi_req", unproven ? -1 : r->csi_req); tint(&j, "ulsch_ind", unproven ? -1 : r->ulsch_ind);
+  tint(&j, "cbgti", unproven ? -1 : r->cbgti); tint(&j, "retx", (nolayout || unproven) ? -1 : r->retx);
   tint(&j, "si_ind", r->si_ind); tint(&j, "short_msg_ind", r->short_msg_ind); tint(&j, "short_msg", r->short_msg);
   tint(&j, "tb_scaling", r->tb_scaling);
-  tint(&j, "pdsch_abs_slot", nolayout ? -1 : r->pdsch_abs_slot);
-  tint(&j, "harq_fb_abs_slot", nolayout ? -1 : r->harq_fb_abs_slot);
+  tint(&j, "pdsch_abs_slot", (nolayout || unproven) ? -1 : r->pdsch_abs_slot);
+  tint(&j, "harq_fb_abs_slot", (nolayout || unproven) ? -1 : r->harq_fb_abs_slot);
   tput(&j, ",\"decode\":%d}", (int)r->decode);
   return j.bad ? -1 : (int)j.w;
 }
@@ -155,7 +164,7 @@ void nr_traffic_stats_get(nr_traffic_stats_t *s)
 #define LD(f, k) s->f = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_##k], memory_order_relaxed)
   LD(e3_scored, E3_SCORED); LD(e3_hyps, E3_HYPS); LD(e3_ns, E3_NS); LD(e3_phys_solved, E3_PHYS_SOLVED); LD(e3_fam_accept, E3_FAM_ACCEPT);
   LD(e3_fam_tried, E3_FAM_TRIED); LD(e3_reopen_score, E3_REOPEN_SCORE); LD(e3_reopen_e1, E3_REOPEN_E1); LD(e3_deferred, E3_DEFERRED);
-  LD(e3_skip, E3_SKIP); LD(e3_qm_calls, E3_QM_CALLS); LD(e3_qm_deferred, E3_QM_DEFERRED); LD(e3_qm_ns, E3_QM_NS);
+  LD(e3_skip, E3_SKIP); LD(e3_qm_calls, E3_QM_CALLS); LD(e3_qm_deferred, E3_QM_DEFERRED); LD(e3_qm_ns, E3_QM_NS); LD(e3_trunc, E3_TRUNC);
 #undef LD
   s->traffic_skip = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_SKIP], memory_order_relaxed);
   s->check_dl = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK], memory_order_relaxed);

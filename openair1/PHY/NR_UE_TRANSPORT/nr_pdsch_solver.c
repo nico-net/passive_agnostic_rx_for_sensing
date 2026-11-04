@@ -24,7 +24,7 @@
 #define SOLVER_CAND_TRIES 96      /* confirmation probes before an unconfirmed candidate is dropped */
 #define BM_BYTES (NR_PDSCH_SOLVER_MAX_LAYOUTS / 8)
 #define HQ_RING 64
-#define PHYS_K 16                 /* E3: hypotheses tracked per RNTI by the sign test */
+#define PHYS_K 32                 /* E3: hypotheses tracked per RNTI by the sign test */
 
 typedef struct { uint64_t key; uint32_t count; } coverage_entry_t;
 /* internal diagnostic reasons, after the caller-side NR_PDSCH_SOLVER_WHY_* ones */
@@ -474,6 +474,16 @@ static double binom_tail(int n, int k, double p, bool lower)
 }
 bool nr_pdsch_solver_hq_refuted(int n, int bad) { return n > 0 && bad > 0 && binom_tail(n, bad, RVC_P0, false) < RVC_ALPHA; }
 bool nr_pdsch_solver_hq_verified(int n, int bad) { return n > 0 && binom_tail(n, bad, RVC_Q, true) < RVC_ALPHA; }
+/* N2: "verified" against the 0.5 null accepts violation rates up to ~30 % at n = 64. A layout whose fields may be PRINTED, or that may win a tie, must also have the one-sided upper
+ * confidence bound of its violation rate (Wilson score interval, alpha = NBS_SIGNIF_ALPHA, z = 3.09) below 0.2. */
+#define HQ_TRUST_MAX_RATE 0.2
+bool nr_pdsch_solver_hq_trusted(int n, int bad)
+{
+  if (!nr_pdsch_solver_hq_verified(n, bad)) return false;
+  const double z = 3.0902323, p = (double)bad / (double)n, z2 = z * z, nn = (double)n;
+  const double up = (p + z2 / (2 * nn) + z * sqrt(p * (1 - p) / nn + z2 / (4 * nn * nn))) / (1 + z2 / nn);
+  return up < HQ_TRUST_MAX_RATE;
+}
 /* rv_next_ok: retransmission rv (!= 0) follows the last rv of its pid in the order 0,2,3,1 by one step, or two (a missed DCI). */
 static bool rv_next_ok(int last, int rv)
 {
@@ -2707,7 +2717,7 @@ static int px_leader(const solver_rnti_t *r)
   return -1;
 }
 
-int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_phys_hyp_t *h, int n, nr_pdsch_e1_fn e1, void *e1_ctx, uint16_t dci_len)
+int nr_pdsch_solver_phys_note2(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_phys_hyp_t *h, int n, nr_pdsch_e1_fn e1, void *e1_ctx, uint16_t dci_len, bool incomplete)
 {
   if (!h || n <= 0) return 0;
   pthread_mutex_lock(&g_mu);
@@ -2775,7 +2785,7 @@ int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_p
           r->px_n ? r->px_c[b].lid : -1, r->px_n ? r->px_c[b].add_pos : 0, r->px_n ? r->px_c[b].det : 0, wa, wb, wp);
   }
   int got = 0;
-  for (int guard = 0; guard < PHYS_K; guard++) {
+  for (int guard = 0; guard < PHYS_K && !incomplete; guard++) {   /* an incomplete hypothesis list (tie group possibly truncated) never decides */
     const int lead = px_leader(r);
     if (lead < 0) break;
     int k = -1;
@@ -2803,7 +2813,7 @@ int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_p
       for (int d = 0; d < ng; d++) {
         int hn, hb;
         hq_score(r, gid[d], &hn, &hb);
-        if (nr_pdsch_solver_hq_verified(hn, hb)) { nver++; ok_id = gid[d]; }
+        if (nr_pdsch_solver_hq_trusted(hn, hb)) { nver++; ok_id = gid[d]; }
         else if (!nr_pdsch_solver_hq_refuted(hn, hb)) undecided = true;
       }
       if (nver != 1 || undecided) break;   /* not decisive: stay unsolved, wait for more grants */
@@ -2832,10 +2842,15 @@ bool nr_pdsch_solver_phys_fields_ok(uint16_t rnti)
   if (r && r->solved && r->phys && r->full_ok == 0) {
     int n = 0, bad = 0;
     ok = false;
-    if (g_hq_fn) { hq_score(r, r->rep, &n, &bad); ok = nr_pdsch_solver_hq_verified(n, bad); }
+    if (g_hq_fn) { hq_score(r, r->rep, &n, &bad); ok = nr_pdsch_solver_hq_trusted(n, bad); }
   }
   pthread_mutex_unlock(&g_mu);
   return ok;
+}
+
+int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_phys_hyp_t *h, int n, nr_pdsch_e1_fn e1, void *e1_ctx, uint16_t dci_len)
+{
+  return nr_pdsch_solver_phys_note2(rnti, abs_slot, h, n, e1, e1_ctx, dci_len, false);
 }
 
 bool nr_pdsch_solver_phys_check(uint16_t rnti, bool scorable, bool hit)

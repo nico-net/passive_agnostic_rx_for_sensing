@@ -2558,3 +2558,36 @@ TEST(E3Noise, LowerQuartileResidualIsUnbiasedPerAntennaCount)
     EXPECT_NEAR(sum / trials / s2, 1.0, 0.02) << nant << " RX";
   }
 }
+
+// N2: "verified" (0.5 null) accepts violation rates up to ~30 % at n = 64; only a layout whose Wilson upper bound is below 0.2 may print fields or win a tie.
+TEST(E3Hq, TrustedNeedsTheWilsonBoundBelowTwentyPercent)
+{
+  EXPECT_TRUE(nr_pdsch_solver_hq_verified(64, 19)) << "precondition: the 0.5 null alone would accept a 30 % layout";
+  for (int bad : {11, 17, 19}) EXPECT_FALSE(nr_pdsch_solver_hq_trusted(64, bad)) << "n = 64, bad = " << bad;
+  for (int bad : {9, 11}) EXPECT_FALSE(nr_pdsch_solver_hq_trusted(40, bad)) << "n = 40, bad = " << bad;   // 27 % of 40 is 11
+  EXPECT_TRUE(nr_pdsch_solver_hq_trusted(64, 0));
+  EXPECT_TRUE(nr_pdsch_solver_hq_trusted(64, 2)) << "a true layout with a few noise violations (3 %)";
+  EXPECT_FALSE(nr_pdsch_solver_hq_trusted(10, 0)) << "10 grants without a violation do not bound the rate below 20 %";
+}
+
+TEST(E3Phys, TruncatedHypothesisListNeverDecides)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e40;
+  int solved = 0;
+  for (int g = 0; g < 80; g++) {
+    auto h = e.make(1.8f, 1.2f, 1.0f);
+    nr_pdsch_solver_note_dci(r, DciAt(g), 1000 + (uint64_t)g);
+    solved += nr_pdsch_solver_phys_note2(r, 1000 + (uint64_t)g, h.data(), (int)h.size(), nullptr, nullptr, 49, true);
+  }
+  EXPECT_EQ(solved, 0);
+  // the same stream with complete lists solves
+  for (int g = 80; g < 160 && nr_pdsch_solver_rep(r) < 0; g++) {
+    auto h = e.make(1.8f, 1.2f, 1.0f);
+    nr_pdsch_solver_note_dci(r, DciAt(g), 1000 + (uint64_t)g);
+    nr_pdsch_solver_phys_note2(r, 1000 + (uint64_t)g, h.data(), (int)h.size(), nullptr, nullptr, 49, false);
+  }
+  EXPECT_EQ(nr_pdsch_solver_rep(r), 12);
+  nr_pdsch_solver_reset();
+}

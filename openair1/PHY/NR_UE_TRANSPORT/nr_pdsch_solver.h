@@ -283,10 +283,14 @@ typedef bool (*nr_pdsch_e1_fn)(void *ctx, const uint16_t *ids, int n_ids);
  *  hypothesis, outranked it on significantly more grants than it was outranked (one-sided binomial, alpha NBS_SIGNIF_ALPHA / rivals); hypotheses with identical
  *  rank are never separated, so footprint-twins keep the RNTI unsolved. The winner must also be E1-consistent. Then the RNTI is SOLVED with evidence PHYS:
  *  The winner's TIE GROUP is every significant hypothesis of this grant with the same scr / add_pos and exactly the winner's rank (footprint twins: layouts that
- *  differ only in what DM-RS physics cannot see). A group of one layout is solved as is; a larger one only if exactly one of its layouts is hq_verified and every other is
+ *  differ only in what DM-RS physics cannot see). A group of one layout is solved as is; a larger one only if exactly one of its layouts is hq_trusted and every other is
  *  hq_refuted (the solver's HARQ/RV ring), and that layout is the representative (cand_bm holds only it); otherwise no solve. Then: add_pos and scr as scored,
  *  table / S / L / rate matching unknown (learnt by CRC as for any solved RNTI), no cell seeding until a full TB passes. Returns 1 when this call solved it. dci_len is the DCI length of the grant (families are per length). */
 int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_phys_hyp_t *h, int n, nr_pdsch_e1_fn e1, void *e1_ctx, uint16_t dci_len);
+/** As nr_pdsch_solver_phys_note(), with incomplete = the caller could not list every hypothesis of the grant (its list was truncated): the counts are updated, nothing is decided. */
+int nr_pdsch_solver_phys_note2(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_phys_hyp_t *h, int n, nr_pdsch_e1_fn e1, void *e1_ctx, uint16_t dci_len, bool incomplete);
+/** A layout whose fields may print / that may win a tie: nr_pdsch_solver_hq_verified(n, bad) AND the Wilson upper bound (alpha NBS_SIGNIF_ALPHA) of its violation rate < 0.2. */
+bool nr_pdsch_solver_hq_trusted(int n, int bad);
 /** Score-drop reopen. For an RNTI SOLVED by physics (no full TB passed yet): one look at its solution on a grant, scorable = E2 could confirm it (meets the
  *  minimum PRB count), hit = it was confirmed. Over the last 16 scorable looks, misses with a binomial tail (p0 = 0.25) below alpha reopen the layout. Returns true
  *  when it reopened. Other RNTIs: ignored. */
@@ -294,7 +298,7 @@ bool nr_pdsch_solver_phys_check(uint16_t rnti, bool scorable, bool hit);
 /** True on every 16th call for an RNTI solved by physics (the cadence of the monitor's E1 re-check of its class); false otherwise. */
 bool nr_pdsch_solver_phys_tick(uint16_t rnti);
 /** May the grant fields of this RNTI (MCS, NDI, RV, HARQ pid, HARQ-ACK fields) be printed? Not while its layout is phys-solved, unconfirmed by a full TB, and the representative is not
- *  hq_verified. */
+ *  hq_trusted. */
 bool nr_pdsch_solver_phys_fields_ok(uint16_t rnti);
 /** The RNTI's current solution is phys-solved and not CRC-confirmed. */
 bool nr_pdsch_solver_phys_unconfirmed(uint16_t rnti);
@@ -307,7 +311,7 @@ int nr_pdsch_solver_families(uint16_t dci_len, nr_pdsch_family_t *out, int max);
 bool nr_pdsch_solver_family_match(uint16_t rnti, nr_dci_bits_t payload, uint16_t len);
 /** Accept an unsolved RNTI as SOLVED (PHYS) on family f: ids = the reading of this DCI (any order) that contains f->rep, scr = the hypothesis E2 confirmed (same
  *  identity form as the family's). Re-checks that the family still exists, the RNTI is unsolved and e1 (called with the family's layout alone) agrees. The representative is f->rep and cand_bm holds only it;
- *  the table is NOT inherited and the grant fields stay null until hq_verified(rep) or a full TB (nr_pdsch_solver_phys_fields_ok). 1 = accepted. */
+ *  the table is NOT inherited and the grant fields stay null until hq_trusted(rep) or a full TB (nr_pdsch_solver_phys_fields_ok). 1 = accepted. */
 int nr_pdsch_solver_family_accept(uint16_t rnti, const nr_pdsch_family_t *f, const uint16_t *ids, int n_ids, int32_t scr, uint16_t dci_len, uint64_t abs_slot,
                                   nr_pdsch_e1_fn e1, void *e1_ctx);
 

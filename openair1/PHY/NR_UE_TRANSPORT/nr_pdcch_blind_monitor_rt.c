@@ -5132,6 +5132,7 @@ static void e3_unsolved(e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, uint64
   int *rg = malloc(sizeof(int) * E3_READINGS);
   if (!h || !feet || !rg) { free(h); free(feet); free(rg); return; }
   int nh = 0, nf = 0;
+  bool trunc = false;   /* a hypothesis (twin, distinct footprint) could not be listed: the tie group may be incomplete */
   float frank[E3_READINGS], fcoh[E3_READINGS];
   int fns[E3_READINGS], fnc[E3_READINGS];
   bool fsig[E3_READINGS];
@@ -5139,8 +5140,9 @@ static void e3_unsolved(e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, uint64
   for (int k = 0; k < in->nrd && no < 128; k++) if (in->rd[k].num_rb > 0 && in->rd[k].n_ids > 0) order[no++] = k;
   for (int a = 1; a < no; a++)   /* best DM-RS fit first; unknown fits last; stable */
     for (int b = a; b > 0 && in->rd[order[b]].fit > in->rd[order[b - 1]].fit; b--) { const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t; }
-  for (int q = 0; q < no && nf < E3_READINGS; q++) {
+  for (int q = 0; q < no; q++) {
     const int k = order[q];
+    if (nf == E3_READINGS) { const int lk = e3_ld(in, fp, k); bool tw_ = false; for (int z = 0; z < nf && !tw_; z++) tw_ = lk > 0 && e3_same_foot(in, rg[z], k); if (lk > 0 && !tw_) trunc = true; continue; }   /* unscored footprints remain (twins of a scored one are fine, a new footprint is not) */
     const int ldk = e3_ld(in, fp, k);
     if (ldk <= 0) { nr_traffic_count(NR_TRAFFIC_CNT_E3_SKIP); continue; }
     bool twin = false;
@@ -5157,9 +5159,11 @@ static void e3_unsolved(e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, uint64
     rg[nf++] = k;
   }
   for (int z = 0; z < nf; z++)   /* every reading with this footprint (footprint twins stay tied for the solver) */
-    for (int k = 0; k < in->nrd && nh < E3_HYPS; k++)
-      if (in->rd[k].n_ids > 0 && e3_ld(in, fp, k) > 0 && e3_same_foot(in, rg[z], k))
+    for (int k = 0; k < in->nrd; k++)
+      if (in->rd[k].n_ids > 0 && e3_ld(in, fp, k) > 0 && e3_same_foot(in, rg[z], k)) {
+        if (nh == E3_HYPS) { trunc = true; break; }
         h[nh++] = (nr_pdsch_phys_hyp_t){in->rd[k].ids, in->rd[k].n_ids, -1, 0, frank[z], fsig[z]};
+      }
   bool taken[E3_READINGS] = {false};
   for (int e = 0; e < 3; e++) {   /* the best three significant footprints at the additional positions 1..3 */
     int best = -1;
@@ -5177,8 +5181,11 @@ static void e3_unsolved(e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, uint64
       e3_score(&feet[best], (uint32_t)fp->Nid_cell, da, 0, &ob, &s, &rank, &sig);
       sig = sig && e3_exclusive(&feet[best], (uint32_t)fp->Nid_cell, da, &ob, &s, fp->N_RB_DL);
       nhyp++;
-      for (int k = 0; k < in->nrd && nh < E3_HYPS; k++)
-        if (in->rd[k].n_ids > 0 && e3_ld(in, fp, k) > 0 && e3_same_foot(in, kb, k)) h[nh++] = (nr_pdsch_phys_hyp_t){in->rd[k].ids, in->rd[k].n_ids, -1, (uint8_t)a, rank, sig};
+      for (int k = 0; k < in->nrd; k++)
+        if (in->rd[k].n_ids > 0 && e3_ld(in, fp, k) > 0 && e3_same_foot(in, kb, k)) {
+          if (nh == E3_HYPS) { trunc = true; break; }
+          h[nh++] = (nr_pdsch_phys_hyp_t){in->rd[k].ids, in->rd[k].n_ids, -1, (uint8_t)a, rank, sig};
+        }
     }
   }
   { /* diagnostic: the first scored grants of the cell, then 1 in 200 (what the scorer sees: footprints, significant cells, noise) */
@@ -5196,7 +5203,8 @@ static void e3_unsolved(e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, uint64
   }
   t_e1_tdd_valid = false;
   ex.only = -1;
-  if (nr_pdsch_solver_phys_note(in->rnti, (uint64_t)in->abs, h, nh, e3_e1_cb, &ex, in->dlen)) nr_traffic_count(NR_TRAFFIC_CNT_E3_PHYS_SOLVED);
+  if (trunc) nr_traffic_count(NR_TRAFFIC_CNT_E3_TRUNC);
+  if (nr_pdsch_solver_phys_note2(in->rnti, (uint64_t)in->abs, h, nh, e3_e1_cb, &ex, in->dlen, trunc)) nr_traffic_count(NR_TRAFFIC_CNT_E3_PHYS_SOLVED);
   free(h); free(feet); free(rg);
   nr_traffic_add(NR_TRAFFIC_CNT_E3_HYPS, (uint64_t)nhyp);
   nr_traffic_add(NR_TRAFFIC_CNT_E3_NS, btim_now_ns() - t0);
@@ -5228,6 +5236,7 @@ static void e3_solved(e3_in_t *in, const NR_DL_FRAME_PARMS *fp, int l0, bool phy
     e3_score(ff, nid, dm, 0, &ob, &s, &rank, &sig);
     nr_traffic_count(NR_TRAFFIC_CNT_E3_SCORED);
     nr_traffic_add(NR_TRAFFIC_CNT_E3_HYPS, 1);
+    if (sig && phys) sig = e3_exclusive(ff, nid, dm, &ob, &s, fp->N_RB_DL);   /* a neighbour's DM-RS must not keep a wrong template alive either */
     if (phys) {
       const bool scorable = ff->h.n_crb >= (ff->h.dmrs_type == 1 ? 6 : 11);
       if (nr_pdsch_solver_phys_check(in->rnti, scorable, sig)) { nr_traffic_count(NR_TRAFFIC_CNT_E3_REOPEN_SCORE); nr_dci11_bank_alive_clear(in->rnti); }
