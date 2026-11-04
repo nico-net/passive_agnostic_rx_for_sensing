@@ -456,3 +456,72 @@ TEST(DlLayoutScore, FalseCellRateAtAlphaCell)
       EXPECT_LE(exceed, cells / 10000) << nant << " RX, " << n_pairs << " pairs";
     }
 }
+
+// ---- fix round 2 ----
+// R1: off-grid noise errors (under 1.4x/2.8x/5.6x, over 2x/4x) and gain errors (3/5/8 %, both signs), 15 and 25 dB, 1000 trials each (250 per order)
+static std::vector<c16_t> qam_syms_gain(std::mt19937 &g, int qm, int n, double snr_db, double gain)
+{
+  auto v = qam_syms(g, qm, n, snr_db);
+  for (auto &s : v) { s.r = (int16_t)std::lrint(s.r * gain); s.i = (int16_t)std::lrint(s.i * gain); }
+  return v;
+}
+
+TEST(DlLayoutScore, QmOffGridNoiseAndGainErrorsNeverWrongCertain)
+{
+  for (double snr : {15.0, 25.0}) {
+    const double nv_true = std::pow(10.0, -snr / 10.0);
+    for (double f : {1.0 / 1.4, 1.0 / 2.8, 1.0 / 5.6, 2.0, 4.0}) { // believed / true noise
+      int dec = 0;
+      EXPECT_EQ(wrong_certain([&](std::mt19937 &g, int qm) { return qam_syms(g, qm, 256, snr); }, (float)(nv_true * f), 250, &dec), 0) << "snr " << snr << " believed/true noise " << f;
+      std::printf("[r2] snr %.0f believed/true noise %.2f: decided %d / 1000\n", snr, f, dec);
+    }
+    for (double gain : {0.92, 0.95, 0.97, 1.03, 1.05, 1.08}) {
+      int dec = 0;
+      EXPECT_EQ(wrong_certain([&](std::mt19937 &g, int qm) { return qam_syms_gain(g, qm, 256, snr, gain); }, (float)nv_true, 250, &dec), 0) << "snr " << snr << " gain " << gain;
+      std::printf("[r2] snr %.0f gain %.2f: decided %d / 1000\n", snr, gain, dec);
+    }
+  }
+}
+
+TEST(DlLayoutScore, QmRmsContract)
+{
+  std::mt19937 g(5);
+  auto v = qam_syms(g, 4, 256, 25);
+  const float nv = (float)std::pow(10.0, -2.5);
+  EXPECT_EQ(nr_qm_classify(v.data(), 256, nv, nullptr), 4);
+  for (double gain : {0.5, 0.8, 1.25, 2.0}) { // rms far from 8192: refused up front (not left to the likelihood)
+    auto w = qam_syms_gain(g, 4, 256, 25, gain);
+    EXPECT_EQ(nr_qm_classify(w.data(), 256, nv, nullptr), 0) << gain;
+  }
+}
+
+// M5 (round 2): false-cell rate through nr_dl_layout_score itself -- type 1 and type 2, 4 RX, the n_eff threshold path and the Gold generator on pure noise
+TEST(DlLayoutScore, FalseCellRateThroughScorerType1AndType2)
+{
+  std::mt19937 g(77);
+  std::normal_distribution<double> nd(0, 300);
+  for (int type : {1, 2})
+    for (int nprb : {type == 1 ? 6 : 10, 25})
+    for (int tiny : {0, 1}) { // tiny: stated noise_var ~ 0, so w = pilot energy (flat) and n_eff ~ n_crb: the raw threshold of the n-pairs formula
+      const int nsc = 12 * nprb, calls = tiny ? 150000 : 300000;
+      std::vector<c16_t> buf((size_t)NANT * NSYM * nsc);
+      const c16_t *ptr[NANT * NSYM];
+      for (int i = 0; i < NANT * NSYM; i++) ptr[i] = &buf[(size_t)i * nsc];
+      std::vector<uint16_t> crb(nprb);
+      for (int p = 0; p < nprb; p++) crb[p] = p;
+      nr_dl_hyp_t h = {crb.data(), nprb, (uint16_t)((1 << 2) | (1 << 11)), (uint8_t)type, 1, 1, 1234, 0, 0};
+      nr_dl_obs_t o = {ptr, NANT, nsc, NSYM, tiny ? 1e-3f : (float)(2.0 * 300.0 * 300.0), 3}; // complex noise variance of the generator below: 2 sigma^2
+      long cells = 0, signif = 0;
+      for (int i = 0; i < calls; i++) {
+        for (int a = 0; a < NANT; a++)
+          for (int l : {2, 11}) {
+            c16_t *p = &buf[((size_t)a * NSYM + l) * nsc];
+            for (int k = 0; k < nsc; k++) { p[k].r = (int16_t)std::lrint(nd(g)); p[k].i = (int16_t)std::lrint(nd(g)); }
+          }
+        nr_dl_score_t s; nr_dl_layout_score(&h, &o, &s);
+        cells += s.n_cells; signif += s.n_signif;
+      }
+      std::printf("[mc2] type %d, %d PRB, 4 RX%s: false-cell rate %.2e (%ld / %ld), alpha_cell 2.4e-5\n", type, nprb, tiny ? ", flat-w" : "", (double)signif / cells, signif, cells);
+      EXPECT_LE(signif, cells / 10000) << "type " << type << " nprb " << nprb << " tiny " << tiny;
+    }
+}

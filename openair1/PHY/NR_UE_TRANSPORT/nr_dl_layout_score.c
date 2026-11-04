@@ -13,6 +13,7 @@
 #define NCELLS 42.0f          /* 14 symbols x 3 CDM groups */
 #define Z_ALPHA 3.0902f       /* Phi^-1(1 - NBS_SIGNIF_ALPHA) */
 #define NR_QM_UNIT 8192.0f /* rms amplitude of the unit-mean-energy constellation in the eq scale (see the header) */
+#define NR_QM_RMS_TOL 0.15 /* stated tolerance of the eq scale contract: the gain nuisance (+-8 %) plus the sampling fluctuation of the energy */
 #define GBITS (12 * NR_DL_MAX_PRB)
 
 /* ---- Gold sequence (TS 38.211 5.2.1), c(0..n-1), no allocation. x1 and x2 start at n = Nc = 1600: x1 from a constant, x2 by linearity in c_init. ---- */
@@ -344,8 +345,8 @@ static int qm_gof_ok(const c16_t *eq, int n, float u, int M, float a, float s2)
  * <= exp(-t) (Markov on the likelihood ratio); Q may use any of the QM_NOISE_N levels, and there are 3 alternatives, so the margin must be
  * ln(3 QM_NOISE_N QM_SCALES / alpha) nats and a wrong certain answer has probability <= alpha. (The unit-energy scale is a further nuisance parameter
  * of each model, fitted on the same samples: QM_GOF_SCALES is the number of distinct scales it can take within its few-percent uncertainty.) The winner must also pass the KS goodness of fit at its noise level. */
-#define QM_NOISE_N 4
-static const float QM_NOISE_MULT[QM_NOISE_N] = {1.0f, 2.0f, 4.0f, 8.0f};
+#define QM_NOISE_N 7 /* sqrt(2) spacing over 1..8: the true noise is within a factor 2^(1/4) = 0.75 dB of a grid point whatever it is */
+static const float QM_NOISE_MULT[QM_NOISE_N] = {1.0f, 1.4142136f, 2.0f, 2.8284271f, 4.0f, 5.6568542f, 8.0f};
 
 int nr_qm_classify(const c16_t *eq, int n, float noise_var, float *llr)
 {
@@ -354,6 +355,10 @@ int nr_qm_classify(const c16_t *eq, int n, float noise_var, float *llr)
   double et = 0;
   for (int i = 0; i < n; i++) et += (double)eq[i].r * eq[i].r + (double)eq[i].i * eq[i].i;
   if (!(et > 0) || !isfinite(et)) return 0;
+  { /* API contract: rms of eq within NR_QM_RMS_TOL of NR_QM_UNIT x sqrt(1 + noise) (the noise may exceed the stated one up to the top grid level) */
+    const double r = sqrt(et / n) / NR_QM_UNIT;
+    if (r < 1.0 - NR_QM_RMS_TOL || r > (1.0 + NR_QM_RMS_TOL) * sqrt(1.0 + 8.0 * (double)noise_var)) return 0;
+  }
   double L[4];
   int bm[4], bk[4]; /* noise level and scale of each constellation's profile maximum */
   for (int qi = 0; qi < 4; qi++) {

@@ -79,14 +79,19 @@ int nr_dl_cdm_consistent(const nr_dl_hyp_t *h, const nr_dl_score_t *s);
 float nr_dl_score_rank(const nr_dl_hyp_t *h, const nr_dl_score_t *s);
 
 /** Modulation order of the TS 38.211 square QAM (2 QPSK, 4, 6, 8) that the n equalised symbols follow, or 0 when undecided.
- *  eq: the equalised symbols at the scale where the unit-mean-energy constellation has rms amplitude 8192 (gain known to within +-8 %, searched as a nuisance
- *  parameter; it is NOT estimated from the sample energy, which for 64/256QAM fluctuates by more than that and would fit any wrong order). noise_var = N0 / Es of
- *  the equalised symbols (1 / linear SNR), complex. The log-likelihood of each constellation (equiprobable points, circular Gaussian noise; I and Q independent) is
- *  summed over the symbols; a Qm is returned only when it beats EVERY other order by ln(3 / NBS_SIGNIF_ALPHA) nats: by Markov's inequality on the likelihood
- *  ratio a wrong order wins that margin against a given true one with probability <= alpha / 3, so a wrong certain answer has probability <= alpha whatever
- *  the SNR (when noise_var is right); at low SNR the margin is simply not reached and the answer is 0. The Markov bound needs a correct noise model, so the winner must
- *  also pass a two-sided goodness-of-fit at NBS_SIGNIF_ALPHA (mean log density of the samples vs its expectation under the winning constellation and noise_var);
- *  mis-specified noise, H error or an interferer make the answer 0, never a wrong certain Qm. *llr (optional) receives the margin to the runner-up. */
+ *  CONTRACT. eq: equalised symbols at the scale where the unit-mean-energy constellation has rms amplitude 8192 (NR_QM_UNIT). The gain is known only to +-8 %
+ *  and is searched as a nuisance parameter; it is NOT estimated from the sample energy (for 64/256QAM that fluctuates by more than the gain error and would
+ *  fit any wrong order). The rms of eq must lie within 15 % of 8192 x sqrt(1 + noise) (up to the top noise level, below); otherwise 0 is returned.
+ *  noise_var = N0 / Es of the equalised symbols (1 / linear SNR), complex; never under-estimate it on purpose.
+ *  METHOD. Square M-QAM, equiprobable points, I and Q independent, circular Gaussian noise. The noise level is a nuisance on the grid
+ *  {1, sqrt2, 2, ..., 8} x noise_var (7 levels, the true noise within 0.75 dB of a level), the gain on 9 points in +-8 %. Each order is ranked by its profile
+ *  likelihood. The winner must beat every other order by ln(3 * 7 * 9 / alpha) nats (alpha = NBS_SIGNIF_ALPHA; Markov on the likelihood ratio, union over
+ *  3 alternatives x 7 noise levels x 9 gains), must not want the top noise level (refused: dispersion beyond the grid), and must pass a Kolmogorov-Smirnov
+ *  goodness of fit (alpha, <= 512 pooled I/Q samples) and a mean-energy check at its noise and gain. Otherwise 0.
+ *  LIMITS. The bound is heuristic off the grid (the tests cover off-grid noise 0.18x..4x and gain errors up to 8 %) and for non-independent samples (PRB-flat H
+ *  error). Hierarchical superposition (a rank-2 layer at a lattice-coincident power ratio) is statistically the higher order and is NOT detectable. A Qm is a
+ *  hint that restricts the candidate set, not a verdict: it needs consensus over independent grants and CRC confirmation before it can become a record field.
+ *  *llr (optional) receives the margin to the runner-up. */
 int nr_qm_classify(const c16_t *eq, int n, float noise_var, float *llr);
 
 #ifdef __cplusplus
