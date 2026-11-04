@@ -3575,7 +3575,7 @@ void nr_pdcch_blind_monitor_init(void)
   if (g_cfg.dl_full_auto) {
     g_cfg.dci01_scan = 1;
     g_cfg.dci01_length_override = 0;
-    g_cfg.ul_pusch_decode = 1;
+    if (p_ul_pusch == NULL || p_ul_pusch[0] == '\0') g_cfg.ul_pusch_decode = 1; /* an explicit ul_pusch key (0 = off, 2 = CFR only) wins */
     if (g_cfg.ul_pusch_max_per_slot < 1) g_cfg.ul_pusch_max_per_slot = 1;
   }
   if (p_ul_dci_bits != NULL && p_ul_dci_bits[0] != '\0' && !parse_ul_dci_bits(p_ul_dci_bits)) {
