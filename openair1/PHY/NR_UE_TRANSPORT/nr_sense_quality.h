@@ -12,6 +12,10 @@ extern "C" {
  * record's own SNR and Qm (one-sided exact binomial tail < alpha, nr_pdsch_da_recon.h). alpha is a false-reject bound, not a calibrated level;
  * there is no absolute agreement threshold. */
 #define NR_SENSE_PRB_RECON_ALPHA 1e-3
+/* Floor on the expected symbol DISagreement (expected agreement <= 1 - 1e-3): a general implementation-loss bound (transmitter EVM, phase noise,
+ * ADC quantisation and interference put an SNR ceiling of ~30 dB on any receiver; 1e-3 is the QPSK..16QAM symbol error rate at that ceiling order
+ * of magnitude), NOT tuned on any cell. Without it a high-SNR PRB with one real mismatch would fail. */
+#define NR_SENSE_RECON_IMPL_LOSS 1e-3
 typedef struct {
   uint16_t allocated_prbs, estimated_usable_prbs, valid_cfr_prbs;
   uint8_t valid_mask[(NR_SENSE_MAX_PRB + 7) / 8]; /* bit p = PRB (k_abs/12 - first_prb) valid */

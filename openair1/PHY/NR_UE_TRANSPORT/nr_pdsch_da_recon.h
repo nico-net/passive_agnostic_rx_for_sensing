@@ -30,14 +30,23 @@
  * PER-PRB VERDICT IS RELATIVE (spec 4(d)), not an absolute agreement level. CRC passes at low code rate with raw symbol agreement far below 1,
  * so a fixed threshold would remove good PRBs. Instead each RE has an EXPECTED success probability from the record's SNR and Qm, and a PRB
  * fails only when its agreement is significantly BELOW the expectation:
- *   gamma      = Es/N0 of the data REs = the record's post-estimation SNR (snr_db, linear) minus the DM-RS boost (the caller subtracts
- *                TS 38.214 Table 4.1-1: 0 / 3 / 4.77 dB for 1 / 2 / 3 CDM groups); no array gain is assumed (conservative).
- *   gamma_i    = gamma / (1 + |X_i|^2 / sum_w)   the local estimate Hs has variance N / sum_w (sum_w = sum of the window's |X_n|^2, pairs counted
- *                twice), which adds |X_i|^2 N / sum_w to the equalised noise (first order). Edge subcarriers and edge symbols have fewer
- *                pairs, hence a larger penalty, so they are not punished for the noisier local estimate.
+ *   gamma      = the MRC-COMBINED Es/N0 of the data REs, i.e. the SNR of the symbol that is actually compared (eq above is the MRC
+ *                combination over all antennas, so its SNR is the sum over antennas: array gain INCLUDED). The caller passes the record's
+ *                post-estimation SNR (nr_pdsch_dmrs_snr comb_db, itself the MRC sum) minus the DM-RS boost, 20 log10(get_beta_dmrs()) (TS 38.214
+ *                Table 4.1-1). A per-antenna SNR must be multiplied by the number of combined antennas before it is passed in.
+ *   gamma_i    = gamma / (1 + (|X_i|^2 / sum_w) (1 + A / gamma))   with A the number of combined antennas. The local per-antenna estimate Hs = H + e has
+ *                variance N / sum_w (sum_w = sum of the window's |X_n|^2, pairs counted twice). For the MRC statistic z = sum_a conj(Hs_a) Y_a the
+ *                signal is X sum|H|^2, the noise variance is |X|^2 sum|H|^2 var(e) + N sum|H|^2 + A var(e) N, so
+ *                SNR_eff = gamma / (1 + |X|^2/sum_w + |X|^2 N / (sum_w |H_a|^2)) and |H_a|^2/N = gamma_a/|X|^2 with gamma_a = gamma / A the
+ *                per-antenna SNR (equal-gain approximation; unequal antennas make the real penalty only larger at the weak ones). The last
+ *                term is the noise-times-estimation-error product: negligible at high SNR, dominant at low per-antenna SNR, which is why A enters.
+ *                Edge subcarriers and edge symbols have fewer pairs, hence a larger penalty, so they are not punished for the noisier estimate.
  *   P_axis     = 2 (1 - 1/sqrt(M)) Q( sqrt(3 gamma_i / (M - 1)) ),  p_i = (1 - P_axis)^2           (square M-QAM, AWGN, nearest-level decision;
  *                Proakis, Digital Communications 5th ed., eq. 4.3-30 and 4.3-31; Goldsmith, Wireless Communications, eq. 6.23; Q(x) = erfc(x/sqrt 2)/2)
- *   test       = with n scored REs, m agreements and pbar = mean p_i:  P(Binomial(n, 1-pbar) >= n-m) < NR_SENSE_PRB_RECON_ALPHA (1e-3)  => fail
+ *   floor      = pbar is capped at 1 - NR_SENSE_RECON_IMPL_LOSS: the model has no EVM / phase noise / quantisation, so at high SNR it would call a
+ *                single real mismatch significant.
+ *   test       = with n scored REs, m agreements and pbar = mean p_i, D = n-m disagreements:  P(Binomial(n/2, 1-pbar) >= D/2) < NR_SENSE_PRB_RECON_ALPHA (1e-3)  => fail
+ *                (counts halved, floor: design effect 2 for the correlation of overlapping windows, see the code)
  *                (exact lower tail of the agreement count, nbs_binom_sf; the Poisson-binomial is approximated by the binomial with the same mean, which
  *                has the larger variance, i.e. the test errs towards keeping a PRB).
  * A low-SNR record has a low expectation and is NOT rejected for being low SNR; a wrong channel model or interference decides near chance
@@ -138,7 +147,7 @@ static inline float nr_da_recon(const float *h, uint32_t stride, uint32_t nant, 
       li = li > maxlev ? maxlev : (li < -maxlev ? -maxlev : li);
       const int xr = 2 * (int)floor((double)x[2 * i] / u / 2.0) + 1, xi = 2 * (int)floor((double)x[2 * i + 1] / u / 2.0) + 1;
       {
-        const double gi = gamma / (1.0 + ((double)x[2 * i] * x[2 * i] + (double)x[2 * i + 1] * x[2 * i + 1]) / den);
+        const double gi = gamma / (1.0 + ((double)x[2 * i] * x[2 * i] + (double)x[2 * i + 1] * x[2 * i + 1]) / den * (1.0 + (double)nant / gamma));
         const double pax = 2.0 * (1.0 - 1.0 / (double)M) * 0.5 * erfc(sqrt(3.0 * gi / (qam_m - 1.0)) / sqrt(2.0));
         pexp[p] += (float)((1.0 - pax) * (1.0 - pax));
       }
@@ -150,8 +159,12 @@ static inline float nr_da_recon(const float *h, uint32_t stride, uint32_t nant, 
   for (uint32_t p = 0; p < NR_SENSE_MAX_PRB; p++) {
     S += seen[p]; Mt += match[p];
     if (seen[p] < 6) continue;
-    const double pbar = (double)pexp[p] / seen[p];
-    if (nbs_binom_sf(seen[p] - match[p], seen[p], 1.0 - pbar) >= NR_SENSE_PRB_RECON_ALPHA) ok_abs[p >> 3] |= (uint8_t)(1u << (p & 7));
+    double pbar = (double)pexp[p] / seen[p];
+    if (pbar > 1.0 - NR_SENSE_RECON_IMPL_LOSS) pbar = 1.0 - NR_SENSE_RECON_IMPL_LOSS; /* implementation-loss floor, see nr_sense_quality.h */
+    /* design effect 2: the windows of neighbouring REs overlap, so the disagreements are positively correlated (overdispersed vs a plain binomial;
+     * measured 0.3 % false rejects at alpha 1e-3 without it, QPSK 0 dB, 4 RX combined). Counts are halved (floor): the same rate on half the
+     * evidence, which also means a single disagreement can never fail a PRB. */
+    if (nbs_binom_sf((seen[p] - match[p]) / 2, seen[p] / 2, 1.0 - pbar) >= NR_SENSE_PRB_RECON_ALPHA) ok_abs[p >> 3] |= (uint8_t)(1u << (p & 7));
   }
   if (scored_out)
     *scored_out = S;

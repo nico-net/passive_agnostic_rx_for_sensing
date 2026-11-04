@@ -516,8 +516,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       if (da_recon_backlogged()) { /* bound by backlog only (no RE cap: big grants are the most valuable): recon_conf null, validity unchanged */
         nr_sense_recon_skip_note();
       } else {
-        /* data Es/N0 = the DM-RS post-estimation SNR minus the DM-RS power boost of the CDM groups without data (TS 38.214 Table 4.1-1) */
-        const float boost_db = dlsch_config->n_dmrs_cdm_groups >= 3 ? 4.77f : (dlsch_config->n_dmrs_cdm_groups == 2 ? 3.0f : 0.0f);
+        /* MRC-combined data Es/N0 = the DM-RS post-estimation SNR (itself the MRC sum over the antennas) minus the DM-RS power boost */
+        const float boost_db = 20.0f * log10f(get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2));
         rs_meta.q.recon_conf = nr_da_recon(isac_h, isac_max_re, isac_nof_ant, isac_k, isac_l, nof_re, (const int16_t *)mod_syms, cw->qamModOrder,
                                            rs_meta.snr_valid ? rs_meta.snr_db - boost_db : NAN, rs_meta.recon_prb_ok, NULL);
         rs_meta.recon_valid = rs_meta.q.recon_conf == rs_meta.q.recon_conf;

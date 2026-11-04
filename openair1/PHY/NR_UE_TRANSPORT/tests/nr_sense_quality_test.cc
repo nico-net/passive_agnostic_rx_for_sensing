@@ -216,7 +216,7 @@ struct Da {
 /* qm bits/symbol, 3 data symbols (REs ordered symbol by symbol, k ascending). The transmitter sends x_true; the receiver re-encodes
  * x_rec = x_true except in PRBs listed in wrong_prb, where it is independent (a wrong reconstruction).
  * Channel per antenna and PRB: unit-modulus random gain (a precoder change at every PRB boundary) times
- *   exp(-j 2 pi tau df k)  (delay) and exp(j rho sym)  (per-symbol phase ramp: CFO/Doppler); noise set so Es/N0 = snr_db exactly in expectation. */
+ *   exp(-j 2 pi tau df k)  (delay) and exp(j rho sym)  (per-symbol phase ramp: CFO/Doppler); noise set so the MRC-COMBINED Es/N0 over the 4 antennas = snr_db (the production convention: per-antenna SNR = snr_db - 6 dB). */
 Da make_da(int qm, int nprb, float snr_db, std::vector<int> wrong_prb, double tau_s, double df_hz, double rho, unsigned seed)
 {
   Da d; d.nprb = nprb; d.n_ant = 4; d.qm = qm; d.snr_db = snr_db;
@@ -231,7 +231,7 @@ Da make_da(int qm, int nprb, float snr_db, std::vector<int> wrong_prb, double ta
   d.n = d.k.size();
   d.h.resize(2 * d.n_ant * d.n);
   const double Es = 2.0 * 1e6 * (double(M) * M - 1.0) / 3.0;        /* E|X|^2 with unit u = 1000 */
-  const double n0 = Es / std::pow(10.0, snr_db / 10.0);             /* complex noise variance */
+  const double n0 = Es * d.n_ant / std::pow(10.0, snr_db / 10.0);   /* per-antenna complex noise variance: combined SNR = n_ant * Es / n0 */
   std::vector<cf> hp(d.n_ant * nprb);
   for (auto &v : hp) { double a = 2.0 * M_PI * double(g() % 100000) / 100000.0; v = cf(std::cos(a), std::sin(a)); }
   for (int i = 0; i < d.n; i++) {
@@ -259,14 +259,11 @@ TEST(SenseReconConf, ExpectedAgreementMatchesTheClosedForm)
 {
   /* QPSK at Es/N0 = 0 dB: P_axis = Q(1) = 0.1587, p = 0.708 ; 16QAM at 10 dB: P_axis = 2*0.75*Q(sqrt(3*10/15)) = 0.0786.. */
   EXPECT_NEAR(0.5 * std::erfc(1.0 / std::sqrt(2.0)), 0.158655, 1e-6);
-  /* measured agreement of a perfect-model grant tracks the formula: one antenna = the formula minus the local-estimate penalty (0.708 -> ~0.66);
-   * four antennas add 6 dB of array gain (QPSK 6 dB: (1-Q(2))^2 = 0.955 -> ~0.91), which the verdict ignores on purpose (conservative) */
+  /* measured agreement of a perfect-model grant tracks the formula at the combined SNR, minus the local-estimate penalty */
   Da d = make_da(2, 100, 0.f, {}, 0, 0, 0, 3);
   const float c4 = run_da(d);
-  const float c1 = nr_da_recon(d.h.data(), d.n, 1, d.k.data(), d.l.data(), d.n, d.x_rec.data(), d.qm, 0.f, d.ok, nullptr);
-  printf("S3_RECON qpsk 0 dB agreement: 1 ant %.3f, 4 ant %.3f (formula 0.708 / 0.955)\n", c1, c4);
-  EXPECT_GT(c1, 0.60f); EXPECT_LT(c1, 0.708f);
-  EXPECT_GT(c4, 0.86f); EXPECT_LT(c4, 0.955f);
+  printf("S3_RECON qpsk 0 dB combined (4 RX) agreement %.3f (formula 0.708)\n", c4);
+  EXPECT_GT(c4, 0.53f); EXPECT_LT(c4, 0.63f);   /* below the 0.708 closed form: 4 RX at -6 dB each make the local estimate poor (modelled, see header) */
 }
 TEST(SenseReconConf, PerfectModelKeepsAllPrbsAtLowCodeRateSnrs)
 {
@@ -383,4 +380,32 @@ TEST(SenseQualityRecon, ApplyReconAndsTheMaskAndRecounts)
   memset(ok, 0, sizeof ok);
   nr_sense_quality_apply_recon(&q, ok);
   EXPECT_EQ(q.valid_cfr_prbs, 0);
+}
+
+TEST(SenseReconConf, FourRxCombinedSnrFalseRejectRateIsAlphaConsistent)
+{
+  int fails = 0, prbs = 0;
+  for (unsigned seed = 1; seed <= 100; seed++) {
+    Da d = make_da(2, 10, 0.f, {}, 300e-9, 30e3, 0.1, 5000 + seed);   /* QPSK, combined 0 dB, delay + CFO ramp */
+    run_da(d);
+    fails += d.nprb - n_ok(d); prbs += d.nprb;
+  }
+  printf("S3_RECON 4RX combined-SNR QPSK 0 dB false rejects: %d/%d PRBs (%.2f %%)\n", fails, prbs, 100.0 * fails / prbs);
+  EXPECT_LE(fails, 2) << fails << "/" << prbs;
+}
+static int d_mid_offset(int nprb) { return 12 * nprb; }   /* RE index where the middle symbol starts */
+TEST(SenseReconConf, OneMismatchAtHighSnrDoesNotFailThePrb)
+{
+  auto flip = [](Da &d, int i) { for (int a = 0; a < d.n_ant; a++) { d.h[2 * (a * d.n + i)] *= -1; d.h[2 * (a * d.n + i) + 1] *= -1; } };   /* eq = -X: one real mismatch */
+  const int prb3_mid = d_mid_offset(10) + 3 * 12;   /* first RE of PRB 3 in the middle symbol */
+  Da d = make_da(2, 10, 40.f, {}, 0, 0, 0, 902);
+  flip(d, prb3_mid + 5);
+  run_da(d);
+  EXPECT_EQ(n_ok(d), 10) << "one mismatch against the implementation-loss floor";
+  /* a burst of mismatches in one PRB is significant even against the floor */
+  Da e = make_da(2, 10, 40.f, {}, 0, 0, 0, 903);
+  for (int j = 2; j < 9; j++) flip(e, prb3_mid + j);
+  run_da(e);
+  EXPECT_FALSE(okbit(e, 3));
+  for (int p = 0; p < 10; p++) if (p != 3) EXPECT_TRUE(okbit(e, p)) << p;
 }
