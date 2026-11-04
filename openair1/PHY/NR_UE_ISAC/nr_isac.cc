@@ -297,6 +297,7 @@ extern "C" void nr_isac_init(void)
   if (!enable && !traffic) return;
   if (frames < 1 || frames > 65536 || re < 1 || re > (int)max_re || antennas < 0 || antennas > 8 || records < 1 || records > 65536) {
     LOG_E(PHY, "SENSING: invalid CFR or record ring, RE, or antenna limit\n");
+    nr_isac_mode_set(NR_ISAC_MODE_LEGACY); // a rejected config must not leave traffic gating on with no sink
     return;
   }
   base_records_path = rec ? rec : ""; base_cfr_path = cfr ? cfr : ""; base_endpoint = ep ? ep : "";

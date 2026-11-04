@@ -261,6 +261,12 @@ TEST_F(SenseApi, DciRingFullCountsLost) {
   nr_sense_test_pause_writer(false); nr_sense_close(); nr_sense_stats(&s);
   EXPECT_EQ(s.dci_persisted,4u); EXPECT_EQ(s.dci_lost,6u);
 }
+TEST_F(SenseApi, DciWithoutRecordFileCountsLost) {
+  cfg.records_path=nullptr; ASSERT_EQ(nr_sense_open(&cfg),0);   // cfr-only sink: no record file, no ZMQ
+  int q=0; push_dci(3,&q);
+  nr_sense_close(); nr_sense_stats_t s{}; nr_sense_stats(&s);
+  EXPECT_EQ(s.dci_persisted,0u); EXPECT_EQ(s.dci_lost,3u);
+}
 TEST_F(SenseApi, DciWriteErrorCountsLost) {
   ASSERT_EQ(nr_sense_open(&cfg),0);
   nr_sense_test_fail_writes(true);

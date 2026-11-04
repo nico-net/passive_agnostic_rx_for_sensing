@@ -254,7 +254,12 @@ static void *run_writer(void *arg)
     pthread_mutex_lock(&mu);
     stats.rec_dropped+=format_drops;
     stats.dci_lost+=dci_fmt_lost;
-    if (ok) stats.dci_persisted+=dci_ok; else stats.dci_lost+=dci_ok;
+    /* persisted = actually written to the file or sent on ZMQ; fd<0 makes write_batch "succeed" without writing anything */
+    bool delivered=fd>=0 && ok;
+#ifdef NR_SENSE_HAVE_ZMQ
+    delivered |= zmq_pub && !zmq_failed;
+#endif
+    if (delivered) stats.dci_persisted+=dci_ok; else stats.dci_lost+=dci_ok;
     if (!ok) stats.io_errors++;
 #ifdef NR_SENSE_HAVE_ZMQ
     if (zmq_failed) stats.zmq_drops++;
