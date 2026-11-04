@@ -11,6 +11,9 @@
 extern "C" {
 #endif
 typedef enum { NR_LAYOUT_FIXED = 0, NR_LAYOUT_SOLVED, NR_LAYOUT_CANDIDATE, NR_LAYOUT_UNSOLVED } nr_layout_state_t;
+/* What proved the layout behind a record's fields: NONE (null), BITS (CRC-free proof from DCI bits and spec constraints, E1), PHYS (DM-RS physics, E3),
+ * CRC (the TB CRC solved the layout). Only BITS lets the HARQ-ACK fields (DAI, TPC, PRI, K1) print under a CANDIDATE layout state. */
+enum { NR_LAYOUT_EV_NONE = 0, NR_LAYOUT_EV_BITS, NR_LAYOUT_EV_PHYS, NR_LAYOUT_EV_CRC };
 /* record dci_format codes: DL 1_1 = 0 and 1_0 = 1 (nr_blind_dci_format_t), UL 0_1 = 2 and 0_0 = 3 (nr_blind_ul_dci_format_t + 2) */
 enum { NR_DCI_REC_FMT_11 = 0, NR_DCI_REC_FMT_10 = 1, NR_DCI_REC_FMT_01 = 2, NR_DCI_REC_FMT_00 = 3 };
 typedef enum { NR_DCI_DECODE_NONE = 0, NR_DCI_DECODE_QUEUED = 1 } nr_dci_decode_t;
@@ -22,6 +25,7 @@ typedef struct {
   uint8_t dci_bits[18];          /* raw payload, MSB-first, dci_len bits (<= 140) */
   bool rnti_confirmed;           /* nr_pdcch_blind_monitor_rnti_confirmed() at accept */
   nr_layout_state_t layout_state; uint32_t layout_checks_ok, layout_checks_fail;
+  uint8_t layout_evidence;       /* NR_LAYOUT_EV_*: 0 = unknown (the memset default) */
   uint32_t cfg_ref_ver;          /* with m.identity_gen + m.dedicated_epoch = cfg_ref */
   int16_t bwp_start, bwp_size, start_rb_bwp;  /* -1 unknown */
   int8_t vrb_prb, tda_index, k0, k1, dai, tpc, pri, srs_req, csi_req, ulsch_ind, cbgti, retx; /* -1 unknown */

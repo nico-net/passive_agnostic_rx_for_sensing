@@ -418,3 +418,4 @@ openair1/PHY/TOOLS/nr_gpu_compat.h
 openair1/PHY/TOOLS/nr_stage_split.h
 openair1/SIMULATION/TOOLS/scm_corrmat.h
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_stage_census.h  # header: file-scope definition g_c (one per including TU)
+openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c

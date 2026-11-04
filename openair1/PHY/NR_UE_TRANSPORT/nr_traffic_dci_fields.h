@@ -9,6 +9,7 @@
 extern "C" {
 #endif
 #include "nr_pdcch_dci11_layout_sweep.h"
+#include "nr_dci11_prove.h"
 typedef struct { int8_t dai, tpc, pri, k1; } nr_dci_harq_fields_t;  /* -1 unknown */
 /* DCI 1_0 PDSCH-to-HARQ-ACK slot (TS 38.213 9.2.3: field 0..7 -> k = 1..8 slots after the PDSCH slot). -1 when either input is unknown. */
 static inline int64_t nr_dci10_harq_fb_slot(int64_t pdsch_abs_slot, int k1_field)
@@ -22,6 +23,10 @@ bool nr_dci10_harq_fields(nr_dci_bits_t payload, uint16_t dci_len, uint16_t fdra
  * exists under the sweep's switch tables counting the Rel-16/17 extras (one-shot, group idx, NFI, n groups, retx, enh. type 3) as free bits. Otherwise false and out all -1 (never a guess). */
 bool nr_dci11_harq_fields(nr_dci_bits_t payload, uint16_t dci_len, const nr_dci11_layout_t *l,
                           const nr_dci11_offsets_t *off, nr_dci_harq_fields_t *out);
+/* Same, but a split proven from bits by nr_dci11_prove() (E1) is read directly when `proven` is non-NULL (false and all -1 if it does not add up
+ * to l->pre_ant); NULL = exactly the unique-split rule above. */
+bool nr_dci11_harq_fields_proven(nr_dci_bits_t payload, uint16_t dci_len, const nr_dci11_layout_t *l,
+                                 const nr_dci11_offsets_t *off, const nr_dci11_split_t *proven, nr_dci_harq_fields_t *out);
 #ifdef __cplusplus
 }
 #endif

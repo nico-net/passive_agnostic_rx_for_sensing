@@ -159,6 +159,9 @@ void nr_passive_acq_note_carrier_hypothesis(int point_a_sc, const char *evidence
 #include "nr_tdd_pattern.h"
 void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *p1, const nr_tdd_pattern_t *p2);
 bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot);
+/* E1 (K1 test): true when the slot can carry PUCCH, i.e. is UL or MIXED in the SIB1 pattern (FLEXIBLE and DL are not). *known = 0 (and false): no valid pattern
+ * (or a negative slot), the answer must be ignored. Same slot numbering as nr_passive_acq_tdd_slot_has_downlink. */
+bool nr_passive_acq_tdd_slot_ul_capable(int64_t abs_slot, int *known);
 bool nr_passive_acq_tdd_known(void);
 /* BC9: reference SCS (referenceSubcarrierSpacing, mu) of the SIB1 pattern; must precede/accompany note_sib1_tdd. */
 void nr_passive_acq_note_sib1_tdd_ref_mu(int mu);

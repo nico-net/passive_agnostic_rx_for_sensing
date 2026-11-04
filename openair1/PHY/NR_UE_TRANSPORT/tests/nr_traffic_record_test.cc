@@ -68,6 +68,27 @@ TEST(TrafficRecord, UnsolvedNullsLayoutFields)
        "\"rnti\":4660","\"al\":4","\"layout_state\":\"unsolved\""})
     EXPECT_TRUE(has(d,k)) << k;
 }
+TEST(TrafficRecord, LayoutEvidenceLabels)
+{
+  auto r = fixture(NR_LAYOUT_SOLVED);
+  EXPECT_TRUE(has(json(r), "\"layout_evidence\":null"));   // unknown by default
+  r.layout_evidence = NR_LAYOUT_EV_CRC;  EXPECT_TRUE(has(json(r), "\"layout_evidence\":\"crc\""));
+  r.layout_evidence = NR_LAYOUT_EV_BITS; EXPECT_TRUE(has(json(r), "\"layout_evidence\":\"bits\""));
+  r.layout_evidence = NR_LAYOUT_EV_PHYS; EXPECT_TRUE(has(json(r), "\"layout_evidence\":\"phys\""));
+}
+TEST(TrafficRecord, BitsEvidencePrintsHarqAckFieldsUnderCandidate)
+{
+  auto r = fixture(NR_LAYOUT_CANDIDATE);
+  std::string d = json(r);   // no evidence: all null, as before
+  for (const char *k : {"\"k1\":null", "\"dai\":null", "\"tpc\":null", "\"pri\":null", "\"mcs\":null"}) EXPECT_TRUE(has(d, k)) << k;
+  r.layout_evidence = NR_LAYOUT_EV_BITS;   // proven split: the HARQ-ACK fields print, the grant fields still do not
+  d = json(r);
+  for (const char *k : {"\"k1\":4", "\"dai\":1", "\"tpc\":2", "\"pri\":3", "\"mcs\":null", "\"nb_rb\":null", "\"retx\":null", "\"layout_state\":\"candidate\""})
+    EXPECT_TRUE(has(d, k)) << k;
+  r.layout_evidence = NR_LAYOUT_EV_CRC;    // other evidence does not lift the candidate suppression
+  d = json(r);
+  EXPECT_TRUE(has(d, "\"k1\":null"));
+}
 TEST(TrafficRecord, DecodeRecordShape)
 {
   struct Reset { ~Reset() { nr_sense_close(); } } reset;

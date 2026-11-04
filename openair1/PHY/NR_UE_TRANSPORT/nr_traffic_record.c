@@ -50,13 +50,21 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   }
   tput(&j, ",\"rnti_confirmed\":%s,\"layout_state\":\"%s\"", r->rnti_confirmed ? "true" : "false",
        lname[(unsigned)r->layout_state & 3u]);
+  {
+    static const char *const ev[] = {NULL, "bits", "phys", "crc"};
+    if (r->layout_evidence >= 1 && r->layout_evidence <= 3) tput(&j, ",\"layout_evidence\":\"%s\"", ev[r->layout_evidence]);
+    else tput(&j, ",\"layout_evidence\":null");
+  }
   tput(&j, ",\"layout_checks_ok\":%u,\"layout_checks_fail\":%u", r->layout_checks_ok, r->layout_checks_fail);
   if (r->m.identity_gen < 0 || r->m.dedicated_epoch < 0) tput(&j, ",\"cfg_ref\":null");
   else tput(&j, ",\"cfg_ref\":\"%d.%d.%u\"", r->m.identity_gen, r->m.dedicated_epoch, r->cfg_ref_ver);
   tint(&j, "bwp_start", r->bwp_start); tint(&j, "bwp_size", r->bwp_size); tint(&j, "start_rb_bwp", r->start_rb_bwp);
 #define L(k, f) tint(&j, k, nolayout ? -1 : r->f)
-  L("vrb_prb", vrb_prb); L("tda_index", tda_index); L("k0", k0); L("k1", k1); L("dai", dai); L("tpc", tpc); L("pri", pri);
+  L("vrb_prb", vrb_prb); L("tda_index", tda_index); L("k0", k0);
 #undef L
+  /* the HARQ-ACK fields of a split proven from bits are exact whatever the rest of the layout is */
+  const bool hq = !nolayout || r->layout_evidence == NR_LAYOUT_EV_BITS;
+  tint(&j, "k1", hq ? r->k1 : -1); tint(&j, "dai", hq ? r->dai : -1); tint(&j, "tpc", hq ? r->tpc : -1); tint(&j, "pri", hq ? r->pri : -1);
   tint(&j, "srs_req", r->srs_req); tint(&j, "csi_req", r->csi_req); tint(&j, "ulsch_ind", r->ulsch_ind);
   tint(&j, "cbgti", r->cbgti); tint(&j, "retx", nolayout ? -1 : r->retx);
   tint(&j, "si_ind", r->si_ind); tint(&j, "short_msg_ind", r->short_msg_ind); tint(&j, "short_msg", r->short_msg);

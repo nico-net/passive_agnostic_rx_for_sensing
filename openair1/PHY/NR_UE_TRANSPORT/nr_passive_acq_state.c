@@ -272,6 +272,16 @@ uint32_t nr_passive_acq_tdd_period_slots(int mu)
     return 0;
   return (uint32_t)t.p1.period_slots + (uint32_t)t.p2.period_slots;
 }
+bool nr_passive_acq_tdd_slot_ul_capable(int64_t abs_slot, int *known)
+{
+  pthread_mutex_lock(&g_lock);
+  const nr_tdd_config_t t = g_tdd;
+  pthread_mutex_unlock(&g_lock);
+  if (known) *known = t.valid && abs_slot >= 0;
+  if (!t.valid || abs_slot < 0) return false;
+  const nr_tdd_slot_dir_t d = nr_tdd_slot_direction(&t, (uint32_t)abs_slot);
+  return d == NR_TDD_SLOT_UL || d == NR_TDD_SLOT_MIXED;
+}
 bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
 {
   pthread_mutex_lock(&g_lock); /* g_tdd is replaced by the SIB1 path: copy it consistently */

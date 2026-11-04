@@ -26,6 +26,10 @@ static inline double nbs_binom_sf(uint64_t k, uint64_t n, double p)
   return s > 1.0 ? 1.0 : s;
 }
 
+/* Significance level of every "one hypothesis survives" decision (false-solve rate per RNTI, not a cell parameter): the PDSCH solver's
+ * SIGNIF_ALPHA and the CRC-free DCI 1_1 prover (nr_dci11_prove.c) share it. */
+#define NBS_SIGNIF_ALPHA 1e-3
+
 /* A wrong hypothesis passes a CRC-24 by chance with p = 2^-24 (TS 38.212 5.1; the TB CRC of an LDPC decode). */
 #define NBS_CRC_FALSE_PASS (1.0 / 16777216.0)
 

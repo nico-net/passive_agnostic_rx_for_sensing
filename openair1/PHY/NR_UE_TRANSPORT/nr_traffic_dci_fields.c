@@ -20,14 +20,42 @@ bool nr_dci10_harq_fields(nr_dci_bits_t payload, uint16_t dci_len, uint16_t fdra
   return true;
 }
 
+/* The fields of a split E1 proved from bits (nr_dci11_prove.c). The split must add up to this layout's pre_ant. */
+static bool fields_of_split(nr_dci_bits_t payload, uint16_t dci_len, const nr_dci11_layout_t *l, const nr_dci11_offsets_t *off,
+                            const nr_dci11_split_t *s, nr_dci_harq_fields_t *out)
+{
+  int sum = s->tb2 + s->harq + s->dai + 2 + s->tpc2 + 3 + s->k1;
+  for (int i = 0; i < 6; i++)
+    sum += s->ext[i];
+  if (sum != l->pre_ant || s->tpc != 2 || s->pri != 3)
+    return false;
+  int pos = off->ant_ports - l->pre_ant + s->tb2 + s->harq;
+  if (s->dai) out->dai = (int8_t)fld(payload, dci_len, pos, s->dai);
+  pos += s->dai;
+  out->tpc = (int8_t)fld(payload, dci_len, pos, 2);
+  pos += 2 + s->tpc2;
+  out->pri = (int8_t)fld(payload, dci_len, pos, 3);
+  pos += 3;
+  if (s->k1) out->k1 = (int8_t)fld(payload, dci_len, pos, s->k1);
+  return true;
+}
+
 bool nr_dci11_harq_fields(nr_dci_bits_t payload, uint16_t dci_len, const nr_dci11_layout_t *l,
                           const nr_dci11_offsets_t *off, nr_dci_harq_fields_t *out)
+{
+  return nr_dci11_harq_fields_proven(payload, dci_len, l, off, NULL, out);
+}
+
+bool nr_dci11_harq_fields_proven(nr_dci_bits_t payload, uint16_t dci_len, const nr_dci11_layout_t *l,
+                                 const nr_dci11_offsets_t *off, const nr_dci11_split_t *proven, nr_dci_harq_fields_t *out)
 {
   if (!out)
     return false;
   unknown(out);
   if (!l || !off || dci_len > NR_DCI_MAX_PAYLOAD || off->ant_ports < l->pre_ant || off->ant_ports > dci_len)
     return false;
+  if (proven)
+    return fields_of_split(payload, dci_len, l, off, proven, out);
   /* Extras (one-shot, group idx, NFI, n groups, retx, enh. type 3) follow K1 in the sweep's pre_ant, so they do not shift the
    * offsets we read, but they widen the sum: reachable extra-bit sums are collected as a mask, and distinct (tb2,harq,dai,tpc2,k1)
    * tuples are counted, not combinations. */

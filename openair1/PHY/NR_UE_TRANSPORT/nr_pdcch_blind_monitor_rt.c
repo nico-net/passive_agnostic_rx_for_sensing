@@ -2019,7 +2019,7 @@ static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
         nr_pdsch_solver_reset();
         nr_tda_field_forget();
         nr_slotphase_reset();
-        if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) { nr_traffic_cfg_reset(); nr_traffic_retx_reset(); nr_traffic_decode_reset(); }
+        if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) { nr_traffic_cfg_reset(); nr_traffic_retx_reset(); nr_traffic_decode_reset(); nr_dci11_bank_reset(); }
         LOG_A(PHY, "SENSING: PDSCH_SOLVER reset on new cell identity (identity_gen %u -> %u)\n", solver_id, s->identity_gen);
       }
       solver_id = s->identity_gen;
@@ -4652,11 +4652,23 @@ static int traffic_fdra_bits(int n)
   return b;
 }
 
-/* DL: out = the grant's reading (1_1: the representative layout), payload/dci_len = its raw bits. Returns the layout state used. */
+/* The DCI's slot in the numbering of the SIB1 TDD pattern (frame * slots_per_frame + slot, as the PDCCH slot gate uses), unwrapped to sit next to the
+ * monotonic `mono` (same difference between DCIs): the E1 prover adds K1 offsets to it and asks the pattern about the sum. -1 when unknown. */
+static int64_t traffic_tdd_slot(int64_t mono, int frame, int slot, int spf)
+{
+  if (mono < 0 || frame < 0 || slot < 0 || spf <= 0) return -1;
+  const int64_t w = 1024 * (int64_t)spf, f = (int64_t)frame * spf + slot;
+  int64_t d = ((f - mono) % w + w) % w;
+  if (d > w / 2) d -= w;
+  return mono + d >= 0 ? mono + d : -1;
+}
+
+/* DL: out = the grant's reading (1_1: the representative layout), payload/dci_len = its raw bits. Returns the layout state used.
+ * off_rx: this runs off the PHY receive thread (a scan consumer), the only place the E1 prover may run. */
 static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL_FRAME_PARMS *fp, const nr_pdcch_blind_result_t *out,
                                          const nr_pdcch_blind_dci10_ctx_t *c10, int bwp_start, int bwp_size, const nr_dci_bits_t *payload,
                                          uint16_t dci_len, int al, int cce, int frame, int slot, int64_t abs_slot, nr_layout_state_t ls,
-                                         int rep, bool decode_wanted, uint64_t t0)
+                                         int rep, bool decode_wanted, uint64_t t0, bool off_rx)
 {
   if (!nr_sense_enabled()) return; /* nothing is recorded or counted: dci_accepted == dci_rec_generated */
   const bool is10 = out->dci_format == NR_BLIND_DCI_FORMAT_1_0;
@@ -4688,8 +4700,23 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
   nr_dci_harq_fields_t hf = {-1, -1, -1, -1};
   if (is10 && payload && (out->rnti_class == NR_BLIND_RNTI_CLASS_C || out->rnti_class == NR_BLIND_RNTI_CLASS_TC))
     nr_dci10_harq_fields(*payload, dci_len, (uint16_t)traffic_fdra_bits(c10->n_rb_riv), &hf);
-  else if (!is10 && payload && rep >= 0 && g_dci11_resolver != NULL && rep < (int)__atomic_load_n(&g_dci11_resolver->n_hyp, __ATOMIC_ACQUIRE))
-    nr_dci11_harq_fields(*payload, dci_len, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep], &hf);
+  else if (!is10 && payload && rep >= 0 && g_dci11_resolver != NULL && rep < (int)__atomic_load_n(&g_dci11_resolver->n_hyp, __ATOMIC_ACQUIRE)) {
+    /* E1: the bank of this C-RNTI's DCI 1_1 payloads (copied, the resolver's tables may change) proves the pre_ant split from bits. */
+    const nr_dci11_layout_t hl = g_dci11_resolver->hyp[rep];
+    const nr_dci11_offsets_t ho = g_dci11_resolver->off[rep];
+    nr_dci11_split_t ps;
+    bool e1 = false;
+    if (out->rnti_class == NR_BLIND_RNTI_CLASS_C) {
+      const int64_t ts = traffic_tdd_slot(abs_slot, frame, slot, fp->slots_per_frame);
+      if (ts >= 0) {
+        nr_dci11_bank_feed(out->rnti, *payload, dci_len, ts);
+        if (off_rx) nr_dci11_bank_maybe_prove(out->rnti, &hl, &ho, nr_passive_acq_tdd_slot_ul_capable);
+      }
+      e1 = nr_dci11_bank_proven(out->rnti, &hl, &ho, &ps);
+    }
+    nr_dci11_harq_fields_proven(*payload, dci_len, &hl, &ho, e1 ? &ps : NULL, &hf);
+    r.layout_evidence = ls == NR_LAYOUT_SOLVED ? NR_LAYOUT_EV_CRC : e1 ? NR_LAYOUT_EV_BITS : NR_LAYOUT_EV_NONE;
+  }
   r.dai = hf.dai; r.tpc = hf.tpc; r.pri = hf.pri; r.k1 = hf.k1;
   r.retx = no_harq ? -1 : (int8_t)nr_traffic_retx(0, out->rnti, out->harq_pid, out->ndi);
   if (is10) { /* the job of a 1_0 grant uses k0 = 0 (hy_k0 is only set by the 1_1 sweep); 1_1: k0 is not known at the accept */
@@ -8860,7 +8887,7 @@ constdiag_done:;
         /* 1_1 payload exists only for dl_auto / bwp_probe tasks (dl_raw); other 1_1 extractions keep no payload: bits unavailable (null) */
         const nr_dci_bits_t *pl = is10t ? &out.payload : (cand_task[ti].dl_auto || cand_task[ti].bwp_probe) ? &cand_task[ti].dl_raw.payload : NULL;
         traffic_emit_dl(cfg, fp, &out, &dci10_ctx, is10t ? (int)dci10_ctx.rb_offset : dbs, dbz, pl, cand_task[ti].dci_length, cand_task[ti].L,
-                        cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot, source_absolute_slot, rec_lst, rep_t, tw == 1, tt0);
+                        cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot, source_absolute_slot, rec_lst, rep_t, tw == 1, tt0, serial_candidates);
       }
     }
     if (nr_ue_ctx_enabled() && out.rnti) {

@@ -1,6 +1,7 @@
 /* Blind dedicated-PDSCH grant solver (T26b). See nr_pdsch_solver.h. */
 #include "common/utils/nr_cell.h" /* mpci A5: per-cell state (NR_CELL_STATIC) */
 #include "nr_pdsch_cell_prealloc.h"
+#include "nr_blind_stats.h"
 #include "nr_pdsch_solver.h"
 #include "nr_signal_evidence.h"
 #include "nr_snr_gate.h"
@@ -526,7 +527,7 @@ static void try_promote(solver_rnti_t *r)
  * solve when P(at least that many chance passes) < SIGNIF_ALPHA. So one CRC24 pass solves at once, two CRC16 passes solve
  * a quiet RNTI, and a busy one (thousands of probes: OTA ab_Tr2_1_094729 0x47f0, solved on 2 chance passes) needs a third.
  * SIGNIF_ALPHA is a false-solve rate per RNTI, not a cell parameter. */
-#define SIGNIF_ALPHA 1e-3
+#define SIGNIF_ALPHA NBS_SIGNIF_ALPHA
 /* poisson_tail: P(X >= k), X ~ Poisson(lam); summed upwards (no 1 - small cancellation). */
 static double poisson_tail(int k, double lam)
 {
