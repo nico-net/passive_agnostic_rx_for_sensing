@@ -540,6 +540,15 @@ int nr_dci11_bank_alive(uint16_t rnti)
   return a;
 }
 
+int nr_dci11_bank_count(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_bank_mu);
+  const bank_t *b = bank_find(rnti);
+  const int n = b ? b->cnt : 0;
+  pthread_mutex_unlock(&g_bank_mu);
+  return n;
+}
+
 bool nr_dci11_bank_consistent(uint16_t rnti, const nr_dci11_class_t *cls, nr_ul_slot_fn ul)
 {
   if (!cls) return false;

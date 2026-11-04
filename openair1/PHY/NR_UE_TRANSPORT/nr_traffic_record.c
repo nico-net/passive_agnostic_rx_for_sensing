@@ -37,6 +37,7 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   if (!nolayout && r->layout_evidence == NR_LAYOUT_EV_PHYS) {
     o.start_sym = o.nb_sym = -1;
     if (r->table_evidence < 2) o.mcs_table = o.qm = o.tbs = -1;
+    if (r->grant_unproven) o.mcs = o.harq_pid = o.ndi = o.rv = -1;
   }
   char g[2048];
   if (nr_sense_grant_to_json(&o, &r->m, g, sizeof g) < 0) return -1;
@@ -73,10 +74,11 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
   L("vrb_prb", vrb_prb); L("tda_index", tda_index); L("k0", k0);
 #undef L
   /* the HARQ-ACK fields of a split proven from bits are exact whatever the rest of the layout is */
-  const bool hq = !nolayout || r->fields_evidence == NR_LAYOUT_EV_BITS;
+  const bool unproven = !nolayout && r->layout_evidence == NR_LAYOUT_EV_PHYS && r->grant_unproven;
+  const bool hq = (!nolayout && !unproven) || r->fields_evidence == NR_LAYOUT_EV_BITS;
   tint(&j, "k1", hq ? r->k1 : -1); tint(&j, "dai", hq ? r->dai : -1); tint(&j, "tpc", hq ? r->tpc : -1); tint(&j, "pri", hq ? r->pri : -1);
   tint(&j, "srs_req", r->srs_req); tint(&j, "csi_req", r->csi_req); tint(&j, "ulsch_ind", r->ulsch_ind);
-  tint(&j, "cbgti", r->cbgti); tint(&j, "retx", nolayout ? -1 : r->retx);
+  tint(&j, "cbgti", r->cbgti); tint(&j, "retx", (nolayout || unproven) ? -1 : r->retx);
   tint(&j, "si_ind", r->si_ind); tint(&j, "short_msg_ind", r->short_msg_ind); tint(&j, "short_msg", r->short_msg);
   tint(&j, "tb_scaling", r->tb_scaling);
   tint(&j, "pdsch_abs_slot", nolayout ? -1 : r->pdsch_abs_slot);

@@ -166,7 +166,7 @@ int nr_pdsch_solver_fair_budget(uint16_t rnti, double rate_per_slot, bool conten
  * RNTI (in the proven identity form) on each grant. ISAC_PDSCH_SOLVER_DMRS_PRIO=1 (nr_pdcch_blind_monitor_rt.c): under
  * probe contention, grants on which no reading carries the RNTI's own DM-RS are probed 1 time in 8. */
 
-/* DCIRV (2026-10-12, ISAC_DCI11_RV_CONSISTENCY=1, default off). Layouts a few bits apart all read MCS 0 when those bits are zero,
+/* DCIRV (2026-10-12; always on since CRC-BUGS 2026-10-19: nr_pdsch_solver_rvc_on() is true, no env). Layouts a few bits apart all read MCS 0 when those bits are zero,
  * so an RNTI whose CRC passes were all MCS 0 can solve to a layout whose NDI/RV/HARQ fields sit one bit off (OTA TIM PCI 923:
  * 255 + 473 RVRESCUE lines, all dci_rv=1 ok_rv=0). The caller reads (NDI, RV, HARQ pid) of a layout from a payload; the solver
  * keeps each RNTI's last 64 DCI payloads and scores a layout by TS 38.214 HARQ rules per pid: a new transmission (NDI toggled)
@@ -282,8 +282,10 @@ typedef bool (*nr_pdsch_e1_fn)(void *ctx, const uint16_t *ids, int n_ids);
  *  sign test runs between the tracked hypotheses (at most 16): a hypothesis is the winner when it was significant on >= 10 grants and, against EVERY other tracked
  *  hypothesis, outranked it on significantly more grants than it was outranked (one-sided binomial, alpha NBS_SIGNIF_ALPHA / rivals); hypotheses with identical
  *  rank are never separated, so footprint-twins keep the RNTI unsolved. The winner must also be E1-consistent. Then the RNTI is SOLVED with evidence PHYS:
- *  layouts = the winner's reading, add_pos and scr as scored, table / S / L / rate matching unknown (learnt by CRC as for any solved RNTI), no cell seeding until a
- *  full TB passes. Returns 1 when this call solved it. dci_len is the DCI length of the grant (families are per length). */
+ *  The winner's TIE GROUP is every significant hypothesis of this grant with the same scr / add_pos and exactly the winner's rank (footprint twins: layouts that
+ *  differ only in what DM-RS physics cannot see). A group of one layout is solved as is; a larger one only if exactly one of its layouts is hq_verified and every other is
+ *  hq_refuted (the solver's HARQ/RV ring), and that layout is the representative (cand_bm holds only it); otherwise no solve. Then: add_pos and scr as scored,
+ *  table / S / L / rate matching unknown (learnt by CRC as for any solved RNTI), no cell seeding until a full TB passes. Returns 1 when this call solved it. dci_len is the DCI length of the grant (families are per length). */
 int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_phys_hyp_t *h, int n, nr_pdsch_e1_fn e1, void *e1_ctx, uint16_t dci_len);
 /** Score-drop reopen. For an RNTI SOLVED by physics (no full TB passed yet): one look at its solution on a grant, scorable = E2 could confirm it (meets the
  *  minimum PRB count), hit = it was confirmed. Over the last 16 scorable looks, misses with a binomial tail (p0 = 0.25) below alpha reopen the layout. Returns true
@@ -291,6 +293,9 @@ int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_p
 bool nr_pdsch_solver_phys_check(uint16_t rnti, bool scorable, bool hit);
 /** True on every 16th call for an RNTI solved by physics (the cadence of the monitor's E1 re-check of its class); false otherwise. */
 bool nr_pdsch_solver_phys_tick(uint16_t rnti);
+/** May the grant fields of this RNTI (MCS, NDI, RV, HARQ pid, HARQ-ACK fields) be printed? Not while its layout is phys-solved, unconfirmed by a full TB, and the representative is not
+ *  hq_verified. */
+bool nr_pdsch_solver_phys_fields_ok(uint16_t rnti);
 /** The RNTI's current solution is phys-solved and not CRC-confirmed. */
 bool nr_pdsch_solver_phys_unconfirmed(uint16_t rnti);
 
@@ -301,7 +306,8 @@ int nr_pdsch_solver_families(uint16_t dci_len, nr_pdsch_family_t *out, int max);
 /** A family exists for this DCI length and the RNTI is not solved: the monitor then checks E1 consistency and the first grant's E2 score. */
 bool nr_pdsch_solver_family_match(uint16_t rnti, nr_dci_bits_t payload, uint16_t len);
 /** Accept an unsolved RNTI as SOLVED (PHYS) on family f: ids = the reading of this DCI (any order) that contains f->rep, scr = the hypothesis E2 confirmed (same
- *  identity form as the family's). Re-checks that the family still exists, the RNTI is unsolved and e1 (if given) agrees. The table is NOT inherited. 1 = accepted. */
+ *  identity form as the family's). Re-checks that the family still exists, the RNTI is unsolved and e1 (called with the family's layout alone) agrees. The representative is f->rep and cand_bm holds only it;
+ *  the table is NOT inherited and the grant fields stay null until hq_verified(rep) or a full TB (nr_pdsch_solver_phys_fields_ok). 1 = accepted. */
 int nr_pdsch_solver_family_accept(uint16_t rnti, const nr_pdsch_family_t *f, const uint16_t *ids, int n_ids, int32_t scr, uint16_t dci_len, uint64_t abs_slot,
                                   nr_pdsch_e1_fn e1, void *e1_ctx);
 

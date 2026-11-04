@@ -27,6 +27,7 @@ typedef struct {
   nr_layout_state_t layout_state; uint32_t layout_checks_ok, layout_checks_fail;
   uint8_t layout_evidence;       /* NR_LAYOUT_EV_*: what proved the layout (0 = unknown, the memset default) */
   uint8_t fields_evidence;       /* NR_LAYOUT_EV_*: what proved the HARQ-ACK fields (k1, dai, tpc, pri) printed here: BITS = the E1 split proof, CRC = the CRC-solved layout */
+  uint8_t grant_unproven;        /* E3: 1 = the layout is PHYS and neither hq_verified nor CRC-confirmed: MCS, NDI, RV, HARQ pid, retx and the HARQ-ACK fields (unless E1 proved them) print null */
   uint8_t table_evidence;        /* E3: what fixed the MCS table behind mcs_table / qm / tbs: 0 unknown (null), 1 = a CRC pass, 2 = Qm consensus with a CRC pass of that table. A PHYS layout prints S, L, table, qm and tbs only with a table evidence of 2 (S and L: never, they are CRC-learnt) */
   uint32_t cfg_ref_ver;          /* with m.identity_gen + m.dedicated_epoch = cfg_ref */
   int16_t bwp_start, bwp_size, start_rb_bwp;  /* -1 unknown */

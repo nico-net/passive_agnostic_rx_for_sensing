@@ -2074,6 +2074,7 @@ TEST(PdschSolverRvc, HrvAlertFiresOncePerNewViolation)
 // ---- E3: CRC-free SOLVED path (DM-RS physics), layout families, Qm ledger. The scores are synthetic: the solver only sees E2's outcome. ----
 #include <cmath>
 extern "C" {
+#include "nr_e3_noise.h"
 #include "common/utils/nr_cell.h"
 #include "nr_pdsch_cell_prealloc.h"
 }
@@ -2088,6 +2089,17 @@ struct E3Hyps {
             {under.data(), (int)under.size(), -1, 1, ru, sig_u}};
   }
 };
+// layouts 10..14 are five readings of one footprint that differ in where the NDI / RV / pid block sits: layout 10..14 reads it at bit offset 2, 6, 4, 7, 8 (MSB-first 16-bit word).
+// The true layout of the RNTI is 12 (offset 4). A new transmission toggles the NDI of its pid (16 pids), rv 0.
+bool hq_fn_shift(void *, uint16_t layout, nr_dci_bits_t p, uint8_t *ndi, uint8_t *rv, uint8_t *pid)
+{
+  static const int kOff[5] = {2, 6, 4, 7, 8};   // offsets whose misreading of the true bits violates the HARQ rules (a reading of zeros would be an undetectable twin)
+  const int o = layout >= 10 && layout < 15 ? kOff[layout - 10] : 2;
+  auto fld = [&](int pos, int w) { return (unsigned)(p.w[0] >> (16 - pos - w)) & ((1u << w) - 1); };
+  *ndi = (uint8_t)fld(o, 1); *rv = (uint8_t)fld(o + 1, 2); *pid = (uint8_t)fld(o + 3, 4);
+  return true;
+}
+nr_dci_bits_t DciAt(int g, int o_true = 4) { return {{(uint64_t)((g / 16) & 1) << (16 - o_true - 1) | (uint64_t)(g % 16) << (16 - (o_true + 3) - 4), 0, 0}}; }
 int PhysGrants(uint16_t rnti, const E3Hyps &e, int n, uint64_t t0, nr_pdsch_e1_fn e1 = nullptr, std::mt19937 *rng = nullptr, float p_truth = 1.f)
 {
   int solved_at = -1;
@@ -2095,14 +2107,15 @@ int PhysGrants(uint16_t rnti, const E3Hyps &e, int n, uint64_t t0, nr_pdsch_e1_f
     float rt = 1.8f, ro = 1.2f, ru = 1.0f;
     if (rng && std::uniform_real_distribution<float>(0, 1)(*rng) > p_truth) rt = 1.1f;   // this grant the truth is outranked by `over`
     auto h = e.make(rt, ro, ru);
+    nr_pdsch_solver_note_dci(rnti, DciAt(g), t0 + (uint64_t)g);
     if (nr_pdsch_solver_phys_note(rnti, t0 + (uint64_t)g, h.data(), (int)h.size(), e1, nullptr, 49) && solved_at < 0) solved_at = g + 1;
   }
   return solved_at;
 }
-void E3Setup()
+void E3Setup(bool hq = true)
 {
   nr_pdsch_solver_reset();
-  nr_pdsch_solver_set_hq_fn(nullptr, nullptr);
+  nr_pdsch_solver_set_hq_fn(hq ? hq_fn_shift : nullptr, nullptr);
   nr_pdsch_solver_set_tda_fn(tda_fn, nullptr);
 }
 // a CRC-confirmed, promoted solved RNTI: the cell's one family (layout 10..14, add_pos 2, scr -1, DCI length 49)
@@ -2111,8 +2124,10 @@ void MakeFamily(uint16_t rnti, std::mt19937 &rng)
   Cell c;
   c.add_pos = 2;
   for (int i = 0; i < 100; i++) (i >= 10 && i < 15 ? c.truth : c.wrong).push_back((uint16_t)i);
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr);   // the CRC-confirmed member needs no HARQ history to seed the cell
   ASSERT_GT(RunCell(c, rnti, -1, 400, rng), 0);
   FullDecodes(rnti, c, 20, true, rng);
+  nr_pdsch_solver_set_hq_fn(hq_fn_shift, nullptr);
 }
 }   // namespace
 
@@ -2129,12 +2144,62 @@ TEST(E3Phys, PhysSolvesWithoutCrc)
   EXPECT_EQ(nr_pdsch_solver_layout_state(r, &ok, &fail), NR_LAYOUT_SOLVED);
   EXPECT_EQ(ok, 0u);   // zero CRC feedback was given
   EXPECT_EQ(nr_pdsch_solver_layout_evidence(r), NR_LAYOUT_EV_PHYS);
-  const int rep = nr_pdsch_solver_rep(r);
-  EXPECT_TRUE(rep >= 10 && rep < 15) << rep;
+  EXPECT_EQ(nr_pdsch_solver_rep(r), 12) << "the representative is the layout the HARQ history verified, not the lowest id of the reading";
   uint16_t ids[16];
-  EXPECT_EQ(nr_pdsch_solver_layouts(r, ids, 16), 5);
+  EXPECT_EQ(nr_pdsch_solver_layouts(r, ids, 16), 1);
+  EXPECT_TRUE(nr_pdsch_solver_phys_fields_ok(r)) << "hq_verified: the grant fields may print";
   EXPECT_EQ(nr_pdsch_solver_table_evidence(r), 0) << "the MCS table is unknown until CRC";
   EXPECT_TRUE(nr_pdsch_solver_phys_unconfirmed(r));
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Phys, TwinsWithoutDecisiveHarqAreNotSolved)
+{
+  E3Hyps e;
+  {   // no HARQ history at all (note_dci never called): five twin layouts, none verified
+    E3Setup();
+    for (int g = 0; g < 80; g++) {
+      auto h = e.make(1.8f, 1.2f, 1.0f);
+      EXPECT_EQ(nr_pdsch_solver_phys_note(0x4e30, 1000 + (uint64_t)g, h.data(), (int)h.size(), nullptr, nullptr, 49), 0);
+    }
+    EXPECT_EQ(nr_pdsch_solver_layout_state(0x4e30, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  }
+  {   // a pid-cycling history that every layout reads the same (all fields zero outside the true bits): several verified, not exactly one
+    E3Setup();
+    for (int g = 0; g < 80; g++) {
+      nr_pdsch_solver_note_dci(0x4e31, nr_dci_bits_t{{0, 0, 0}}, 1000 + (uint64_t)g);
+      auto h = e.make(1.8f, 1.2f, 1.0f);
+      EXPECT_EQ(nr_pdsch_solver_phys_note(0x4e31, 1000 + (uint64_t)g, h.data(), (int)h.size(), nullptr, nullptr, 49), 0);
+    }
+    EXPECT_EQ(nr_pdsch_solver_layout_state(0x4e31, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  }
+  {   // no hq function registered: a group of 5 cannot be separated
+    E3Setup(false);
+    for (int g = 0; g < 80; g++) {
+      auto h = e.make(1.8f, 1.2f, 1.0f);
+      EXPECT_EQ(nr_pdsch_solver_phys_note(0x4e32, 1000 + (uint64_t)g, h.data(), (int)h.size(), nullptr, nullptr, 49), 0);
+    }
+  }
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Phys, MoreThanSixteenEqualRankTwinsStillResolveToTheVerifiedOne)
+{
+  E3Setup();
+  E3Hyps e;
+  // 30 readings of one footprint, one layout each (ids 100..129 plus the true 12): the sign test must not lose or mis-rank them
+  std::vector<std::vector<uint16_t>> tw;
+  for (int i = 0; i < 30; i++) tw.push_back({(uint16_t)(100 + i)});
+  const uint16_t r = 0x4e33;
+  int solved_at = -1;
+  for (int g = 0; g < 90 && solved_at < 0; g++) {
+    std::vector<nr_pdsch_phys_hyp_t> h = e.make(1.8f, 1.2f, 1.0f);
+    for (auto &t : tw) h.push_back({t.data(), 1, -1, 1, 1.8f, true});
+    nr_pdsch_solver_note_dci(r, DciAt(g), 1000 + (uint64_t)g);
+    if (nr_pdsch_solver_phys_note(r, 1000 + (uint64_t)g, h.data(), (int)h.size(), nullptr, nullptr, 49)) solved_at = g;
+  }
+  EXPECT_GT(solved_at, 0);
+  EXPECT_EQ(nr_pdsch_solver_rep(r), 12);
   nr_pdsch_solver_reset();
 }
 
@@ -2273,10 +2338,47 @@ TEST(E3Family, AcceptsNewRntiOneDci)
   EXPECT_EQ(nr_pdsch_solver_layout_state(nr, nullptr, nullptr), NR_LAYOUT_SOLVED);
   EXPECT_EQ(nr_pdsch_solver_layout_evidence(nr), NR_LAYOUT_EV_PHYS);
   EXPECT_EQ(nr_pdsch_solver_table_evidence(nr), 0) << "the MCS table is not inherited";
+  EXPECT_EQ(nr_pdsch_solver_rep(nr), f[0].rep) << "a family accept forces the family's layout";
+  uint16_t lay[8];
+  EXPECT_EQ(nr_pdsch_solver_layouts(nr, lay, 8), 1);
+  EXPECT_FALSE(nr_pdsch_solver_phys_fields_ok(nr)) << "MCS / NDI / RV / pid / HARQ-ACK stay null until hq_verified(rep) or a CRC pass";
   EXPECT_FALSE(nr_pdsch_solver_family_match(nr, p, 49)) << "already solved";
   // the accepted RNTI is not a family member until a full TB passes
   ASSERT_EQ(nr_pdsch_solver_families(49, f, 4), 1);
   EXPECT_EQ(f[0].members, 1u);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Family, ReopensWhenTheHarqHistoryRefutesTheFamilyLayout)
+{
+  E3Setup();
+  std::mt19937 rng(65);
+  MakeFamily(0x00a1, rng);
+  nr_pdsch_family_t f[2];
+  ASSERT_EQ(nr_pdsch_solver_families(49, f, 2), 1);
+  ASSERT_NE(f[0].rep, 12) << "the test needs a family layout that reads the RNTI's bits wrongly";
+  const std::vector<uint16_t> ids = Ids(10, 15);
+  const uint16_t nr = 0x4f06;
+  ASSERT_EQ(nr_pdsch_solver_family_accept(nr, &f[0], ids.data(), (int)ids.size(), -1, 49, 7000, nullptr, nullptr), 1);
+  for (int g = 0; g < 60; g++) nr_pdsch_solver_note_dci(nr, DciAt(g), 8000 + (uint64_t)g);   // the true bits are at offset 4
+  nr_pdsch_solver_phys_check(nr, false, false);   // hq_reselect (every 16 DCIs) or this call: refuted by the HARQ history even when the grant cannot be scored
+  EXPECT_EQ(nr_pdsch_solver_layout_state(nr, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
+  nr_pdsch_solver_reset();
+}
+
+TEST(E3Qm, LedgerIsResetWhenTheLayoutIsSolvedAgain)
+{
+  E3Setup();
+  E3Hyps e;
+  const uint16_t r = 0x4e24;
+  ASSERT_GT(PhysGrants(r, e, 60, 1000), 0);
+  int q1, r2;
+  ASSERT_TRUE(nr_pdsch_solver_mcs_qr(1, 12, &q1, &r2));
+  for (int k = 0; k < 20; k++) nr_pdsch_solver_qm_note(r, 200 + (uint64_t)k, 12, q1);
+  ASSERT_EQ(nr_pdsch_solver_qm_table(r), 1);
+  nr_pdsch_solver_reopen(r);
+  ASSERT_GT(PhysGrants(r, e, 80, 9000), 0);
+  EXPECT_EQ(nr_pdsch_solver_qm_table(r), -1) << "votes taken under the old solution do not count for the new one";
   nr_pdsch_solver_reset();
 }
 
@@ -2417,4 +2519,42 @@ TEST(E3Qm, TableEvidenceIsQmConsensusOnlyWithCrcOfTheSameTable)
   }
   EXPECT_EQ(nr_pdsch_solver_table_evidence(r), 2);
   nr_pdsch_solver_reset();
+}
+
+// E3 noise estimator (nr_e3_noise.h): the lower-quartile residual, corrected for the quartile's own bias per antenna count, is unbiased within 2 %
+// for 1, 2 and 4 RX, also when 40 % of the PRBs carry the identity's DM-RS or other energy.
+TEST(E3Noise, LowerQuartileResidualIsUnbiasedPerAntennaCount)
+{
+  std::mt19937 rng(77);
+  std::normal_distribution<double> N(0.0, 1.0);
+  const int nprb = 106, nsc = nprb * 12;
+  const double s2 = 1000.0;   // complex noise variance per RE: each component s2 / 2
+  for (int nant : {1, 2, 4}) {
+    std::vector<uint8_t> gold(12 * nprb);
+    double sum = 0;
+    const int trials = 400;
+    for (int t = 0; t < trials; t++) {
+      for (auto &b : gold) b = (uint8_t)(rng() & 1);
+      std::vector<std::vector<c16_t>> y(nant, std::vector<c16_t>(nsc));
+      for (int a = 0; a < nant; a++)
+        for (int p = 0; p < nprb; p++) {
+          const bool sig = p % 5 < 2;   // 40 % of the PRBs: the identity's pilots with a per-PRB channel h
+          const double hr = 300.0 * N(rng), hi = 300.0 * N(rng);
+          for (int k = 0; k < 12; k++) {
+            double vr = std::sqrt(s2 / 2) * N(rng), vi = std::sqrt(s2 / 2) * N(rng);
+            if (k % 2 == 0) {
+              const int m = 6 * p + k / 2;
+              const double pr = (1 - 2 * gold[2 * m]) * 0.70710678, pi = (1 - 2 * gold[2 * m + 1]) * 0.70710678;
+              if (sig) { vr += hr * pr - hi * pi; vi += hr * pi + hi * pr; }
+            } else if (sig) { vr += 300.0 * N(rng); vi += 300.0 * N(rng); }
+            y[a][12 * p + k] = c16_t{(int16_t)std::lround(vr), (int16_t)std::lround(vi)};
+          }
+        }
+      std::vector<const c16_t *> yp;
+      for (auto &v : y) yp.push_back(v.data());
+      std::vector<float> scratch(nprb);
+      sum += nr_e3_noise_from_pilots(yp.data(), nant, nsc, gold.data(), scratch.data());
+    }
+    EXPECT_NEAR(sum / trials / s2, 1.0, 0.02) << nant << " RX";
+  }
 }

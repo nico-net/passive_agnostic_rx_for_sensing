@@ -1807,6 +1807,7 @@ static void solve_now(solver_rnti_t *r, const pending_t *p, int kept)
 {
   r->solved = true;
   r->phys = r->fam = false; /* E3: a CRC-solved layout */
+  r->qm_last = 0; memset(r->qm_agree, 0, sizeof r->qm_agree); memset(r->qm_dis, 0, sizeof r->qm_dis); r->qm_poison = false;
   memset(r->S_by_tda, -1, sizeof(r->S_by_tda));
   memset(r->L_by_tda, -1, sizeof(r->L_by_tda));
   bool refuted = false;
@@ -2595,6 +2596,7 @@ void nr_pdsch_solver_cell_prealloc(int cell)
 
 /* ================= E3 (traffic mode): CRC-free SOLVED path from DM-RS physics, layout families, Qm ledger ================= */
 #define PHYS_MIN_DET 10      /* ceil(log2(1 / NBS_SIGNIF_ALPHA)): a one-sided sign test cannot reach alpha with fewer detections, whatever the rivals */
+#define PHYS_GROUP_MAX 256   /* tie group size the HARQ/RV test examines (RVC_MAX_SCORED) */
 #define PHYS_ADMIT 3         /* new hypotheses admitted per grant (the best significant ones not tracked yet) */
 #define PHYS_RING 16         /* looks of the score-drop rule */
 #define PHYS_P0 0.25         /* a layout that is right is not confirmed on up to this share of its scorable looks (low SNR, a neighbour's DM-RS) */
@@ -2640,28 +2642,20 @@ static bool ids_has(const uint16_t *ids, int n, int id)
 }
 
 /* phys_solve: the RNTI becomes SOLVED on the reading `ids` (add_pos, scr as scored). No CRC evidence exists: table, S, L and rate matching are unknown and are
- * learnt by CRC like any solved RNTI's; the solution does not seed the cell until a full TB passes (seed_eligible). Under g_mu. Returns false when the
- * HARQ/RV readings refute every layout of the reading. */
-static bool phys_solve(solver_rnti_t *r, const uint16_t *ids, int n_ids, int32_t scr, uint8_t add_pos, uint64_t abs_slot, bool fam)
+ * learnt by CRC like any solved RNTI's; the solution does not seed the cell until a full TB passes (seed_eligible). rep is forced (the evidence layout). Under g_mu. */
+static bool phys_solve(solver_rnti_t *r, int rep, int32_t scr, uint8_t add_pos, uint64_t abs_slot, bool fam)
 {
+  if (rep < 0 || rep >= NR_PDSCH_SOLVER_MAX_LAYOUTS) return false;
   if (r->cand_bm == NULL) r->cand_bm = calloc(1, BM_BYTES);
   if (r->cand_bm == NULL) return false;
   memset(r->cand_bm, 0, BM_BYTES);
-  for (int i = 0; i < n_ids; i++) r->cand_bm[ids[i] >> 3] |= (uint8_t)(1u << (ids[i] & 7));
+  r->cand_bm[rep >> 3] |= (uint8_t)(1u << (rep & 7));   /* only the layout the evidence picked: never "the lowest id of an equivalent set" */
   r->solved = true;
   r->has_cand = false;
   memset(r->S_by_tda, -1, sizeof(r->S_by_tda));
   memset(r->L_by_tda, -1, sizeof(r->L_by_tda));
   r->n_ev = 0;
-  bool refuted = false;
-  r->rep = choose_rep(r, true, &refuted);
-  if (refuted) {
-    r->solved = false;
-    g_st.dropped++;
-    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x phys solve REFUSED: all layouts of the reading violate HARQ/RV rules\n", r->rnti);
-    return false;
-  }
-  if (r->rep < 0) r->rep = lowest(r->cand_bm);
+  r->rep = rep;
   r->add_pos = add_pos;
   r->scr = scr;
   r->table = -1;
@@ -2673,11 +2667,12 @@ static bool phys_solve(solver_rnti_t *r, const uint16_t *ids, int n_ids, int32_t
   r->ring = 0;
   r->ring_n = 0;
   r->tick = 0;
+  r->qm_last = 0; memset(r->qm_agree, 0, sizeof r->qm_agree); memset(r->qm_dis, 0, sizeof r->qm_dis); r->qm_poison = false;   /* votes belong to a layout */
   r->solved_abs = abs_slot;
   memset(r->comb_try, 0, sizeof(r->comb_try));
   memset(r->comb_ok, 0, sizeof(r->comb_ok));
-  LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by DM-RS physics (%s, no CRC): layout %d (%d in the reading) add_pos=%u scr=%d\n", r->rnti,
-        fam ? "family" : "sign test", r->rep, n_ids, r->add_pos, (int)r->scr);
+  LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x SOLVED by DM-RS physics (%s, no CRC): layout %d add_pos=%u scr=%d\n", r->rnti, fam ? "family" : "sign test", r->rep,
+        r->add_pos, (int)r->scr);
   return true;
 }
 
@@ -2699,10 +2694,13 @@ static int px_leader(const solver_rnti_t *r)
   for (int i = 0; i < n; i++) {
     if (r->px_c[i].det < PHYS_MIN_DET) continue;
     bool ok = true;
+    int nrival = 0;
+    for (int j = 0; j < n; j++) if (j != i && !(r->px_a[i][j] == 0 && r->px_a[j][i] == 0 && r->px_c[j].det >= PHYS_MIN_DET)) nrival++;
     for (int j = 0; j < n && ok; j++) {
       if (j == i) continue;
       const uint64_t A = r->px_a[i][j], B = r->px_a[j][i];
-      ok = A > B && nbs_binom_sf(A, A + B, 0.5) < NBS_SIGNIF_ALPHA / (double)(n - 1);
+      if (A == 0 && B == 0 && r->px_c[j].det >= PHYS_MIN_DET) continue;   /* a twin: equally significant on as many grants and never out-ranked either way */
+      ok = A > B && nbs_binom_sf(A, A + B, 0.5) < NBS_SIGNIF_ALPHA / (double)(nrival > 0 ? nrival : 1);
     }
     if (ok) return i;
   }
@@ -2735,8 +2733,11 @@ int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_p
     for (int k = 0; k < n; k++) {
       if (!h[k].sig || h[k].n_ids <= 0) continue;
       bool tracked = false;
-      for (int i = 0; i < r->px_n && !tracked; i++)
+      for (int i = 0; i < r->px_n && !tracked; i++) {
         tracked = h[k].scr == r->px_c[i].scr && h[k].add_pos == r->px_c[i].add_pos && ids_has(h[k].ids, h[k].n_ids, r->px_c[i].lid);
+        /* a footprint twin of a tracked hypothesis (same scr / add_pos, exactly its rank this grant) belongs to its tie group, it is not a rival to track */
+        if (!tracked && hi[i] >= 0 && h[hi[i]].sig && h[hi[i]].scr == h[k].scr && h[hi[i]].add_pos == h[k].add_pos && h[hi[i]].rank == h[k].rank) tracked = true;
+      }
       if (!tracked && (best < 0 || h[k].rank > h[best].rank)) best = k;
     }
     if (best < 0) break;
@@ -2744,8 +2745,14 @@ int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_p
       int w = 0;
       for (int i = 1; i < r->px_n; i++) if (r->px_c[i].det < r->px_c[w].det) w = i;
       px_drop(r, w);
+      for (int i = 0; i < r->px_n; i++) {   /* the indices shifted: map again */
+        hi[i] = -1;
+        for (int q = 0; q < n && hi[i] < 0; q++)
+          if (h[q].scr == r->px_c[i].scr && h[q].add_pos == r->px_c[i].add_pos && ids_has(h[q].ids, h[q].n_ids, r->px_c[i].lid)) hi[i] = q;
+      }
     }
     const int i = r->px_n++;
+    hi[i] = best;
     r->px_c[i].lid = h[best].ids[0];   /* any member names the reading: a later DCI reads this layout into the reading it belongs to there */
     r->px_c[i].scr = h[best].scr;
     r->px_c[i].add_pos = h[best].add_pos;
@@ -2774,9 +2781,35 @@ int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_p
     int k = -1;
     for (int q = 0; q < n && k < 0; q++)
       if (h[q].scr == r->px_c[lead].scr && h[q].add_pos == r->px_c[lead].add_pos && ids_has(h[q].ids, h[q].n_ids, r->px_c[lead].lid)) k = q;
-    if (k < 0) break;   /* the winner's reading is absent from this grant: decide on a grant that has it */
-    if (e1 && !e1(e1_ctx, h[k].ids, h[k].n_ids)) { px_drop(r, lead); continue; }   /* its E1 bank refutes the class */
-    got = phys_solve(r, h[k].ids, h[k].n_ids, h[k].scr, h[k].add_pos, abs_slot, false) ? 1 : 0;
+    if (k < 0 || !h[k].sig) break;   /* the winner's reading is absent from this grant, or not confirmable in it: decide on a grant that has it */
+    /* the tie group: every significant hypothesis of this grant with the winner's scr / add_pos and exactly its rank */
+    uint16_t gid[PHYS_GROUP_MAX];
+    int ng = 0, ok_id = -1, nver = 0;
+    bool too_many = false, undecided = false;
+    for (int q = 0; q < n && !too_many; q++) {
+      if (!h[q].sig || h[q].scr != h[k].scr || h[q].add_pos != h[k].add_pos || h[q].rank != h[k].rank) continue;
+      for (int z = 0; z < h[q].n_ids; z++) {
+        bool dup = false;
+        for (int d = 0; d < ng && !dup; d++) dup = gid[d] == h[q].ids[z];
+        if (dup) continue;
+        if (ng == PHYS_GROUP_MAX) { too_many = true; break; }
+        gid[ng++] = h[q].ids[z];
+      }
+    }
+    if (too_many) break;
+    if (ng == 1) ok_id = gid[0];
+    else {   /* footprint twins: only the HARQ/RV history of the RNTI can separate them */
+      if (!g_hq_fn) break;
+      for (int d = 0; d < ng; d++) {
+        int hn, hb;
+        hq_score(r, gid[d], &hn, &hb);
+        if (nr_pdsch_solver_hq_verified(hn, hb)) { nver++; ok_id = gid[d]; }
+        else if (!nr_pdsch_solver_hq_refuted(hn, hb)) undecided = true;
+      }
+      if (nver != 1 || undecided) break;   /* not decisive: stay unsolved, wait for more grants */
+    }
+    if (e1) { uint16_t one = (uint16_t)ok_id; if (!e1(e1_ctx, &one, 1)) { px_drop(r, lead); continue; } }   /* its E1 bank refutes the class */
+    got = phys_solve(r, ok_id, h[k].scr, h[k].add_pos, abs_slot, false) ? 1 : 0;
     if (!got) px_drop(r, lead);
     break;
   }
@@ -2784,13 +2817,44 @@ int nr_pdsch_solver_phys_note(uint16_t rnti, uint64_t abs_slot, const nr_pdsch_p
   return got;
 }
 
+static bool phys_hq_refuted(const solver_rnti_t *r)
+{
+  int n, bad;
+  if (!g_hq_fn || r->rep < 0) return false;
+  hq_score(r, r->rep, &n, &bad);
+  return nr_pdsch_solver_hq_refuted(n, bad);
+}
+bool nr_pdsch_solver_phys_fields_ok(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  bool ok = true;
+  if (r && r->solved && r->phys && r->full_ok == 0) {
+    int n = 0, bad = 0;
+    ok = false;
+    if (g_hq_fn) { hq_score(r, r->rep, &n, &bad); ok = nr_pdsch_solver_hq_verified(n, bad); }
+  }
+  pthread_mutex_unlock(&g_mu);
+  return ok;
+}
+
 bool nr_pdsch_solver_phys_check(uint16_t rnti, bool scorable, bool hit)
 {
-  if (!scorable) return false;
+  if (!scorable) {   /* an unscorable grant is neither hit nor miss, but the HARQ/RV history still counts */
+    pthread_mutex_lock(&g_mu);
+    solver_rnti_t *r0 = slot_of(rnti, false, NULL);
+    const bool ref = r0 && r0->solved && r0->phys && r0->full_ok == 0 && phys_hq_refuted(r0);
+    if (ref) { r0->solved = false; r0->has_cand = false; g_st.dropped++; phys_forget(r0); }
+    pthread_mutex_unlock(&g_mu);
+    return ref;
+  }
   pthread_mutex_lock(&g_mu);
   solver_rnti_t *r = slot_of(rnti, false, NULL);
   bool reopened = false;
-  if (r && r->solved && r->phys && r->full_ok == 0) {
+  if (r && r->solved && r->phys && r->full_ok == 0 && phys_hq_refuted(r)) {
+    LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x phys layout %d refuted by its HARQ/RV history: reopening\n", r->rnti, r->rep);
+    r->solved = false; r->has_cand = false; g_st.dropped++; phys_forget(r); reopened = true;
+  } else if (r && r->solved && r->phys && r->full_ok == 0) {
     r->ring = (uint16_t)((r->ring << 1) | (hit ? 0u : 1u));
     if (r->ring_n < PHYS_RING) r->ring_n++;
     if (r->ring_n == PHYS_RING) {
@@ -2870,9 +2934,10 @@ int nr_pdsch_solver_family_accept(uint16_t rnti, const nr_pdsch_family_t *f, con
              && scr_form(f->scr) == scr_form(scr);
   solver_rnti_t *r = exists ? slot_of(rnti, true, NULL) : NULL;
   int ok = 0;
-  if (r && !r->solved && (!e1 || e1(e1_ctx, ids, n_ids))) {
+  uint16_t one = (uint16_t)f->rep;
+  if (r && !r->solved && (!e1 || e1(e1_ctx, &one, 1))) {   /* E1 judges the family's own layout, not any layout of the reading */
     r->dlen = dci_len;
-    ok = phys_solve(r, ids, n_ids, scr, f->add_pos, abs_slot, true) ? 1 : 0;
+    ok = phys_solve(r, f->rep, scr, f->add_pos, abs_slot, true) ? 1 : 0;
   }
   pthread_mutex_unlock(&g_mu);
   return ok;

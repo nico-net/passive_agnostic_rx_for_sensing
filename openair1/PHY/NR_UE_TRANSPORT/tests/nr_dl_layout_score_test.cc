@@ -12,6 +12,7 @@ extern "C" {
 #include "common/utils/LOG/log.h"
 #include "nr_blind_stats.h"
 #include "nr_dl_layout_score.h"
+#include "nr_e3_excl.h"
 #include "nr_pdsch_dmrs_scan.h"
 #include "nr_pdsch_solver.h"
 }
@@ -524,4 +525,35 @@ TEST(DlLayoutScore, FalseCellRateThroughScorerType1AndType2)
       std::printf("[mc2] type %d, %d PRB, 4 RX%s: false-cell rate %.2e (%ld / %ld), alpha_cell 2.4e-5\n", type, nprb, tiny ? ", flat-w" : "", (double)signif / cells, signif, cells);
       EXPECT_LE(signif, cells / 10000) << "type " << type << " nprb " << nprb << " tiny " << tiny;
     }
+}
+
+// E3 exclusivity: a co-scheduled UE with the same identity on the adjacent PRBs must not confirm a grant that claims only its own part.
+TEST(E3Exclusive, CoScheduledSameIdentityOnAdjacentPrbsIsRejected)
+{
+  auto score = [&](int claim0, int claimn, int t0, int tn, Grid &G, nr_dl_score_t *s, std::vector<uint16_t> &crb, nr_dl_hyp_t *h) {
+    Truth t;
+    t.prb0 = t0; t.nprb = tn; t.dmrs = 1 << 2; t.snr_db = 20;
+    make_grid(G, t, 5);
+    crb.clear();
+    for (int p = claim0; p < claim0 + claimn; p++) crb.push_back((uint16_t)p);
+    *h = nr_dl_hyp_t{};
+    h->crb = crb.data(); h->n_crb = (int)crb.size(); h->dmrs_sym_mask = 1 << 2; h->dmrs_type = 1; h->cdm_groups_mask = 1; h->cdm_no_data = 1; h->nid = t.nid;
+    nr_dl_obs_t ob{};
+    ob.rxF = G.ptr; ob.n_ant = NANT; ob.n_sc = NSC; ob.symbols = NSYM; ob.slot = SLOT; ob.noise_var = (float)(std::pow(10.0, -2.0) * 4096.0 * 4096.0);
+    nr_dl_layout_score(h, &ob, s);
+    return ob;
+  };
+  Grid G;
+  nr_dl_score_t s;
+  std::vector<uint16_t> crb;
+  nr_dl_hyp_t h;
+  nr_dl_obs_t ob = score(20, 21, 20, 21, G, &s, crb, &h);   // the grant is the only allocation
+  ASSERT_EQ(s.n_signif, s.n_cells) << "precondition: the true footprint is significant";
+  EXPECT_TRUE(nr_e3_exclusive(&h, &ob, &s, NPRB));
+  ob = score(20, 21, 20, 41, G, &s, crb, &h);   // another UE's identical DM-RS continues on PRBs 41..60: the claim of 20..40 is also significant
+  ASSERT_EQ(s.n_signif, s.n_cells);
+  EXPECT_GE(s.occ_f1, 0.5f) << "occupancy alone would pass it";
+  EXPECT_FALSE(nr_e3_exclusive(&h, &ob, &s, NPRB));
+  ob = score(20, 11, 20, 71, G, &s, crb, &h);   // a small claim inside a large occupied extent: the occupancy test fails
+  EXPECT_FALSE(nr_e3_exclusive(&h, &ob, &s, NPRB));
 }

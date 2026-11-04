@@ -82,6 +82,14 @@ TEST(TrafficRecord, PhysLayoutNullsWhatPhysicsCannotKnow)
   EXPECT_TRUE(has(d, "\"table_evidence\":\"qm_consensus\""));
   EXPECT_TRUE(has(d, "\"mcs_table\":1"));
   EXPECT_TRUE(has(d, "\"start_sym\":null"));
+  r.table_evidence = 0; r.grant_unproven = 1;   // C3: PHYS layout without hq / CRC proof: the grant fields are null too
+  d = json(r);
+  for (const char *k : {"\"mcs\":null", "\"harq_pid\":null", "\"ndi\":null", "\"rv\":null", "\"retx\":null", "\"k1\":null", "\"dai\":null", "\"nb_rb\":20"})
+    EXPECT_TRUE(has(d, k)) << k;
+  r.fields_evidence = NR_LAYOUT_EV_BITS;   // E1 proved the HARQ-ACK split: those print, the grant fields still do not
+  d = json(r);
+  EXPECT_TRUE(has(d, "\"k1\":4")); EXPECT_TRUE(has(d, "\"mcs\":null"));
+  r.grant_unproven = 0; r.fields_evidence = NR_LAYOUT_EV_NONE;
   r.layout_evidence = NR_LAYOUT_EV_CRC; r.table_evidence = 1;   // CRC: nothing is nulled
   d = json(r);
   EXPECT_TRUE(has(d, "\"table_evidence\":\"crc\""));
