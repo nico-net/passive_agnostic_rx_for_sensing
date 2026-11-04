@@ -20,6 +20,13 @@ class T(unittest.TestCase):
         rec = [json.loads(l) for l in open(FIX)][1]
         self.assertNotEqual(reinterpret(rec, 106)["mcs"], rec["mcs"])
 
+    def test_0_0_selected_by_format_code(self):
+        from dci_reinterpret import reinterpret
+        rec = {"dci_format": 3, "dci_len": 33, "dci_bits": "0000000000"}
+        self.assertEqual(reinterpret(rec, 106)["mcs"], 0)
+        rec["dci_len"] = 40  # 0_0 is read only at its exact length
+        self.assertIsNone(reinterpret(rec, 106))
+
 
 if __name__ == "__main__":
     unittest.main()

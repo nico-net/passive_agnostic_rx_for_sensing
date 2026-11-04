@@ -5,6 +5,9 @@ import json
 import math
 import sys
 
+# dci_format codes of the dci record (nr_traffic_record.h): 1_1 = 0, 1_0 = 1, 0_1 = 2, 0_0 = 3
+FMT_1_0, FMT_0_0 = 1, 3
+
 # TS 38.212 7.3.1.2.1 (DL 1_0, C-RNTI) after the FDRA: name, width
 _DL10 = [("tda_index", 4), ("vrb_prb", 1), ("mcs", 5), ("ndi", 1), ("rv", 2), ("harq_pid", 4),
          ("dai", 2), ("tpc", 2), ("pri", 3), ("k1", 3)]
@@ -26,10 +29,10 @@ def reinterpret(rec, bwp_size):
     n = int(rec["dci_len"])
     bits = bin(int(rec["dci_bits"], 16))[2:].zfill(len(rec["dci_bits"]) * 4)[:n]
     fdra = math.ceil(math.log2(bwp_size * (bwp_size + 1) / 2))
-    tail = _UL00 if rec.get("dir") == "UL" else _DL10
+    ul = rec.get("dci_format") == FMT_0_0
+    tail = _UL00 if ul else _DL10
     need = 1 + fdra + sum(w for _, w in tail)
-    # shortcut: UL 0_0 only on exact length (its dci_format code is not fixed in-tree), add the code when it is
-    if (rec.get("dir") == "UL" and n != need) or n < need:
+    if n < need or (ul and n != need):
         return None
     pos = 1  # identifier bit
     out = {}
@@ -49,7 +52,7 @@ def reinterpret_file(path):
             r = json.loads(line)
             if r.get("type") == "config":
                 cfg[(r["rnti"], r["cfg_ref"])] = r
-            elif r.get("type") == "dci" and r.get("cfg_ref") is not None and (r.get("dci_format") == 1 or r.get("dir") == "UL"):
+            elif r.get("type") == "dci" and r.get("cfg_ref") is not None and r.get("dci_format") in (FMT_1_0, FMT_0_0):
                 c = cfg.get((r["rnti"], r["cfg_ref"])) or cfg.get((0, r["cfg_ref"]))
                 if c and c["bwp_size"] is not None:
                     yield r, reinterpret(r, c["bwp_size"])
