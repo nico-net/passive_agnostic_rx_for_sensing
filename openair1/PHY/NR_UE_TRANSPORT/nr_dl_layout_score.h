@@ -16,8 +16,14 @@
  * so a claimed but empty cell costs (c_alpha - c) > 0 and the truth beats a superset in all but ~2e-5 of the cases). A claimed cell that is not DM-RS
  * thus lowers coh; a DM-RS cell the hypothesis omits is a missing (positive) term: the sum rewards the complete mask. coh is negative when nothing
  * is coherent and cannot be significant (n so small that c_alpha > 1) -- "cannot confirm", never a certain answer.
+ * EFFECTIVE SIZE. c weights each PRB by its pilot amplitude, so the n of the threshold is the participation ratio n_eff = (sum w)^2 / sum w^2 of the claimed PRBs
+ * (w = pilot energy above the noise floor), not n_crb: a strong 1-PRB allocation inside a 6-PRB superset has n_eff ~ 1 and is not significant there.
+ * MINIMUM SIZE. c_alpha < 1 is necessary for any cell to be significant: n = 4 pairs per PRB (type 1) needs >= 5 PRB, n = 2 per PRB (type 2) needs >= 9 PRB;
+ * in practice c ~ 0.9 at good SNR so >= 6 / >= 11 PRB. Below that n_signif == 0 and nr_dl_score_rank() returns -infinity: a tiny allocation is "cannot confirm"
+ * (SOLVED needs n_signif == n_cells, never guess), and a noise-extended superset can never outrank it. crb must be unique (duplicates double-count).
  * occ_f1. F1 of the occupied PRBs (pilot-RE energy of the claimed cells above the alpha-quantile of the noise, Wilson-Hilferty chi-square, noise_var)
- * against h->crb.
+ * against h->crb. The quantile is per PRB (alpha = NBS_SIGNIF_ALPHA each, NOT corrected across the ~273 PRB: ~0.27 false-occupied PRB per call, absorbed by F1);
+ * noise_var <= 0 gives occ_f1 = 0. Energy-based: a neighbour's DM-RS or data in the claimed symbols counts as occupied.
  * comb_ratio. Noise-corrected mean |y|^2 of the REs of the OTHER CDM groups in the DM-RS symbols over that of the pilot REs. "Other" = the groups
  * the hypothesis declares without data (the first cdm_no_data groups, minus those carrying DM-RS) when there are any, else every group of the DM-RS
  * type that carries no pilot. ~0 when empty, ~1/beta^2 (beta = get_beta_dmrs) when they carry data. nr_dl_cdm_consistent() compares it with the
@@ -58,6 +64,8 @@ typedef struct {
 
 typedef struct {
   float coh, occ_f1, comb_ratio;
+  int n_cells;  /* (DM-RS symbol, CDM group) cells claimed by the hypothesis */
+  int n_signif; /* cells whose coherence c exceeds c_alpha (each at alpha = NBS_SIGNIF_ALPHA / 42): coh is NOT a test, this is */
   int qm;       /* 2, 4, 6, 8 or 0 (undecided / not computed) */
   float qm_llr; /* log-likelihood margin of the best Qm over the runner-up, nats */
 } nr_dl_score_t;
@@ -71,11 +79,14 @@ int nr_dl_cdm_consistent(const nr_dl_hyp_t *h, const nr_dl_score_t *s);
 float nr_dl_score_rank(const nr_dl_hyp_t *h, const nr_dl_score_t *s);
 
 /** Modulation order of the TS 38.211 square QAM (2 QPSK, 4, 6, 8) that the n equalised symbols follow, or 0 when undecided.
- *  eq: any common scale (the symbols are normalised to unit mean energy: Es = mean|eq|^2 / (1 + noise_var)). noise_var = N0 / Es of the equalised
- *  symbols (1 / linear SNR), complex. The log-likelihood of each constellation (equiprobable points, circular Gaussian noise; I and Q independent) is
+ *  eq: the equalised symbols at the scale where the unit-mean-energy constellation has rms amplitude 8192 (gain known to within +-8 %, searched as a nuisance
+ *  parameter; it is NOT estimated from the sample energy, which for 64/256QAM fluctuates by more than that and would fit any wrong order). noise_var = N0 / Es of
+ *  the equalised symbols (1 / linear SNR), complex. The log-likelihood of each constellation (equiprobable points, circular Gaussian noise; I and Q independent) is
  *  summed over the symbols; a Qm is returned only when it beats EVERY other order by ln(3 / NBS_SIGNIF_ALPHA) nats: by Markov's inequality on the likelihood
  *  ratio a wrong order wins that margin against a given true one with probability <= alpha / 3, so a wrong certain answer has probability <= alpha whatever
- *  the SNR (when noise_var is right); at low SNR the margin is simply not reached and the answer is 0. *llr (optional) receives the margin to the runner-up. */
+ *  the SNR (when noise_var is right); at low SNR the margin is simply not reached and the answer is 0. The Markov bound needs a correct noise model, so the winner must
+ *  also pass a two-sided goodness-of-fit at NBS_SIGNIF_ALPHA (mean log density of the samples vs its expectation under the winning constellation and noise_var);
+ *  mis-specified noise, H error or an interferer make the answer 0, never a wrong certain Qm. *llr (optional) receives the margin to the runner-up. */
 int nr_qm_classify(const c16_t *eq, int n, float noise_var, float *llr);
 
 #ifdef __cplusplus

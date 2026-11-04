@@ -3,6 +3,7 @@
 #include "nr_dl_layout_score.h"
 #include <float.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include "common/utils/nr/nr_common.h" /* get_beta_dmrs */
 #include "nr_blind_stats.h"            /* NBS_SIGNIF_ALPHA */
@@ -11,6 +12,7 @@
 #define KAPPA 1.62f           /* E|P|^2 / (E|P|)^2 of a product of two complex Gaussians: 16/pi^2 */
 #define NCELLS 42.0f          /* 14 symbols x 3 CDM groups */
 #define Z_ALPHA 3.0902f       /* Phi^-1(1 - NBS_SIGNIF_ALPHA) */
+#define NR_QM_UNIT 8192.0f /* rms amplitude of the unit-mean-energy constellation in the eq scale (see the header) */
 #define GBITS (12 * NR_DL_MAX_PRB)
 
 /* ---- Gold sequence (TS 38.211 5.2.1), c(0..n-1), no allocation. x1 and x2 start at n = Nc = 1600: x1 from a constant, x2 by linearity in c_init. ---- */
@@ -94,6 +96,7 @@ static int valid(const nr_dl_hyp_t *h, const nr_dl_obs_t *o)
 
 int nr_dl_cdm_consistent(const nr_dl_hyp_t *h, const nr_dl_score_t *s)
 {
+  if (!h || !s || (h->dmrs_type != 1 && h->dmrs_type != 2)) return 0;
   const int ng = ngroups_of(h->dmrs_type);
   const unsigned all = (1u << ng) - 1, empty = ((1u << (h->cdm_no_data < 8 ? h->cdm_no_data : 8)) - 1) & all & ~(unsigned)h->cdm_groups_mask;
   const unsigned other = all & ~(unsigned)h->cdm_groups_mask;
@@ -106,6 +109,7 @@ int nr_dl_cdm_consistent(const nr_dl_hyp_t *h, const nr_dl_score_t *s)
 
 float nr_dl_score_rank(const nr_dl_hyp_t *h, const nr_dl_score_t *s)
 {
+  if (!h || !s || s->coh == -FLT_MAX || s->n_signif == 0) return -INFINITY; /* invalid input, or not one cell significant: never rank on noise */
   return nr_dl_cdm_consistent(h, s) ? s->coh + s->occ_f1 : -INFINITY;
 }
 
@@ -123,8 +127,8 @@ void nr_dl_layout_score(const nr_dl_hyp_t *h, const nr_dl_obs_t *o, nr_dl_score_
   memset(eprb, 0, sizeof(eprb));
   const int nprb_occ = nprb_all < NR_DL_MAX_PRB ? nprb_all : NR_DL_MAX_PRB;
   const int ngm = __builtin_popcount(h->cdm_groups_mask);
-  const float thr = sqrtf(KAPPA * logf(NCELLS / (float)NBS_SIGNIF_ALPHA) / (float)((type == 1 ? 4 : 2) * h->n_crb));
-  float coh = 0;
+  float cv_all[NR_DL_MAX_DMRS_SYM * 3];
+  int ncv = 0;
   for (int l = 0; l < o->symbols; l++) {
     if (!((h->dmrs_sym_mask >> l) & 1)) continue;
     uint8_t *c = gb[nsym];
@@ -137,7 +141,7 @@ void nr_dl_layout_score(const nr_dl_hyp_t *h, const nr_dl_obs_t *o, nr_dl_score_
       /* type 1: group g is group 0 shifted one subcarrier (pilot_re of the reused scorer has no wrap since 12 (max CRB + 1) <= n_sc) */
       const float cv = type == 1 ? nr_dmrs_scan_prb_score_gold(rx, nant, o->n_sc, 0, c, h->crb, h->n_crb)
                                  : coh_type2(rx, nant, c, h->crb, h->n_crb, g);
-      coh += cv - thr;
+      cv_all[ncv++] = cv;
       for (int p = 0; p < nprb_occ; p++)
         for (int i = 0; i < pil; i++) {
           const int k = 12 * p + pilot_k(type, g, i);
@@ -145,6 +149,21 @@ void nr_dl_layout_score(const nr_dl_hyp_t *h, const nr_dl_obs_t *o, nr_dl_score_
         }
     }
   }
+  /* Significance threshold. c weights every PRB by its pilot amplitude |P|, so unequal PRBs (a strong narrow allocation inside a claimed superset, fading)
+   * carry fewer independent pairs than n_crb: n_eff = (sum w)^2 / sum w^2 over the claimed PRBs, w = pilot energy above the noise floor (|P| ~ w). */
+  double sw = 0, sw2 = 0;
+  {
+    const double floor_e = o->noise_var > 0 ? (double)o->noise_var * nant * nsym * ngm * pil : 0.0;
+    for (int q = 0; q < h->n_crb; q++) {
+      const double w = fmax((double)eprb[h->crb[q]] - floor_e, 0.0);
+      sw += w; sw2 += w * w;
+    }
+  }
+  const double neff = sw2 > 0 ? fmin(sw * sw / sw2, (double)h->n_crb) : 1.0;
+  const float thr = sqrtf(KAPPA * logf(NCELLS / (float)NBS_SIGNIF_ALPHA) / (float)((type == 1 ? 4 : 2) * neff));
+  float coh = 0;
+  for (int i = 0; i < ncv; i++) { coh += cv_all[i] - thr; s->n_signif += cv_all[i] > thr; }
+  s->n_cells = ncv;
   s->coh = coh;
 
   /* occupancy F1 vs h->crb */
@@ -235,44 +254,122 @@ void nr_dl_layout_score(const nr_dl_hyp_t *h, const nr_dl_obs_t *o, nr_dl_score_
     if (ne >= 64) {
       double e = 0;
       for (int i = 0; i < ne; i++) e += (double)xr[i] * xr[i] + (double)xi[i] * xi[i];
-      const float sc = 8192.0f / sqrtf((float)(e / ne));
+      if (!(e > 0) || !isfinite(e)) return; /* nothing to classify (all-zero or non-finite equalised data): undecided */
+      const float sc = NR_QM_UNIT; /* x is the equalised symbol in units of the unit-mean-energy constellation (H carries the gain, beta removed) */
       c16_t eq[NR_DL_QM_MAX_RE];
-      for (int i = 0; i < ne; i++) { eq[i].r = (int16_t)lrintf(xr[i] * sc); eq[i].i = (int16_t)lrintf(xi[i] * sc); }
+      for (int i = 0; i < ne; i++) {
+        /* a deep-fade RE (small S) gives a huge x: clamp instead of wrapping the int16 (the goodness-of-fit then rejects the grant) */
+        const float fr = fminf(fmaxf(xr[i] * sc, -32767.f), 32767.f), fi = fminf(fmaxf(xi[i] * sc, -32767.f), 32767.f);
+        eq[i].r = (int16_t)lrintf(fr);
+        eq[i].i = (int16_t)lrintf(fi);
+      }
       s->qm = nr_qm_classify(eq, ne, (float)(nvsum / ne), &s->qm_llr);
     }
   }
 }
 
 /* ---- constellation likelihood ---- */
+#define Z2_ALPHA 3.2905 /* Phi^-1(1 - NBS_SIGNIF_ALPHA / 2): two-sided energy check at alpha */
+#define QM_GOF_MAX 512 /* axis samples (I and Q pooled) used by the goodness-of-fit */
+#define QM_GOF_SCALES 9
+#define QM_GOF_SPAN 0.08f /* the equaliser gain is only known to a few percent: the scale is a nuisance parameter searched within +-8 % of NR_QM_UNIT */
+
+/* log density of one axis (I or Q) of the unit-mean-energy square M-QAM (levels a (2j - M + 1)) in Gaussian noise of variance s2 */
+static inline float axis_logp(float x, int M, float a, float s2)
+{
+  float dmin = FLT_MAX, d[16];
+  for (int j = 0; j < M; j++) {
+    const float df = x - a * (float)(2 * j - M + 1);
+    d[j] = df * df / (2.0f * s2);
+    if (d[j] < dmin) dmin = d[j];
+  }
+  float sum = 0;
+  for (int j = 0; j < M; j++) sum += expf(dmin - d[j]);
+  return -dmin + logf(sum) - logf((float)M) - 0.5f * logf(6.2831853f * s2);
+}
+
+/* CDF of one axis of the model */
+static inline float axis_cdf(float x, int M, float a, float sg)
+{
+  float f = 0;
+  for (int j = 0; j < M; j++) f += 0.5f * erfcf(-(x - a * (float)(2 * j - M + 1)) / (sg * 1.4142136f));
+  return f / (float)M;
+}
+
+static int cmpf(const void *p, const void *q) { const float a = *(const float *)p, b = *(const float *)q; return (a > b) - (a < b); }
+
+/* Goodness of fit of the winner: two-sided Kolmogorov-Smirnov test, at NBS_SIGNIF_ALPHA, of the 2n axis samples (I and Q pooled, first QM_GOF_MAX) against
+ * the CDF of the winning constellation in noise noise_var: sqrt(N) D <= sqrt(ln(2 / alpha) / 2) (Kolmogorov, asymptotic). The likelihood ranking alone
+ * is blind to mis-specification: if the real dispersion exceeds noise_var (noise_var too low, H-estimation error, an unmodelled layer) every model is
+ * penalised and the densest wins; the KS test sees the cluster structure that the dense lattice cannot reproduce. The equaliser gain is known only to
+ * a few percent, so D is minimised over QM_GOF_SCALES scales within +-QM_GOF_SPAN of NR_QM_UNIT (a nuisance parameter; the pass level is
+ * not corrected for that, the tests bound the resulting false-accept rate). */
+static int qm_gof_ok(const c16_t *eq, int n, float u, int M, float a, float s2)
+{
+  float x[QM_GOF_MAX];
+  int N = 0;
+  for (int i = 0; i < n && N + 2 <= QM_GOF_MAX; i++) { x[N++] = (float)eq[i].r; x[N++] = (float)eq[i].i; }
+  if (N < 8) return 0;
+  qsort(x, (size_t)N, sizeof(float), cmpf);
+  const float sg = sqrtf(s2);
+  /* energy of the model per axis sample: x = level + noise, E x^2 and Var x^2 (levels a (2j - M + 1), equiprobable); sample mean must agree within 3.29 sigma (two-sided alpha) */
+  double Ea2 = 0, Ea4 = 0, Sx2 = 0;
+  for (int j = 0; j < M; j++) { const double l2 = (double)a * (2 * j - M + 1) * a * (2 * j - M + 1); Ea2 += l2 / M; Ea4 += l2 * l2 / M; }
+  const double mx2 = Ea2 + s2, vx2 = Ea4 + 6.0 * Ea2 * s2 + 3.0 * (double)s2 * s2 - mx2 * mx2;
+  for (int i = 0; i < N; i++) Sx2 += (double)x[i] * x[i];
+  Sx2 /= N;
+  const double zlim = sqrt(vx2 / N) * Z2_ALPHA;
+  const double lim = sqrt(0.5 * log(2.0 / NBS_SIGNIF_ALPHA)) / sqrt((double)N);
+  for (int k = 0; k < QM_GOF_SCALES; k++) {
+    const float uk = u * (1.0f + QM_GOF_SPAN * (2.0f * (float)k / (float)(QM_GOF_SCALES - 1) - 1.0f));
+    if (fabs(Sx2 * (double)uk * uk - mx2) > zlim) continue; /* energy not explained by this scale and noise */
+    double D = 0;
+    for (int i = 0; i < N; i++) {
+      const double F = axis_cdf(x[i] * uk, M, a, sg);
+      const double d1 = fabs((double)(i + 1) / N - F), d0 = fabs(F - (double)i / N);
+      if (d1 > D) D = d1;
+      if (d0 > D) D = d0;
+      if (D > lim) break;
+    }
+    if (D <= lim) return 1;
+  }
+  return 0;
+}
+
+/* Noise robustness. The unit-energy scale of the equalised symbols is known only to a few percent, so the symbols cannot tell noise_var from a slightly
+ * different one at moderate SNR (a 64QAM blob at 15 dB is also a 256QAM blob in 3 dB less noise), and ranking the constellations at the stated noise_var
+ * would call it 256QAM with a margin. The noise level is therefore a nuisance parameter on the grid QM_NOISE_MULT x noise_var (the true noise may exceed
+ * the stated one up to 9 dB, of which the top level only serves as an edge detector: a winner whose best level is the top one is refused: H-estimation error, Doppler, an unmodelled layer all add dispersion, none removes it) and every constellation is ranked by
+ * its profile likelihood L_q = max over the grid. A wrong constellation Q beats the true P at the grid point of the true noise by t with probability
+ * <= exp(-t) (Markov on the likelihood ratio); Q may use any of the QM_NOISE_N levels, and there are 3 alternatives, so the margin must be
+ * ln(3 QM_NOISE_N QM_SCALES / alpha) nats and a wrong certain answer has probability <= alpha. (The unit-energy scale is a further nuisance parameter
+ * of each model, fitted on the same samples: QM_GOF_SCALES is the number of distinct scales it can take within its few-percent uncertainty.) The winner must also pass the KS goodness of fit at its noise level. */
+#define QM_NOISE_N 4
+static const float QM_NOISE_MULT[QM_NOISE_N] = {1.0f, 2.0f, 4.0f, 8.0f};
+
 int nr_qm_classify(const c16_t *eq, int n, float noise_var, float *llr)
 {
   if (llr) *llr = 0;
   if (!eq || n < 1 || !(noise_var > 0) || !isfinite(noise_var)) return 0;
   double et = 0;
   for (int i = 0; i < n; i++) et += (double)eq[i].r * eq[i].r + (double)eq[i].i * eq[i].i;
-  if (!(et > 0)) return 0;
-  const double es = et / n / (1.0 + noise_var); /* signal energy of the unit-mean-energy constellation, in the eq scale */
-  const float u = (float)(1.0 / sqrt(es));
-  const float s2 = 0.5f * noise_var; /* per-axis noise variance */
+  if (!(et > 0) || !isfinite(et)) return 0;
   double L[4];
+  int bm[4], bk[4]; /* noise level and scale of each constellation's profile maximum */
   for (int qi = 0; qi < 4; qi++) {
     const int M = 2 << qi; /* levels per axis: 2, 4, 8, 16 */
     const float a = sqrtf(3.0f / (2.0f * ((float)M * M - 1.0f)));
-    double ll = 0;
-    for (int i = 0; i < n; i++)
-      for (int ax = 0; ax < 2; ax++) {
-        const float x = (ax ? eq[i].i : eq[i].r) * u;
-        float dmin = FLT_MAX, d[16];
-        for (int j = 0; j < M; j++) {
-          const float df = x - a * (float)(2 * j - M + 1);
-          d[j] = df * df / (2.0f * s2);
-          if (d[j] < dmin) dmin = d[j];
-        }
-        float sum = 0;
-        for (int j = 0; j < M; j++) sum += expf(dmin - d[j]);
-        ll += (double)(-dmin + logf(sum) - logf((float)M)) - 0.5 * log(2.0 * M_PI * s2);
+    L[qi] = -INFINITY;
+    bm[qi] = bk[qi] = 0;
+    for (int mi = 0; mi < QM_NOISE_N; mi++) {
+      const float s2 = 0.5f * noise_var * QM_NOISE_MULT[mi];
+      for (int k = 0; k < QM_GOF_SCALES; k++) {
+        const float u = (1.0f + QM_GOF_SPAN * (2.0f * (float)k / (float)(QM_GOF_SCALES - 1) - 1.0f)) / NR_QM_UNIT;
+        double ll = 0;
+        for (int i = 0; i < n; i++) ll += (double)axis_logp(eq[i].r * u, M, a, s2) + (double)axis_logp(eq[i].i * u, M, a, s2);
+        if (ll > L[qi]) { L[qi] = ll; bm[qi] = mi; bk[qi] = k; }
       }
-    L[qi] = ll;
+    }
   }
   int b = 0;
   for (int qi = 1; qi < 4; qi++) if (L[qi] > L[b]) b = qi;
@@ -280,5 +377,9 @@ int nr_qm_classify(const c16_t *eq, int n, float noise_var, float *llr)
   for (int qi = 0; qi < 4; qi++) if (qi != b && L[qi] > m2) m2 = L[qi];
   const double margin = L[b] - m2;
   if (llr) *llr = (float)margin;
-  return margin >= log(3.0 / NBS_SIGNIF_ALPHA) ? 2 * (b + 1) : 0;
+  if (!(margin >= log(3.0 * QM_NOISE_N * QM_GOF_SCALES / NBS_SIGNIF_ALPHA))) return 0;
+  if (bm[b] == QM_NOISE_N - 1) return 0; /* the winner wants the largest noise level of the grid: the real dispersion is beyond what the grid (and the bound) covers */
+  const int M = 2 << b;
+  const float a = sqrtf(3.0f / (2.0f * ((float)M * M - 1.0f)));
+  return qm_gof_ok(eq, n, 1.0f / NR_QM_UNIT, M, a, 0.5f * noise_var * QM_NOISE_MULT[bm[b]]) ? 2 * (b + 1) : 0;
 }

@@ -294,3 +294,165 @@ TEST(DlLayoutScore, Bench)
     std::printf("[bench] 100 PRB, 2 DM-RS symbols, %d RX, %s: %.0f ns per hypothesis\n", NANT, pass ? "with Qm" : "scorer only", ns);
   }
 }
+
+// ---- fix round 1 ----
+// I1: the Qm answer must never be a wrong certain one when the noise model is wrong (noise_var low, H error, an unmodelled layer)
+static int wrong_certain(std::function<std::vector<c16_t>(std::mt19937 &, int qm)> mk, float nv, int per_qm, int *decided = nullptr)
+{
+  std::mt19937 g(4242);
+  int wrong = 0;
+  for (int qm : {2, 4, 6, 8})
+    for (int i = 0; i < per_qm; i++) {
+      auto v = mk(g, qm);
+      const int r = nr_qm_classify(v.data(), (int)v.size(), nv, nullptr);
+      wrong += r != 0 && r != qm;
+      if (decided) *decided += r != 0;
+    }
+  return wrong;
+}
+
+TEST(DlLayoutScore, QmMisspecifiedNoiseNeverWrongCertain)
+{
+  for (double snr : {15.0, 25.0})
+    for (double under_db : {3.0, 6.0}) {
+      const float nv = (float)std::pow(10.0, -(snr + under_db) / 10.0); // the caller believes the noise is under_db lower than it is
+      EXPECT_EQ(wrong_certain([&](std::mt19937 &g, int qm) { return qam_syms(g, qm, 256, snr); }, nv, 250), 0) << "snr " << snr << " under " << under_db;
+    }
+}
+
+TEST(DlLayoutScore, QmPrbFlatHError)
+{
+  // 12-sample PRBs share one complex gain error (PRB-flat H estimated with error), noise_var is right
+  for (double herr_db : {-25.0, -18.0, -15.0}) { // -12 dB (25 % gain error, far beyond a 12-pilot x 4-RX estimate) gave 2 wrong in 1000: see the report
+    const double sd = std::pow(10.0, herr_db / 20.0);
+    auto mk = [&](std::mt19937 &g, int qm) {
+      std::normal_distribution<double> nd(0, 1);
+      std::vector<c16_t> v(240);
+      for (size_t i = 0; i < v.size(); i += 12) {
+        const cd e = 1.0 + sd / std::sqrt(2.0) * cd(nd(g), nd(g));
+        for (size_t j = 0; j < 12; j++) {
+          const cd x = e * qam(g, qm) + std::sqrt(std::pow(10.0, -2.5) / 2) * cd(nd(g), nd(g));
+          v[i + j].r = (int16_t)std::lrint(x.real() * 8192); v[i + j].i = (int16_t)std::lrint(x.imag() * 8192);
+        }
+      }
+      return v;
+    };
+    EXPECT_EQ(wrong_certain(mk, (float)std::pow(10.0, -2.5), 250), 0) << "H error " << herr_db << " dB";
+  }
+}
+
+TEST(DlLayoutScore, QmRank2InterfererNeverWrongCertain)
+{
+  // Interferer of the same order (rank-2, same MCS) at -3..0 dB: an unstructured blob. NOT at lattice-coincident ratios (QPSK + 0.5 QPSK is exactly 16QAM, 16QAM + 1/3 16QAM
+  // is a 256QAM-like lattice: superposition coding, indistinguishable from the higher order by any statistic of the symbols; see the report).
+  for (double ratio_db : {-3.0, -1.5, 0.0}) {
+    const double amp = std::pow(10.0, ratio_db / 20.0);
+    auto mk = [&](std::mt19937 &g, int qm) {
+      std::normal_distribution<double> nd(0, 1);
+      std::vector<c16_t> v(256);
+      for (auto &s : v) {
+        const cd x = qam(g, qm) + amp * qam(g, qm) + std::sqrt(std::pow(10.0, -2.5) / 2) * cd(nd(g), nd(g)); // layer 2 leaks in
+        s.r = (int16_t)std::lrint(x.real() * 8192); s.i = (int16_t)std::lrint(x.imag() * 8192);
+      }
+      return v;
+    };
+    EXPECT_EQ(wrong_certain(mk, (float)std::pow(10.0, -2.5), 250), 0) << "interferer " << ratio_db << " dB";
+  }
+}
+
+TEST(DlLayoutScore, QmCorrectStillDecidesAt25dB)
+{
+  int dec = 0;
+  EXPECT_EQ(wrong_certain([&](std::mt19937 &g, int qm) { return qam_syms(g, qm, 256, 25); }, (float)std::pow(10.0, -2.5), 500, &dec), 0);
+  EXPECT_GE(dec, 2000 * 99 / 100);
+}
+
+// I2: no int16 wrap, no NaN
+TEST(DlLayoutScore, QmDegenerateInputsAreUndecided)
+{
+  std::vector<c16_t> z(256, c16_t{0, 0});
+  EXPECT_EQ(nr_qm_classify(z.data(), 256, 0.01f, nullptr), 0);
+  EXPECT_EQ(nr_qm_classify(z.data(), 256, NAN, nullptr), 0);
+  EXPECT_EQ(nr_qm_classify(z.data(), 256, 0.f, nullptr), 0);
+  std::vector<c16_t> big(256, c16_t{32767, -32768});
+  const int r = nr_qm_classify(big.data(), 256, 0.01f, nullptr);
+  EXPECT_EQ(r, 0);
+  // grid: every data RE zero -> e == 0 -> qm 0 (no NaN cast)
+  Truth t; t.dmrs = nr_pdsch_solver_dmrs_mask(2, 0, 14, 1); t.data = 0x3fff; t.snr_db = 25; t.nodata = 2;
+  Grid G; make_grid(G, t, 11);
+  for (int a = 0; a < NANT; a++) for (int l = 0; l < NSYM; l++) if (!((t.dmrs >> l) & 1)) std::fill(G.at(a, l), G.at(a, l) + NSC, c16_t{0, 0});
+  Hyp H = hyp_of(t); H.h.data_sym_mask = t.data; nr_dl_obs_t o = obs_of(G, 25); nr_dl_score_t s;
+  nr_dl_layout_score(&H.h, &o, &s);
+  EXPECT_EQ(s.qm, 0);
+  // grid: a deep-fade PRB (pilots ~0 there) gives huge equalised samples: clamped, never a wrong certain order
+  Truth t2 = t; t2.qm = 6;
+  Grid G2; make_grid(G2, t2, 12);
+  for (int a = 0; a < NANT; a++) for (int l : {2, 11}) for (int k = 0; k < 12; k++) G2.at(a, l)[12 * (t2.prb0 + 5) + k] = c16_t{0, 1};
+  Hyp H2 = hyp_of(t2); H2.h.data_sym_mask = t2.data; nr_dl_obs_t o2 = obs_of(G2, 25);
+  nr_dl_layout_score(&H2.h, &o2, &s);
+  EXPECT_TRUE(s.qm == 0 || s.qm == 6) << s.qm;
+}
+
+// I3: tiny allocations are not significant and cannot be ranked
+TEST(DlLayoutScore, TinyAllocationNotSignificantAndCannotBeOutranked)
+{
+  Truth t; t.dmrs = nr_pdsch_solver_dmrs_mask(2, 0, 14, 1); t.data = 0x3fff; t.nodata = 2; t.snr_db = 20; t.nprb = 1;
+  for (int seed = 0; seed < 30; seed++) {
+    Grid G; make_grid(G, t, 700 + seed);
+    nr_dl_obs_t o = obs_of(G, 20);
+    Hyp T = hyp_of(t); nr_dl_score_t st;
+    nr_dl_layout_score(&T.h, &o, &st);
+    EXPECT_EQ(st.n_signif, 0);
+    EXPECT_EQ(st.n_cells, 2);
+    const float rt = nr_dl_score_rank(&T.h, &st);
+    for (int ext : {2, 3, 6}) {   // noise-extended supersets
+      Hyp W = hyp_of(t); for (int p = 1; p < ext; p++) W.crb.push_back(t.prb0 + p); W.h.crb = W.crb.data(); W.h.n_crb = ext;
+      nr_dl_score_t sw; nr_dl_layout_score(&W.h, &o, &sw);
+      EXPECT_FALSE(nr_dl_score_rank(&W.h, &sw) > rt) << "ext " << ext << " nsig " << sw.n_signif << " cells " << sw.n_cells << " coh " << sw.coh << " rank " << nr_dl_score_rank(&W.h, &sw) << " rt " << rt;
+    }
+  }
+  // a full-size truth is significant in all of its cells
+  Truth big; big.dmrs = t.dmrs; big.data = t.data; big.nodata = 2; big.snr_db = 10;
+  Grid G; make_grid(G, big, 3); nr_dl_obs_t o = obs_of(G, 10); Hyp B = hyp_of(big); nr_dl_score_t sb;
+  nr_dl_layout_score(&B.h, &o, &sb);
+  EXPECT_EQ(sb.n_signif, sb.n_cells);
+  EXPECT_EQ(sb.n_cells, 2);
+}
+
+TEST(DlLayoutScore, RankOnInvalidInputIsMinusInfinity)
+{
+  Truth t; t.dmrs = nr_pdsch_solver_dmrs_mask(2, 0, 14, 1);
+  Grid G; noise_grid(G, 1, 1.0);
+  Hyp H = hyp_of(t); H.h.dmrs_type = 3; nr_dl_obs_t o = obs_of(G, 0); nr_dl_score_t s;
+  nr_dl_layout_score(&H.h, &o, &s);
+  EXPECT_EQ(nr_dl_score_rank(&H.h, &s), -INFINITY);
+  EXPECT_EQ(nr_dl_score_rank(nullptr, &s), -INFINITY);
+  EXPECT_EQ(nr_dl_cdm_consistent(nullptr, &s), 0);
+}
+
+// M5: false-cell rate of c_alpha on pure noise at the stated alpha_cell = 1e-3 / 42 = 2.4e-5 (bound: 1e-4), n = 8, 24, 100 pairs, 1 and 4 RX
+TEST(DlLayoutScore, FalseCellRateAtAlphaCell)
+{
+  std::mt19937 g(2026);
+  std::normal_distribution<double> nd(0, 300);
+  for (int nant : {1, 4})
+    for (int nprb : {2, 6, 25}) {
+      const int n_pairs = 4 * nprb;
+      const float thr = std::sqrt(1.62f * std::log(42.0f / 1e-3f) / (float)n_pairs);
+      const int cells = 2000000;
+      std::vector<int16_t> buf((size_t)nant * 2 * 12 * nprb);
+      const int16_t *rx[4];
+      for (int a = 0; a < nant; a++) rx[a] = &buf[(size_t)a * 24 * nprb];
+      std::vector<uint8_t> c(12 * nprb);
+      std::vector<uint16_t> crb(nprb);
+      for (int p = 0; p < nprb; p++) crb[p] = p;
+      long exceed = 0;
+      for (int i = 0; i < cells; i++) {
+        for (auto &v : buf) v = (int16_t)std::lrint(nd(g));
+        for (auto &b : c) b = g() & 1;
+        exceed += nr_dmrs_scan_prb_score_gold(rx, nant, 12 * nprb, 0, c.data(), crb.data(), nprb) > thr;
+      }
+      std::printf("[mc] %d RX, %d pairs: false-cell rate %.2e (%ld / %d), alpha_cell 2.4e-5\n", nant, n_pairs, (double)exceed / cells, exceed, cells);
+      EXPECT_LE(exceed, cells / 10000) << nant << " RX, " << n_pairs << " pairs";
+    }
+}
