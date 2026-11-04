@@ -387,7 +387,7 @@ TEST(Dci11Prove, ReopensOnViolations)
   EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s2));
 }
 
-TEST(Dci11Prove, HysteresisKeepsAProofThroughAWeakLook)
+TEST(Dci11Prove, ProofStandsOnMoreOfTheSameAndEndsAtARival)
 {
   nr_cell_bind(0);
   nr_dci11_bank_reset();
@@ -397,21 +397,160 @@ TEST(Dci11Prove, HysteresisKeepsAProofThroughAWeakLook)
   make_layout(a, &l, &o);
   const nr_dci11_class_t kc = cls_of(l, o);
   const uint16_t rnti = 0x4603;
-  feed_all(rnti, gen_stream(a, 64, rng), o.total);
+  auto first = gen_stream(a, 64, rng);
+  feed_all(rnti, first, o.total);
   ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
   nr_dci11_split_t s{};
   ASSERT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
-  // the next 64 DCIs (the whole ring) have arbitrary pids AND arbitrary DAI bits: a fresh proof of that window alone is impossible (no test is significant,
-  // many readings survive), but nothing in it REFUTES the proven reading either. The proof stands.
+  // 16 more DCIs of the same config: nothing changes
+  feed_all(rnti, gen_stream(a, 16, rng, 20000), o.total);
+  EXPECT_FALSE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
+  EXPECT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  // the next 64 DCIs (the whole ring) have arbitrary pids AND arbitrary DAI bits: nothing in them refutes the old reading, but many readings survive
+  // there, a RIVAL. A reading that is no longer the only one is not a proof (M2): it ends.
   Cfg w = a; w.random_pid = true;
-  auto weak = gen_stream(w, 64, rng, 9000);
+  auto weak = gen_stream(w, 64, rng, 30000);
   const int base = o.ant_ports - l.pre_ant;
   for (auto &d : weak) put(d.p, o.total, base + 4, 2, (unsigned)(rng() & 3));
-  ASSERT_GT(run(w, weak).alive.size(), 1u);   // precondition: on its own the weak window proves nothing
+  ASSERT_GT(run(w, weak).alive.size(), 1u);   // precondition: on its own the weak window proves nothing and leaves rivals
   feed_all(rnti, weak, o.total);
-  nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu);
+  EXPECT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));   // the state changed
   nr_dci11_split_t s2{};
-  EXPECT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s2));
+  EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s2));
+  nr_dci11_bank_reset();
+}
+
+TEST(Dci11Prove, UnexaminableClassIsAmbiguousNotRefuted)
+{
+  // a class the prover cannot examine (pre_ant longer than the offsets allow: ant_ports < pre_ant, prove() == -1) must not count as refuted: with a good class
+  // proving the truth, adding it makes the round ambiguous, so no proof
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  std::mt19937 rng(25);
+  Cfg c;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(c, &l, &o);
+  nr_dci11_class_t bad = cls_of(l, o);
+  bad.o.ant_ports = 3;                 // < pre_ant
+  bad.o.mcs += 1;                      // a distinct class
+  const nr_dci11_class_t good = cls_of(l, o);
+  nr_dci11_split_t al[NR_DCI11_CORE_MAX]; double cp[NR_DCI11_CORE_MAX];
+  ASSERT_EQ(nr_dci11_prove(&bad.l, &bad.o, nullptr, 0, ul_dddsu, al, cp, NR_DCI11_CORE_MAX), -1);
+  const auto v = gen_stream(c, 64, rng);
+  const uint16_t rnti = 0x4606;
+  feed_all(rnti, v, o.total);
+  nr_dci11_class_t two[2] = {good, bad};
+  nr_dci11_bank_maybe_prove(rnti, two, 2, ul_dddsu);
+  nr_dci11_split_t s{};
+  EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  nr_dci11_bank_reset();
+  feed_all(rnti, v, o.total);
+  EXPECT_TRUE(nr_dci11_bank_maybe_prove(rnti, &good, 1, ul_dddsu));   // the good class alone does prove
+  nr_dci11_bank_reset();
+}
+
+TEST(Dci11Prove, ClassSetGatesTheStoredReading)
+{
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  std::mt19937 rng(26);
+  Cfg c;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(c, &l, &o);
+  nr_dci11_resolver_t *r = (nr_dci11_resolver_t *)calloc(1, sizeof *r);
+  r->n_hyp = 1; r->n_alive = 1; r->hyp[0] = l; r->off[0] = o; r->alive[0] = true;
+  nr_dci11_class_t cl[NR_DCI11_CLASS_MAX];
+  ASSERT_EQ(nr_dci11_class_set(r, cl, false, nullptr), NR_DCI11_CLS_NONE);   // never scans on the receive thread
+  ASSERT_EQ(nr_dci11_class_set(r, cl, true, nullptr), 1);
+  ASSERT_EQ(nr_dci11_class_set(r, nullptr, false, nullptr), 1);               // cached: no scan needed
+  const uint16_t rnti = 0x4607;
+  feed_all(rnti, gen_stream(c, 64, rng), o.total);
+  ASSERT_TRUE(nr_dci11_bank_due(rnti));
+  ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, cl, 1, ul_dddsu));
+  nr_dci11_class_t pc; nr_dci11_split_t ps;
+  ASSERT_TRUE(nr_dci11_bank_proven_any(rnti, &pc, &ps));
+  EXPECT_FALSE(nr_dci11_bank_due(rnti));
+  // N4: the resolver loses every layout: no class set; the stored proof is dropped and does not come back when a layout reappears
+  r->alive[0] = false; r->n_alive = 0;
+  EXPECT_EQ(nr_dci11_class_set(r, nullptr, false, nullptr), NR_DCI11_CLS_NONE);   // changed set not yet examined: no reading
+  EXPECT_EQ(nr_dci11_class_set(r, cl, true, nullptr), NR_DCI11_CLS_NONE);
+  EXPECT_FALSE(nr_dci11_bank_proven_any(rnti, &pc, &ps));
+  r->alive[0] = true; r->n_alive = 1;
+  EXPECT_EQ(nr_dci11_class_set(r, cl, true, nullptr), 1);
+  EXPECT_FALSE(nr_dci11_bank_proven_any(rnti, &pc, &ps));                 // needs a fresh proof
+  feed_all(rnti, gen_stream(c, 64, rng, 40000), o.total);
+  ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, cl, 1, ul_dddsu));
+  ASSERT_TRUE(nr_dci11_bank_proven_any(rnti, &pc, &ps));
+  // N2: an incomplete resolver set (layouts not stored) abstains: no classes, proofs dropped, and a skipped round proves nothing
+  r->n_truncated = 5;
+  EXPECT_EQ(nr_dci11_classes(r, cl, NR_DCI11_CLASS_MAX), -2);
+  EXPECT_EQ(nr_dci11_class_set(r, cl, true, nullptr), NR_DCI11_CLS_INCOMPLETE);
+  EXPECT_FALSE(nr_dci11_bank_proven_any(rnti, &pc, &ps));
+  feed_all(rnti, gen_stream(c, 64, rng, 50000), o.total);
+  ASSERT_TRUE(nr_dci11_bank_due(rnti));
+  EXPECT_FALSE(nr_dci11_bank_maybe_prove(rnti, nullptr, 0, ul_dddsu));    // skipped round: counted by the caller, look again after 16 more
+  EXPECT_FALSE(nr_dci11_bank_due(rnti));
+  EXPECT_FALSE(nr_dci11_bank_proven_any(rnti, &pc, &ps));
+  r->n_truncated = 0;
+  EXPECT_EQ(nr_dci11_class_set(r, cl, true, nullptr), 1);
+  free(r);
+  nr_dci11_bank_reset();
+}
+
+TEST(Dci11Prove, SolvedRntiProvesInItsOwnClassWhateverTheResolverHolds)
+{
+  // 20 alive classes (over the cap): an UNSOLVED RNTI abstains (counted, histogram), a CRC-SOLVED one proves within its known layout's single class
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  std::mt19937 rng(27);
+  Cfg c;
+  nr_dci11_layout_t l; nr_dci11_offsets_t o;
+  make_layout(c, &l, &o);
+  nr_dci11_resolver_t *r = (nr_dci11_resolver_t *)calloc(1, sizeof *r);
+  for (int i = 0; i < 20; i++) { r->hyp[i] = l; r->off[i] = o; r->off[i].mcs = (uint16_t)(o.mcs + i); r->alive[i] = true; }
+  r->n_hyp = 20; r->n_alive = 20;
+  nr_dci11_class_t cl[NR_DCI11_CLASS_MAX];
+  int tot = 0;
+  EXPECT_EQ(nr_dci11_class_set(r, cl, true, &tot), NR_DCI11_CLS_TOO_MANY);
+  EXPECT_EQ(tot, 20);                                             // histogram bucket 17-64
+  const uint16_t rnti = 0x4608;
+  feed_all(rnti, gen_stream(c, 64, rng), o.total);
+  EXPECT_FALSE(nr_dci11_bank_maybe_prove(rnti, nullptr, 0, ul_dddsu));   // the unsolved path: skipped round
+  nr_dci11_split_t s{};
+  EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  feed_all(rnti, gen_stream(c, 64, rng, 7000), o.total);
+  const nr_dci11_class_t own = cls_of(l, o);                      // the solver's representative layout
+  EXPECT_TRUE(nr_dci11_bank_maybe_prove(rnti, &own, 1, ul_dddsu));
+  ASSERT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  EXPECT_EQ(s.dai, 2); EXPECT_EQ(s.k1, 2);
+  // more than 64 classes: the histogram says so
+  for (int i = 20; i < 70; i++) { r->hyp[i] = l; r->off[i] = o; r->off[i].mcs = (uint16_t)(o.mcs + i); r->alive[i] = true; }
+  r->n_hyp = 70; r->n_alive = 70;
+  EXPECT_EQ(nr_dci11_class_set(r, cl, true, &tot), NR_DCI11_CLS_TOO_MANY);
+  EXPECT_EQ(tot, NR_DCI11_CLASS_COUNT_MAX + 1);
+  free(r);
+  nr_dci11_bank_reset();
+}
+
+TEST(Dci11Prove, ChangedClassSetIsRecomputedOnlyWhenItChanges)
+{
+  // the cache key is (resolver, n_hyp, n_alive, n_truncated): another alive count is a fresh scan, the same one is not
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
+  nr_dci11_resolver_t *r = (nr_dci11_resolver_t *)calloc(1, sizeof *r);
+  Cfg c13, c14; c14.k1 = 3;
+  nr_dci11_layout_t l[2]; nr_dci11_offsets_t o[2];
+  make_layout(c13, &l[0], &o[0]); make_layout(c14, &l[1], &o[1]);
+  r->n_hyp = 2; r->n_alive = 2;
+  for (int i = 0; i < 2; i++) { r->hyp[i] = l[i]; r->off[i] = o[i]; r->alive[i] = true; }
+  nr_dci11_class_t cl[NR_DCI11_CLASS_MAX];
+  ASSERT_EQ(nr_dci11_class_set(r, cl, true, nullptr), 2);
+  r->alive[1] = false;   // n_alive NOT updated: the cache (keyed on the counts) still answers 2, as the resolver always moves n_alive with alive[]
+  EXPECT_EQ(nr_dci11_class_set(r, cl, false, nullptr), 2);
+  r->n_alive = 1;
+  EXPECT_EQ(nr_dci11_class_set(r, cl, false, nullptr), NR_DCI11_CLS_NONE);   // the key moved: not examined yet
+  EXPECT_EQ(nr_dci11_class_set(r, cl, true, nullptr), 1);
+  free(r);
   nr_dci11_bank_reset();
 }
 
@@ -504,10 +643,11 @@ TEST(Dci11Prove, IdentityChangeAndSilenceDropTheRing)
   feed_all(rnti, v, o.total);
   ASSERT_TRUE(nr_dci11_bank_maybe_prove(rnti, &kc, 1, ul_dddsu));
   ASSERT_TRUE(nr_dci11_bank_proven(rnti, &l, &o, &s));
-  // another cell identity: the next feed wipes every bank and proof of the cell
+  // another cell identity: the next feed wipes every bank and proof of the cell (and nothing is due in the fresh banks)
   const nr_dci11_feed_t other = {2, 1000000000, 1000000000};
   nr_dci11_bank_feed(0x4999, v[0].p, (uint16_t)o.total, v[0].slot, &other);
   EXPECT_FALSE(nr_dci11_bank_proven(rnti, &l, &o, &s));
+  EXPECT_FALSE(nr_dci11_bank_due(rnti));
   // silence longer than max_gap drops the ring of that RNTI (and its proof); the new DCI starts a fresh ring of 1
   nr_dci11_bank_reset();
   const nr_dci11_feed_t gap = {1, 100, 50};
@@ -823,7 +963,10 @@ TEST(Dci11Prove, SweepRealistic)
 
 TEST(Dci11Prove, BenchProveCost)
 {
-  // CPU per proof on the scan consumer, 64 DCIs: one class, and the 16-class cap
+  // CPU on the scan consumer (64 DCIs): (a) one class, (b) the 16-class cap through the bank, (c) per ACCEPTED 1_1 when no proof is due (feed + due test + cached
+  // class-set test), (d) worst-case class scan: 65535 alive layouts, 16 classes / 1 class
+  nr_cell_bind(0);
+  nr_dci11_bank_reset();
   std::mt19937 rng(31);
   Cfg c; c.dai = 4; c.k1 = 3; c.L = {1, 2, 3, 4, 6, 7, 8, 9};
   const auto v = gen_stream(c, NR_DCI11_BANK, rng);
@@ -837,7 +980,48 @@ TEST(Dci11Prove, BenchProveCost)
   int na = 0;
   for (int i = 0; i < reps; i++) na += nr_dci11_prove(&l, &o, b.data(), (int)b.size(), ul_dddsu, al, cp, NR_DCI11_CORE_MAX);
   const double one = (now() - t0) / reps;
-  printf("prove cost: %.1f us per class (64 DCIs, %d survivors/prove) -> %.1f us for 16 classes\n", one, na / reps, 16 * one);
   EXPECT_GT(na, 0);
+  // (b) 16 classes
+  nr_dci11_class_t cl[16];
+  for (int i = 0; i < 16; i++) { cl[i] = cls_of(l, o); cl[i].o.mcs = (uint16_t)(o.mcs + i); }
+  const uint16_t rnti = 0x4610;
+  double sum16 = 0;
+  const int r16 = 50;
+  for (int i = 0; i < r16; i++) {
+    nr_dci11_bank_reset();
+    feed_all(rnti, v, o.total);
+    const double a0 = now();
+    nr_dci11_bank_maybe_prove(rnti, cl, 16, ul_dddsu);
+    sum16 += now() - a0;
+  }
+  const double p16 = sum16 / r16;
+  // (c) per accepted 1_1 when not due
+  nr_dci11_resolver_t *r = (nr_dci11_resolver_t *)calloc(1, sizeof *r);
+  const int N = 65535;
+  for (int i = 0; i < N; i++) { r->hyp[i] = l; r->off[i] = o; r->off[i].mcs = (uint16_t)(o.mcs + (i % 16)); r->alive[i] = true; }
+  r->n_hyp = N; r->n_alive = N;
+  const double s0 = now();
+  ASSERT_EQ(nr_dci11_class_set(r, cl, true, nullptr), 16);
+  const double scan16 = now() - s0;
+  for (int i = 0; i < N; i++) r->off[i].mcs = o.mcs;
+  r->n_alive = N - 1;
+  const double s1 = now();
+  ASSERT_EQ(nr_dci11_class_set(r, cl, true, nullptr), 1);
+  const double scan1 = now() - s1;
+  nr_dci11_bank_reset();
+  const nr_dci11_feed_t fd = {1, 1000000000, 1000000000};
+  const int acc = 200000;
+  const double c0 = now();
+  int due = 0;
+  for (int i = 0; i < acc; i++) {
+    nr_dci11_bank_feed(rnti, v[i % 64].p, (uint16_t)o.total, 1000 + i, &fd);
+    due += nr_dci11_bank_due(rnti);                      // true from the 16th feed on (nothing proves here): the test costs the same either way
+    due += nr_dci11_class_set(r, nullptr, false, nullptr) > 0;
+  }
+  const double per_accept = (now() - c0) * 1000.0 / acc;
+  printf("BENCH one class %.1f us | 16 classes via bank %.1f us | per accepted 1_1 (feed+due+cached class set) %.0f ns | class scan of 65535 alive layouts: 16 classes %.0f us, 1 class %.0f us (%d)\n",
+         one, p16, per_accept, scan16, scan1, due > 0);
+  free(r);
+  nr_dci11_bank_reset();
   EXPECT_LT(one, 20000.0);
 }

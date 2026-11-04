@@ -4176,6 +4176,8 @@ openair1/PHY/NR_UE_TRANSPORT/nr_traffic_decode.c	13	g_td	file_static	td_tab_t [c
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_decode.c	11	g_td_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_td
 openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	334	g_bank	file_static	bank_tab_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, E1 per-RNTI rings of the last 64 DCI 1_1 payloads + proven pre_ant split (128 RNTIs, LRU)
 openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	336	g_bank_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_bank (copy under it, prove outside)
+openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	529	g_cls	file_static	cls_cache_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, cached layout-class set of this cell's resolver (keyed by n_hyp/n_alive/n_truncated)
+openair1/PHY/NR_UE_TRANSPORT/nr_dci11_prove.c	529	g_cls_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_cls
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	94	g_traffic_ctr	file_static	traffic_ctr_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, traffic-mode counters + emit-time ring of this cell
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	134	g_retx_tab	file_static	rx_tab_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, last NDI per (dir, RNTI, HARQ pid) of this cell
 openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	136	g_retx_mu	file_static	pthread_mutex_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC_INIT, guards g_retx_tab

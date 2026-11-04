@@ -4698,6 +4698,7 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
   nr_dci_harq_fields_t hf = {-1, -1, -1, -1};
   if (is10 && payload && (out->rnti_class == NR_BLIND_RNTI_CLASS_C || out->rnti_class == NR_BLIND_RNTI_CLASS_TC))
     nr_dci10_harq_fields(*payload, dci_len, (uint16_t)traffic_fdra_bits(c10->n_rb_riv), &hf);
+  else if (!is10 && !payload && out->rnti_class == NR_BLIND_RNTI_CLASS_C) nr_traffic_count(NR_TRAFFIC_CNT_E1_UNFED);   /* coverage gap: this task keeps no 1_1 payload */
   else if (!is10 && payload && g_dci11_resolver != NULL) {
     /* E1: every C-RNTI DCI 1_1 payload goes into the RNTI's bank, solved or not; the prover (off the receive thread only) proves the HARQ-ACK field split
      * over the distinct classes of the resolver's alive layouts. The representative layout of a solved RNTI keeps its legacy reading unless E1 proved a
@@ -4714,17 +4715,29 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
                                              ((uint64_t)(fp->dl_CarrierFreq / 1000) & 0xFFFFFF),
                                     .max_gap_slots = (int64_t)(NR_RECONF_INACTIVE_NS / 1000000000ull) * 100 * spf, .max_back_slots = spf};
         nr_dci11_bank_feed(out->rnti, *payload, dci_len, ts, &fd);
-        if (off_rx) {
-          nr_dci11_class_t cls[NR_DCI11_CLASS_MAX];
-          const int nc = nr_dci11_classes(g_dci11_resolver, cls, NR_DCI11_CLASS_MAX);
-          if (nc < 0) nr_traffic_count(NR_TRAFFIC_CNT_E1_SKIP);
-          else if (nc > 0) {
-            t_e1_tdd_valid = false;
-            if (nr_dci11_bank_maybe_prove(out->rnti, cls, nc, e1_ul_capable)) nr_traffic_count(NR_TRAFFIC_CNT_E1_CHANGE);
+        /* cheapest test first: nothing else happens unless this RNTI's bank grew by 16. The class set is cached (a scan of the alive layouts only when the
+         * resolver's set changed) and only a scan consumer computes it. */
+        if (off_rx && nr_dci11_bank_due(out->rnti)) {
+          t_e1_tdd_valid = false;
+          if (have_rep) {
+            /* a CRC-SOLVED layout is known: prove the split within that one class (sound, the layout is proven; independent of the resolver's alive set) */
+            const nr_dci11_class_t one = {g_dci11_resolver->hyp[rep], g_dci11_resolver->off[rep]};
+            if (nr_dci11_bank_maybe_prove(out->rnti, &one, 1, e1_ul_capable)) nr_traffic_count(NR_TRAFFIC_CNT_E1_CHANGE);
+          } else {
+            nr_dci11_class_t cls[NR_DCI11_CLASS_MAX];
+            int tot = 0;
+            const int nc = nr_dci11_class_set(g_dci11_resolver, cls, true, &tot);
+            if (nc != NR_DCI11_CLS_INCOMPLETE)   /* histogram of what E2/E3 must reduce */
+              nr_traffic_count(tot <= 1 ? NR_TRAFFIC_CNT_E1_CLS_1 : tot <= 4 ? NR_TRAFFIC_CNT_E1_CLS_2_4 : tot <= 16 ? NR_TRAFFIC_CNT_E1_CLS_5_16
+                                : tot <= 64 ? NR_TRAFFIC_CNT_E1_CLS_17_64 : NR_TRAFFIC_CNT_E1_CLS_GT64);
+            if (nc < 0) nr_traffic_count(NR_TRAFFIC_CNT_E1_SKIP);   /* too many classes, or an incomplete resolver set: no proof this round */
+            if (nr_dci11_bank_maybe_prove(out->rnti, cls, nc > 0 ? nc : 0, e1_ul_capable)) nr_traffic_count(NR_TRAFFIC_CNT_E1_CHANGE);
           }
         }
       }
-      e1 = nr_dci11_bank_proven_any(out->rnti, &pc, &ps);
+      /* an UNSOLVED RNTI's stored reading is emitted only while the cached class set is the resolver's CURRENT one and usable (none alive, too many, incomplete,
+       * or the set changed since the last due look: no reading until re-examined); this test never scans. A SOLVED RNTI's reading belongs to its known layout. */
+      e1 = (have_rep || nr_dci11_class_set(g_dci11_resolver, NULL, false, NULL) > 0) && nr_dci11_bank_proven_any(out->rnti, &pc, &ps);
       if (e1 && have_rep && !nr_dci11_class_same(&pc.l, &pc.o, &g_dci11_resolver->hyp[rep], &g_dci11_resolver->off[rep])) e1 = false;
     }
     if (e1) nr_dci11_harq_fields_proven(*payload, dci_len, &pc.l, &pc.o, &ps, &hf);

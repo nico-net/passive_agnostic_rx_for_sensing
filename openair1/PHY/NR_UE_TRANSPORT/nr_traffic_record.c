@@ -105,7 +105,7 @@ void nr_sense_emit_decode(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti
 #include <stdatomic.h>
 #include <stdlib.h>
 #define TS_RING 512
-typedef struct { _Atomic uint64_t accepted[4], state[4], cnt[9]; _Atomic uint32_t emit_us[TS_RING]; _Atomic uint32_t w; } traffic_ctr_t;
+typedef struct { _Atomic uint64_t accepted[4], state[4], cnt[16]; _Atomic uint32_t emit_us[TS_RING]; _Atomic uint32_t w; } traffic_ctr_t;
 NR_CELL_STATIC(traffic_ctr_t, g_traffic_ctr)
 #define g_traffic_ctr NR_CELL_REF(g_traffic_ctr)
 
@@ -120,7 +120,7 @@ void nr_traffic_count_dci(int fmt, nr_layout_state_t ls, uint64_t emit_ns)
 
 void nr_traffic_count(int what)
 {
-  if (what >= 0 && what < 9) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
+  if (what >= 0 && what < 16) atomic_fetch_add_explicit(&g_traffic_ctr.cnt[what], 1, memory_order_relaxed);
 }
 
 static int cmp_u32(const void *a, const void *b) { const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return (x > y) - (x < y); }
@@ -133,6 +133,8 @@ void nr_traffic_stats_get(nr_traffic_stats_t *s)
   s->dup = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_DUP], memory_order_relaxed);
   s->e1_changes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_CHANGE], memory_order_relaxed);
   s->e1_skip_classes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_SKIP], memory_order_relaxed);
+  s->e1_unfed = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_UNFED], memory_order_relaxed);
+  for (int i = 0; i < 5; i++) s->e1_cls[i] = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_E1_CLS_1 + i], memory_order_relaxed);
   s->traffic_skip = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_SKIP], memory_order_relaxed);
   s->check_decodes = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK], memory_order_relaxed);
   s->check_fail = atomic_load_explicit(&c->cnt[NR_TRAFFIC_CNT_CHECK_FAIL], memory_order_relaxed);

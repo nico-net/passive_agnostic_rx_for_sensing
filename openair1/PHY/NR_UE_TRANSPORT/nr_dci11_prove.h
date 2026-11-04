@@ -65,7 +65,7 @@ uint64_t nr_dci11_k1_feasible(const nr_dci11_layout_t *l, const nr_dci11_offsets
  * not solved is proven over every class among the resolver's alive layouts. ---- */
 typedef struct { nr_dci11_layout_t l; nr_dci11_offsets_t o; } nr_dci11_class_t;
 #define NR_DCI11_CLASS_MAX 16
-/* The distinct classes of the alive layouts of r (one representative each). Returns their number (0 when none is alive), or -1 when there are more than
+/* The distinct classes of the alive layouts of r (one representative each). Returns their number (0 when none is alive), -2 when r->n_truncated (incomplete set), or -1 when there are more than
  * max: the caller skips the round and counts it. Reads r->alive racily (a layout dying meanwhile only adds a class). */
 int nr_dci11_classes(const nr_dci11_resolver_t *r, nr_dci11_class_t *out, int max);
 
@@ -73,6 +73,19 @@ bool nr_dci11_class_same(const nr_dci11_layout_t *l1, const nr_dci11_offsets_t *
 /* A DCI's slot in the numbering of the SIB1 TDD pattern (frame * slots_per_frame + slot), unwrapped (frames wrap at 1024) to sit next to the monotonic
  * receiver slot `mono`: same difference between DCIs as mono. -1 on bad arguments. Pure. */
 int64_t nr_dci11_tdd_slot(int64_t mono, int frame, int slot, int spf);
+
+/* Cached class set of the cell's resolver, keyed by (resolver, n_hyp, n_alive, n_truncated): a scan of the alive layouts only when the set changed.
+ * Returns the number of classes (>0, written to out when non-NULL), or NR_DCI11_CLS_NONE (no alive layout / not computed because allow_compute is false: the
+ * receive thread never scans), NR_DCI11_CLS_TOO_MANY (more than NR_DCI11_CLASS_MAX), NR_DCI11_CLS_INCOMPLETE (n_truncated != 0: the stored set may lack the
+ * true layout, so no reading is derived). On a computed result <= 0 every stored proof of the cell is dropped (it was made for a set that no longer exists). */
+#define NR_DCI11_CLS_NONE 0
+#define NR_DCI11_CLS_TOO_MANY (-1)
+#define NR_DCI11_CLS_INCOMPLETE (-2)
+#define NR_DCI11_CLASS_COUNT_MAX 64   /* classes counted for the histogram; a prove still takes at most NR_DCI11_CLASS_MAX */
+/* total (nullable): the number of distinct classes, counted up to NR_DCI11_CLASS_COUNT_MAX + 1 (= "more than 64"); 0 for an incomplete set or when not computed. */
+int nr_dci11_class_set(const nr_dci11_resolver_t *r, nr_dci11_class_t *out, bool allow_compute, int *total);
+/* True when rnti's bank grew by >= 16 since its last look: the cheap test that precedes everything else. */
+bool nr_dci11_bank_due(uint16_t rnti);
 
 /* ---- per-cell banks (traffic mode only). Feed: any thread (a mutex and a copy). Prove: the scan consumer, never the RX thread. ---- */
 typedef struct {
