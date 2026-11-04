@@ -21,6 +21,7 @@ struct H {
     in.min_prb = 128;
     in.now_ns = NOW;
     in.res[NR_RES_POOL].cap_ns = pool;
+    in.res[NR_RES_QUEUE_DL].cap_ns = in.res[NR_RES_QUEUE_UL].cap_ns = in.res[NR_RES_SENSE_RING].cap_ns = 1e9f; /* GPU absent (0) unless a test sets it */
   }
   /* defaults: disabled, with cost history cpu, productive (wb 10 Hz, ratio 0.8, 200 PRBs), valid just now */
   nr_sense_unit_view_t &add(int c, uint16_t rnti, float cpu = 25, nr_unit_src_t s = NR_UNIT_PDSCH_DMRS)
@@ -28,7 +29,7 @@ struct H {
     nr_sense_unit_view_t u;
     memset(&u, 0, sizeof u);
     u.rnti = rnti; u.src = s; u.cpu_p99_ns = cpu; u.cpu_p95_ns = cpu; u.cpu_max_ns = cpu;
-    u.rate_hz = 10; u.wb_rate_hz = 10; u.valid_ratio = 0.8f; u.snr_db = 10; u.est_usable_prbs = 200;
+    u.n_cfr = 20; u.rate_hz = 10; u.wb_rate_hz = 10; u.valid_ratio = 0.8f; u.snr_db = 10; u.est_usable_prbs = 200;
     u.last_valid_wb_ns = NOW - 1; u.last_msg_ns = NOW - 1; u.first_ns = NOW - 100 * S; u.gen = 1;
     v[c].push_back(u);
     return v[c].back();
@@ -79,7 +80,7 @@ TEST(Sched, IdleUnitGetsNoBoostAndAges0)
 {
   EXPECT_DOUBLE_EQ(nr_sense_age_boost(false, NOW - 30 * S, NOW), 1.0);
   H h; auto &u = h.add(0, 1, 10); u.wb_rate_hz = 0; u.rate_hz = 0; u.last_valid_wb_ns = NOW - 60 * S;
-  EXPECT_FALSE(nr_sense_unit_eligible(&u, 128));
+  EXPECT_FALSE(nr_sense_unit_eligible(&u));
   h.steps(4);
   EXPECT_FALSE(h.en(0, 1)); /* plenty of capacity, still not admitted */
 }
@@ -110,9 +111,9 @@ TEST(Sched, NoOneUnitPerPciRule)
   h.add(1, 2, 50).valid_ratio = 0.9f;
   h.steps(3);
   EXPECT_TRUE(h.en(1, 2)); EXPECT_FALSE(h.en(0, 1)); /* B much better, capacity for one: B only */
-  /* A's age (30 s, x2 unit x x2 PCI = x4) outweighs a 3x better B */
+  /* A's age (30 s) outweighs a 1.8x better B: the combined boost is x2 */
   H g(2, 100);
-  auto &a = g.add(0, 1, 50); a.valid_ratio = 0.3f; a.last_valid_wb_ns = NOW - 30 * S;
+  auto &a = g.add(0, 1, 50); a.valid_ratio = 0.5f; a.last_valid_wb_ns = NOW - 30 * S;
   g.st.last_pci_valid_wb_ns[0] = NOW - 30 * S;
   g.add(1, 2, 50).valid_ratio = 0.9f;
   g.steps(3);
@@ -246,9 +247,9 @@ TEST(Sched, NarrowCarrierEnablesNothing)
 {
   H h(2, 1000);
   for (int c = 0; c < 2; c++)
-    for (uint16_t r = 1; r <= 3; r++) { auto &u = h.add(c, r, 5); u.est_usable_prbs = 100; if (r == 1) u.wb_rate_hz = 0; }
+    for (uint16_t r = 1; r <= 3; r++) { auto &u = h.add(c, r, 5); u.est_usable_prbs = 100; u.wb_rate_hz = 0; }
   h.steps(5);
-  EXPECT_EQ(h.nen(0) + h.nen(1), 0); /* both with wb_rate 0 and, defensively, wb_rate > 0 with est < min_prb */
+  EXPECT_EQ(h.nen(0) + h.nen(1), 0); /* narrow traffic: S5 gives wb_rate_hz 0 */
 }
 
 TEST(Sched, StateSlotsAreReleased)
@@ -258,4 +259,68 @@ TEST(Sched, StateSlotsAreReleased)
   h.v[0].clear(); h.step(); /* row evicted */
   h.add(0, 5, 5); h.step(); /* comes back disabled-looking: no stale streak or enabled bit */
   EXPECT_FALSE(h.en(0, 5)); EXPECT_EQ(h.out.enables, 0);
+}
+
+TEST(Sched, CombinedBoostCappedAt2x)
+{
+  H g(2, 100); /* unit x PCI would be x4: a 3x better B must still win */
+  auto &a = g.add(0, 1, 50); a.valid_ratio = 0.3f; a.last_valid_wb_ns = NOW - 30 * S;
+  g.st.last_pci_valid_wb_ns[0] = NOW - 30 * S;
+  g.add(1, 2, 50).valid_ratio = 0.9f;
+  g.steps(3);
+  EXPECT_TRUE(g.en(1, 2)); EXPECT_FALSE(g.en(0, 1));
+}
+
+TEST(Sched, NewUnitWithoutCfrIsNotDisabled)
+{
+  H h(1, 1000); auto &u = h.add(0, 1, 5); u.enabled = true; u.n_cfr = 0; u.valid_ratio = 0;
+  EXPECT_TRUE(nr_sense_unit_eligible(&u));
+  h.steps(6);
+  EXPECT_TRUE(h.en(0, 1)); /* unknown ratio is not a bad ratio */
+  h.find(0, 1)->n_cfr = 5; h.find(0, 1)->valid_ratio = 0.1f; /* CFRs below the floor */
+  h.step(); EXPECT_TRUE(h.en(0, 1));
+  h.step(); EXPECT_FALSE(h.en(0, 1));
+}
+
+TEST(Sched, AlternatingGrantSizesDoNotFlap)
+{
+  H h(1, 1000); auto &u = h.add(0, 1, 5); u.enabled = true;
+  for (int i = 0; i < 8; i++) {
+    h.find(0, 1)->est_usable_prbs = (i & 1) ? 50 : 200; /* the latest grant is narrow every other decision; the window wb rate stays > 0 */
+    h.step();
+    EXPECT_TRUE(h.en(0, 1)) << i;
+  }
+}
+
+TEST(Sched, AgeRestartsAfterIneligible)
+{
+  H h(2, 100);
+  auto &a = h.add(0, 1, 50); a.valid_ratio = 0.5f; a.last_valid_wb_ns = NOW - 60 * S;
+  auto &b = h.add(1, 2, 50); b.valid_ratio = 0.9f;
+  h.find(0, 1)->wb_rate_hz = 0; h.step(); /* A idle: not eligible */
+  h.find(0, 1)->wb_rate_hz = 10;
+  h.steps(3); /* back after a minute: its age starts now (x1), B at 1.8x wins; with the old stamp A would be x2 (> 1.8x) */
+  EXPECT_TRUE(h.en(1, 2)); EXPECT_FALSE(h.en(0, 1));
+}
+
+TEST(Sched, ViolationHoldoffTwoDecisions)
+{
+  H h(1, 1000);
+  auto &u = h.add(0, 1, 5); u.enabled = true; u.violations = 1;
+  h.step(); EXPECT_FALSE(h.en(0, 1)); /* D: removed */
+  h.step(); EXPECT_FALSE(h.en(0, 1)); /* D+1 */
+  h.step(); EXPECT_FALSE(h.en(0, 1)); /* D+2: streak 2 reached but held off */
+  h.step(); EXPECT_TRUE(h.en(0, 1));  /* D+3 */
+}
+
+TEST(Sched, BadCapIsInvalidExceptGpu)
+{
+  H h(1, 0); /* POOL cap 0: invalid */
+  h.add(0, 1, 0.f + 1); h.add(0, 2, 0);
+  h.steps(4);
+  EXPECT_EQ(h.nen(0), 0); EXPECT_EQ(h.out.bad_cap, 1);
+  H g(1, 100); /* GPU cap 0 is "no GPU": data units are still admitted */
+  g.add(0, 1, 10, NR_UNIT_PDSCH_DATA);
+  g.steps(3);
+  EXPECT_EQ(g.nen(0), 1); EXPECT_EQ(g.out.bad_cap, 0);
 }

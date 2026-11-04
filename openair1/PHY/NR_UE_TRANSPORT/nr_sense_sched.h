@@ -22,11 +22,13 @@
 extern "C" {
 #endif
 
+#define SENSE_VIOL_HOLDOFF 2 /* decisions a unit removed for a violation stays off after the removal decision */
 #define NR_SENSE_CELLS 8
 #define NR_SENSE_SLOTS 64 /* RNTI slots per cell in the state: slot 0 is the per-cell SRS unit (rnti 0), 1..63 hold the other RNTIs */
 
 /* One shared resource, in ns per 50 ms bucket (the unit of cpu_p99_ns, so no further scaling). For NR_RES_QUEUE_*: cap_ns = the queue's deadline budget and
- * base_p99_ns = its baseline wait p99, both in ns. cap_ns <= 0 means the resource does not exist on this host (GPU on x86): it is not constrained. */
+ * base_p99_ns = its baseline wait p99, both in ns. cap_ns <= 0 means the resource does not exist on this host (GPU on x86) and is not constrained;
+ * for every other resource cap_ns <= 0 (or NaN) is invalid input: no unit using it is admitted and out->bad_cap counts it. */
 typedef struct { float cap_ns, base_p99_ns; } nr_sense_res_t;
 typedef enum { NR_RES_POOL = 0, NR_RES_QUEUE_DL, NR_RES_QUEUE_UL, NR_RES_GPU, NR_RES_SENSE_RING, NR_RES_N } nr_res_id_t;
 /* Resources a unit uses (demand): POOL and SENSE_RING by every unit (cpu_p99_ns; the ring is a proxy: the writer cost is not attributed per unit),
@@ -47,16 +49,19 @@ typedef struct {
   bool enabled[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
   uint16_t rnti[NR_SENSE_CELLS][NR_SENSE_SLOTS];
   uint64_t last_pci_valid_wb_ns[NR_SENSE_CELLS];
+  uint64_t pci_elig_since[NR_SENSE_CELLS]; bool pci_was_elig[NR_SENSE_CELLS], pci_seen[NR_SENSE_CELLS]; /* the age of a PCI/unit does not accumulate while it is ineligible */
+  uint64_t elig_since[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; bool was_elig[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
+  uint8_t holdoff[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* decisions a violation-removed unit must still wait before it can be enabled */
   bool known[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];     /* below: the violation baseline of the previous decision (re-baselined when the row generation changes) */
   uint32_t gen[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], viol[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
 } nr_sense_sched_state_t;
 
-typedef struct { int enables, disables; nr_res_id_t binding; float value_last_admitted; } nr_sense_sched_out_t;
+typedef struct { int enables, disables, bad_cap; nr_res_id_t binding; float value_last_admitted; /* value of the lowest-valued admitted unit */ } nr_sense_sched_out_t;
 
 void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *st, nr_sense_sched_out_t *out);
 
 /* exposed for tests */
-bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v, int min_prb);
+bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v); /* wb_rate_hz > 0 over the window, and valid_ratio >= SENSE_ELIG_VALID_MIN once the unit has CFRs (n_cfr == 0: unknown passes) */
 double nr_sense_age_boost(bool eligible, uint64_t last_valid_ns, uint64_t now_ns); /* 1 + (CAP-1) x min(1, age / FULL); exactly 1 when not eligible */
 
 #ifdef __cplusplus

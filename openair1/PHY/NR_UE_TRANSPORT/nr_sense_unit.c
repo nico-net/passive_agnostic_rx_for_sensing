@@ -364,6 +364,7 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
       v->cpu_p99_ns = (float)nrank(cpu, NB, 99);
       v->cpu_max_ns = (float)cpu[NB - 1];
       v->gen = g0;
+      v->n_cfr = atomic_load_explicit(&u->n_cfr, memory_order_relaxed);
       v->est_usable_prbs = (uint16_t)atomic_load_explicit(&u->est_last, memory_order_relaxed);
       v->first_ns = first;
       v->wait_p99_ns = (float)nrank(wt, nw, 99);

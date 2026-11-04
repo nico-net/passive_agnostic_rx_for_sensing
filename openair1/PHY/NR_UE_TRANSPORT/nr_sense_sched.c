@@ -12,7 +12,7 @@ typedef struct {
   int cell, slot;
   const nr_sense_unit_view_t *v;
   double val, rank, snr, dem[NR_RES_N];
-  bool elig, cold, enabled, want, removed, viol;
+  bool elig, cold, enabled, want, removed, viol, holdoff;
 } cand_t;
 
 static bool uses(nr_unit_src_t s, int r)
@@ -28,10 +28,10 @@ static bool is_queue(int r) { return r == NR_RES_QUEUE_DL || r == NR_RES_QUEUE_U
 /* the group a violation is charged to: the unit's own queue (per cell), else the shared pool (all cells) */
 static int group_of(nr_unit_src_t s) { return s == NR_UNIT_PDSCH_DATA ? NR_RES_QUEUE_DL : s == NR_UNIT_SRS ? NR_RES_QUEUE_UL : NR_RES_POOL; }
 
-bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v, int min_prb)
+bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v)
 {
-  /* est_usable_prbs == 0: the source reports none (SRS, whose records are wideband by construction); else the usable PRBs must reach the wideband threshold */
-  return v->wb_rate_hz > 0.f && v->valid_ratio >= SENSE_ELIG_VALID_MIN && (v->est_usable_prbs == 0 || v->est_usable_prbs >= min_prb);
+  /* wb_rate_hz is a window quantity (messages with usable PRBs >= min_prb), so the size of the latest message does not matter */
+  return v->wb_rate_hz > 0.f && (v->n_cfr == 0 || v->valid_ratio >= SENSE_ELIG_VALID_MIN);
 }
 
 double nr_sense_age_boost(bool eligible, uint64_t last_valid_ns, uint64_t now_ns)
@@ -52,12 +52,16 @@ static int cmp_rank(const void *a, const void *b)
   return (int)x->v->src - (int)y->v->src;
 }
 
-static bool fits(const double *use, const double *dem, const double *budget, int *over)
+static bool fits(const double *use, const double *dem, const double *budget, nr_unit_src_t src, int *over)
 {
   bool ok = true;
   double worst = 0;
   for (int r = 0; r < NR_RES_N; r++) {
-    if (budget[r] < 0) continue; /* resource absent */
+    if (budget[r] == -1.0) continue; /* resource absent */
+    if (budget[r] == -2.0) { /* invalid cap: nothing that uses the resource is admitted */
+      if (uses(src, r)) { ok = false; if (over) { *over = r; worst = 1e19; } }
+      continue;
+    }
     const double next = is_queue(r) ? (dem[r] > use[r] ? dem[r] : use[r]) : use[r] + dem[r];
     if (next > budget[r] * (1.0 + 1e-9)) {
       ok = false;
@@ -97,7 +101,9 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
   double budget[NR_RES_N];
   for (int r = 0; r < NR_RES_N; r++) {
     const double av = (double)in->res[r].cap_ns - (double)in->res[r].base_p99_ns;
-    budget[r] = in->res[r].cap_ns <= 0.f ? -1.0 : (av > 0 ? av * (1.0 - SENSE_HEADROOM) : 0.0);
+    if (r == NR_RES_GPU && !(in->res[r].cap_ns > 0.f)) budget[r] = -1.0; /* absent */
+    else if (!(in->res[r].cap_ns > 0.f)) { budget[r] = -2.0; out->bad_cap++; } /* invalid */
+    else budget[r] = av > 0 ? av * (1.0 - SENSE_HEADROOM) : 0.0;
   }
 
   for (int c = 0; c < nc; c++) {
@@ -108,11 +114,14 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       const nr_sense_unit_view_t *v = &in->units[c][i];
       if (v->last_valid_wb_ns > mx) mx = v->last_valid_wb_ns;
       if (v->first_ns && (!first || v->first_ns < first)) first = v->first_ns;
-      pci_elig = pci_elig || nr_sense_unit_eligible(v, in->min_prb);
+      pci_elig = pci_elig || nr_sense_unit_eligible(v);
     }
     if (mx > st->last_pci_valid_wb_ns[c]) st->last_pci_valid_wb_ns[c] = mx;
     if (!st->last_pci_valid_wb_ns[c]) st->last_pci_valid_wb_ns[c] = first ? first : in->now_ns; /* never valid: age runs from the first sight */
-    const double pci_boost = nr_sense_age_boost(pci_elig, st->last_pci_valid_wb_ns[c], in->now_ns);
+    if (pci_elig && st->pci_seen[c] && !st->pci_was_elig[c]) st->pci_elig_since[c] = in->now_ns; /* age restarts when it becomes eligible again */
+    st->pci_seen[c] = true; st->pci_was_elig[c] = pci_elig;
+    const uint64_t pref = st->last_pci_valid_wb_ns[c] > st->pci_elig_since[c] ? st->last_pci_valid_wb_ns[c] : st->pci_elig_since[c];
+    const double pci_boost = nr_sense_age_boost(pci_elig, pref, in->now_ns);
 
     for (int i = 0; i < in->n_units[c] && n < MAXC; i++) {
       const nr_sense_unit_view_t *v = &in->units[c][i];
@@ -125,12 +134,21 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       k->enabled = v->enabled;
       if (st->enabled[c][sl][v->src] != v->enabled) st->streak[c][sl][v->src] = 0; /* the caller has not applied (or has overridden) the last decision */
       st->enabled[c][sl][v->src] = v->enabled;
-      k->elig = nr_sense_unit_eligible(v, in->min_prb);
-      const double prbs = v->est_usable_prbs ? v->est_usable_prbs : in->min_prb;
+      k->elig = nr_sense_unit_eligible(v);
+      if (k->elig && st->known[c][sl][v->src] && !st->was_elig[c][sl][v->src]) st->elig_since[c][sl][v->src] = in->now_ns;
+      st->was_elig[c][sl][v->src] = k->elig;
       if (k->elig) {
-        const uint64_t ref = v->last_valid_wb_ns ? v->last_valid_wb_ns : v->first_ns;
-        k->val = (double)v->wb_rate_hz * (double)v->valid_ratio * prbs * nr_sense_age_boost(true, ref, in->now_ns) * pci_boost;
+        /* a wideband message had >= min_prb usable PRBs by construction; est_usable_prbs (latest) only raises the size */
+        double prbs = v->est_usable_prbs > in->min_prb ? v->est_usable_prbs : in->min_prb;
+        if (prbs < 1) prbs = 1;
+        const double ratio = v->n_cfr ? v->valid_ratio : SENSE_ELIG_VALID_MIN; /* unknown ratio: the floor */
+        uint64_t ref = v->last_valid_wb_ns ? v->last_valid_wb_ns : v->first_ns;
+        if (st->elig_since[c][sl][v->src] > ref) ref = st->elig_since[c][sl][v->src];
+        double boost = nr_sense_age_boost(true, ref, in->now_ns) * pci_boost;
+        if (boost > SENSE_AGE_CAP) boost = SENSE_AGE_CAP; /* the unit and PCI boosts together are capped */
+        k->val = (double)v->wb_rate_hz * ratio * prbs * boost;
       }
+      if (st->holdoff[c][sl][v->src]) { k->holdoff = true; st->holdoff[c][sl][v->src]--; }
       k->snr = v->snr_db;
       k->rank = k->val * (k->enabled ? INCUMBENT : 1.0);
       /* violations since the last decision; the counters restart from 0 when the row was re-created */
@@ -146,7 +164,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       bool any = false;
       for (int s = 0; s < NR_UNIT_SRC_N; s++) {
         if (present[c][sl][s]) { any = true; continue; }
-        st->known[c][sl][s] = false; st->enabled[c][sl][s] = false; st->streak[c][sl][s] = 0; st->gen[c][sl][s] = 0; st->viol[c][sl][s] = 0;
+        st->known[c][sl][s] = false; st->was_elig[c][sl][s] = false; st->elig_since[c][sl][s] = 0; st->holdoff[c][sl][s] = 0; st->enabled[c][sl][s] = false; st->streak[c][sl][s] = 0; st->gen[c][sl][s] = 0; st->viol[c][sl][s] = 0;
       }
       if (!any && sl > 0) st->rnti[c][sl] = 0;
     }
@@ -186,6 +204,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       C[lo].enabled = false;
       st->enabled[C[lo].cell][C[lo].slot][C[lo].v->src] = false;
       st->streak[C[lo].cell][C[lo].slot][C[lo].v->src] = 0;
+      st->holdoff[C[lo].cell][C[lo].slot][C[lo].v->src] = SENSE_VIOL_HOLDOFF;
       out->disables++;
     }
   }
@@ -200,10 +219,10 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
     if (!k->elig || k->val <= 0 || k->removed) continue;
     if (k->cold && cold_taken) continue;
     int over = NR_RES_POOL;
-    if (fits(use, k->dem, budget, &over)) {
+    if (fits(use, k->dem, budget, k->v->src, &over)) {
       add_use(use, k->dem);
       k->want = true;
-      out->value_last_admitted = (float)k->val;
+      if (!out->value_last_admitted || k->val < out->value_last_admitted) out->value_last_admitted = (float)k->val;
       if (k->cold) cold_taken = true;
     } else if (!rejected) {
       rejected = true;
@@ -233,9 +252,9 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
     if (C[i].enabled) add_use(now_use, C[i].dem);
   for (int i = 0; i < n; i++) {
     cand_t *k = &C[i];
-    if (k->removed || k->enabled || !k->want) continue;
+    if (k->removed || k->enabled || !k->want || k->holdoff) continue;
     uint8_t *sk = &st->streak[k->cell][k->slot][k->v->src];
-    if (*sk < SENSE_CONFIRM || out->enables >= SENSE_MAX_ENABLES || !fits(now_use, k->dem, budget, NULL)) continue;
+    if (*sk < SENSE_CONFIRM || out->enables >= SENSE_MAX_ENABLES || !fits(now_use, k->dem, budget, k->v->src, NULL)) continue;
     add_use(now_use, k->dem);
     k->enabled = true; *sk = 0; out->enables++;
     st->enabled[k->cell][k->slot][k->v->src] = true;
