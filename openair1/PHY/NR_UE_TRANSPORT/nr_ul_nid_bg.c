@@ -598,6 +598,7 @@ static void *worker(void *a)
   { /* SCHED_IDLE: runs only on a core nothing else wants */
     const struct sched_param sp0 = {0};
     if (sched_setscheduler(0, SCHED_IDLE, &sp0)) LOG_W(PHY, "SENSING: UL_NID_BG cannot use SCHED_IDLE\n");
+    else nr_ul_layout_boost_thread_enable(); /* SCHED_OTHER only inside the short g_mu sections of nr_ul_layout_hyp_list */
   }
   if (g_core >= 0 && !nr_pool_site_float_merged()) { /* keep the search off the downlink cores; merged float lane (mpci B5): a HOUSE lease per job, no pin */
     cpu_set_t cs;

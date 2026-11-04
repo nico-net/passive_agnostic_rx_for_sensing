@@ -2028,6 +2028,13 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	482	g_tp_spec_refuted	fil
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	463	g_epoch	file_static	uint64_t [converted]	PER_CELL	A6	bumped by reset_locked: invalidates the unlocked snapshot of nr_ul_layout_hyp_list
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	465	g_hyp_discard	file_static	uint64_t [converted]	PER_CELL	A6	hyp_list results discarded after a reset during the unlocked enumeration
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1677	nr_ul_layout_hyp_list_gap_hook	global	void (*)(void)	PROCESS	A6	test-only hook between the snapshot and apply sections of nr_ul_layout_hyp_list; NULL in the receiver
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1667	t_boost_nice	tls	int	TLS	A6	ulNidBg thread-local: nice to restore (-1000 = not enabled)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1668	t_boost_nice_denied	tls	bool	TLS	A6	ulNidBg thread-local: setpriority refused
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1669	nr_ul_layout_boost_setsched	global	int (*)(pid_t, int, const struct sched_param *)	PROCESS	A6	test-only injection point of the ulNidBg g_mu boost; sched_setscheduler in the receiver
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1670	g_boost_n	file_static	atomic_ulong	PROCESS	A6	ulNidBg boost diagnostics counter (process-wide, one ulNidBg thread per cell)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1670	g_boost_sched_fail	file_static	atomic_ulong	PROCESS	A6	ulNidBg boost diagnostics counter
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1670	g_boost_nice_fail	file_static	atomic_ulong	PROCESS	A6	ulNidBg boost diagnostics counter
+openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	1670	g_boost_restore_fail	file_static	atomic_ulong	PROCESS	A6	ulNidBg boost diagnostics counter
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	484	g_votes_total	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	486	g_probes_fed	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_layout_lock.c	488	g_probes_booked	file_static	uint32_t [converted]	PER_CELL	A6	converted (A6)

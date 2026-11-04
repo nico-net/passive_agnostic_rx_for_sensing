@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 /* UL-LAYOUT: blind UL BWP / DCI 0_1 layout lock. See the header for the method. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "nr_ul_tp_rules.h"
 #include "nr_pdcch_ul_layout_lock.h"
 #include "nr_lockhold.h"
@@ -11,7 +14,10 @@
 #include "common/utils/nr_cell.h"
 #include "nr_ul_cell_prealloc.h"
 #include <math.h>
+#include <errno.h>
 #include <pthread.h>
+#include <sched.h>
+#include <sys/resource.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1653,6 +1659,52 @@ int nr_ul_layout_hyp_list_ref(uint16_t rnti, uint16_t len, nr_dci_bits_t payload
   return n;
 }
 
+/* ulNidBg only: the SCHED_IDLE background thread runs as SCHED_OTHER while it holds (or waits for) g_mu in the two short sections of nr_ul_layout_hyp_list, so that
+ * a busy core cannot preempt it inside them; it returns to SCHED_IDLE right after the unlock. Only the calling thread changes, and only if it announced itself with
+ * nr_ul_layout_boost_thread_enable(). Leaving SCHED_IDLE needs CAP_SYS_NICE or RLIMIT_NICE >= 20 - nice (Linux can_nice(); with the default RLIMIT_NICE 0 and nice 19 it
+ * is EPERM), and so does lowering nice to 0: a failing sched_setscheduler is counted, logged once, and the thread stops trying (the sections run as before, no boost); a
+ * refused setpriority is counted once and skipped (the thread then runs the sections as SCHED_OTHER nice 19). */
+static __thread int t_boost_nice = -1000;  /* -1000 = not enabled; else the nice value to return to (the thread's nice when it announced itself) */
+static __thread bool t_boost_nice_denied;
+int (*nr_ul_layout_boost_setsched)(pid_t, int, const struct sched_param *) = sched_setscheduler; /* test only: replaced to inject failures */
+static atomic_ulong g_boost_n, g_boost_sched_fail, g_boost_nice_fail, g_boost_restore_fail;
+
+void nr_ul_layout_boost_thread_enable(void)
+{
+  errno = 0;
+  const int n = getpriority(PRIO_PROCESS, 0);
+  t_boost_nice = (n == -1 && errno) ? 0 : n;
+  t_boost_nice_denied = false;
+}
+void nr_ul_layout_boost_stats(unsigned long *n, unsigned long *sched_fail, unsigned long *nice_fail, unsigned long *restore_fail)
+{
+  *n = atomic_load(&g_boost_n); *sched_fail = atomic_load(&g_boost_sched_fail); *nice_fail = atomic_load(&g_boost_nice_fail); *restore_fail = atomic_load(&g_boost_restore_fail);
+}
+/* returns whether a boost is active (to be handed to boost_leave) */
+static bool boost_enter(void)
+{
+  if (t_boost_nice == -1000) return false;
+  const struct sched_param sp0 = {0};
+  if (nr_ul_layout_boost_setsched(0, SCHED_OTHER, &sp0)) {
+    /* persistent (EPERM: a SCHED_IDLE thread may only leave it with CAP_SYS_NICE or RLIMIT_NICE >= 20 - nice): count, say so once, stop trying on this thread */
+    const int e = errno;
+    atomic_fetch_add(&g_boost_sched_fail, 1);
+    LOG_W(PHY, "SENSING: UL_NID_BG g_mu boost unavailable (sched_setscheduler(SCHED_OTHER): errno %d), running the g_mu sections as SCHED_IDLE\n", e);
+    t_boost_nice = -1000;
+    return false;
+  }
+  atomic_fetch_add(&g_boost_n, 1);
+  if (t_boost_nice > 0 && !t_boost_nice_denied && setpriority(PRIO_PROCESS, 0, 0)) { t_boost_nice_denied = true; atomic_fetch_add(&g_boost_nice_fail, 1); }
+  return true;
+}
+static void boost_leave(bool active)
+{
+  if (!active) return;
+  const struct sched_param sp0 = {0};
+  if (t_boost_nice > 0 && !t_boost_nice_denied && setpriority(PRIO_PROCESS, 0, t_boost_nice)) atomic_fetch_add(&g_boost_restore_fail, 1);
+  if (nr_ul_layout_boost_setsched(0, SCHED_IDLE, &sp0)) atomic_fetch_add(&g_boost_restore_fail, 1);
+}
+
 /* Everything the enumeration of nr_ul_layout_hyp_list reads, copied under g_mu (about 1.9 KiB with MAX_HYP 192): g_cell, the leading g_nhyp entries of g_hyp
  * (n, start, votes), g_locked_hyp, the current dmrs-AdditionalPosition reading, and from the length state: len, ntail/tail, npre/pre, k2row, ev_dec, tp_ill, tp_ok.
  * tp_ill/tp_ok are advanced on the copy exactly as the old code advanced them on the live state; the deltas are applied in the second section. */
@@ -1687,12 +1739,14 @@ static int hyp_list_once(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uin
   hyp_snap_t S;
   hyp_snap_t *s = &S;
   /* section 1 (g_mu): copy */
+  bool bo = boost_enter();
   nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   int li = -1;
   for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len) li = l;
   const len_state_t *ls = li >= 0 ? &g_len[li] : NULL;
   if (!g_have_cell || !ls || !ls->fitted || g_nhyp == 0) {
     nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+    boost_leave(bo);
     return 0;
   }
   s->cell = g_cell;
@@ -1713,6 +1767,7 @@ static int hyp_list_once(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uin
   s->gen = g_gen & NR_UL_LAYOUT_GEN_MASK;
   s->epoch = g_epoch;
   nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+  boost_leave(bo);
 
   /* section 2 (no lock): the enumeration, on the copy; same statements and order as nr_ul_layout_hyp_list_ref() */
   const uint32_t tp_ill0 = s->tp_ill, tp_ok0 = s->tp_ok;
@@ -1773,17 +1828,20 @@ static int hyp_list_once(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, uin
   if (nr_ul_layout_hyp_list_gap_hook) nr_ul_layout_hyp_list_gap_hook();
 
   /* section 3 (g_mu): side effects, only if the state is the one that was copied */
+  bo = boost_enter();
   nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
   if (g_epoch != s->epoch || (g_gen & NR_UL_LAYOUT_GEN_MASK) != s->gen || !g_have_cell || s->li >= g_nlen || g_len[s->li].len != s->len) {
     g_hyp_discard++;
     *discarded = true;
     nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+    boost_leave(bo);
     return 0; /* total = 0 and next = first stay as set on entry: the caller stops */
   }
   g_len[s->li].tp_ill += s->tp_ill - tp_ill0;
   g_len[s->li].tp_ok += s->tp_ok - tp_ok0;
   g_tp_spec_refuted += d_spec;
   nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+  boost_leave(bo);
   if (total) *total = tot;
   if (next) *next = nxt;
   return n;
