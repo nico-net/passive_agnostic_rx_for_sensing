@@ -63,6 +63,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"
 #include "nr_traffic_record.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
+#include "nr_sense_unit.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.h" // SLOTPHASE evidence of failing slot phases
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_evm_acc.h"               // RESID: nr_pdsch_resid (position-keyed equaliser residual)
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
@@ -1281,6 +1282,7 @@ static void cdmrs_obs_free(void *p)
   free(o->row);
   free(o);
 }
+void nr_pdsch_passive_queue_drain_skipq(void) { nr_admit_skipq_drain(NR_ADMIT_DMRS_ID, &g_cdmrs_skipq, cdmrs_obs_free); } /* shutdown, bound cell */
 static void cdmrs_run(void *arg)
 {
   cdmrs_obs_t *o = arg;
@@ -1296,7 +1298,9 @@ static void cdmrs_run(void *arg)
   /* replay one waiting observation (only while no tier is shed, checked by the pop), on this worker, behind the new one */
   cdmrs_obs_t *b = nr_admit_skipq_pop(NR_ADMIT_DMRS_ID, &g_cdmrs_skipq, nr_admit_now_ns(), cdmrs_obs_free);
   if (b) {
+    const uint64_t t_rep = nr_admit_now_ns();
     coreset_dmrs_observe(b, b->row, 1);
+    nr_admit_done(NR_ADMIT_DMRS_ID, nr_admit_now_ns() - t_rep);
     cdmrs_obs_free(b);
   }
   const uint64_t n = __atomic_load_n(&g_cdmrs_q.done, __ATOMIC_RELAXED) + 1;
@@ -1822,6 +1826,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     int nr_pdsch_passive_path_trial_side(void);
     nr_pdsch_passive_path_trial_reset();
     const uint64_t dec_t0 = now_ns();
+    const uint64_t unit_c0 = job.layout_probe ? 0 : nr_sense_unit_cpu_ns(); /* sensing mode: this full decode is cost of the RNTI's PDSCH_DATA unit */
     nr_pdsch_passive_recov_mode((g_recov_ok || g_recov_inline) && owned && !job.layout_probe ? 1 : 0); /* RECOVERY_ASYNC: arms go to pdschRecov (owned IQ only: the snapshot is handed off) */
     /* RESID: only a control grant of a flagged phase that is collecting, and a bounded reference of other grants, ask the GPU demod for the position-keyed residual */
     nr_pdsch_resid.valid = 0;
@@ -1859,6 +1864,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_dlsch_eq_override = -1;
     nr_pdsch_chest_occ_override = -1;
     const uint64_t dec_t1 = now_ns();
+    if (unit_c0)
+      nr_sense_unit_job(NR_UNIT_PDSCH_DATA, job.rnti, nr_sense_unit_cpu_ns() - unit_c0, enqueue_ns && dec_t0 > enqueue_ns ? dec_t0 - enqueue_ns : 0,
+                        enqueue_ns && dec_t1 - enqueue_ns > NR_UNIT_LATE_NS, 0, dec_t1);
     const double dec_us = (double)(dec_t1 - dec_t0) / 1000.0;
     { /* per-path trial of the graph pass (DISCRETE): this grant's decode wall time per 1000 LLRs, GPU or CPU side; probes are not samples */
       const int side = nr_pdsch_passive_path_trial_side();

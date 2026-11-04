@@ -133,6 +133,10 @@ typedef struct {
 /// to DCI 1_0, whose L=2 is fixed by spec and never swept.
 int nr_pdsch_vrbl_pick(uint16_t rnti);
 
+/// Read-only: the PRB-bundling size (0 = wideband, 2, 4) this RNTI's PRG sweep has LATCHED, or -1 while it has not latched (including
+/// every RNTI that never left the incumbent wideband arm). Never creates a context and never bumps the LRU stamp. Takes g_ptrs_lock briefly per call (sensing mode only).
+int nr_pdsch_prg_latched(uint16_t rnti);
+
 /// Outcome of one passive decode attempt.
 typedef enum {
   NR_PDSCH_PASSIVE_DECODE_CRC_OK = 0,   ///< decoded and CRC-verified; `tb` is usable

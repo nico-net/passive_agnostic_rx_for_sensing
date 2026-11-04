@@ -252,10 +252,9 @@ TEST(PoolBudget, AdmissionRunsEverythingWithOneCell)
   EXPECT_EQ(nr_admit_on(), 0);
   nr_admit_reset_for_test();
   for (int c = 0; c < NR_ADMIT_N; c++) EXPECT_EQ(nr_admit_try((nr_admit_class_t)c, 0, 0, 0), 1);
-  char s[512];
-  nr_admit_stats(s, sizeof(s)); // S1: attempts are counted in every mode, nothing is skipped or shed with one cell
-  EXPECT_EQ(std::string(s).find("tier"), std::string::npos) << s;
-  EXPECT_NE(std::string(s).find("janon[attempts=1 skipped=0 recovered=0 expired=0]"), std::string::npos) << s;
+  char s[64];
+  nr_admit_stats(s, sizeof(s)); // one cell: attempts are not counted, the line is empty as before S1
+  EXPECT_STREQ(s, "");
   for (auto &h : fill) h->release();
   scan.release();
 }

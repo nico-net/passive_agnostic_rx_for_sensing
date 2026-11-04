@@ -1,5 +1,6 @@
 #include "nr_sense_quality.h"
 #include <math.h>
+#include <stdbool.h>
 #include <string.h>
 
 #define QMAXANT 8
@@ -95,9 +96,11 @@ void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_
   float snr[NR_SENSE_MAX_PRB], res[NR_SENSE_MAX_PRB];
   int nv = 0;
   for (int p = 0; p < NR_SENSE_MAX_PRB; p++) {
-    if (tot[p] < 3 || cnt[p][best[p]] < 3 || !(noise_var > 0) || !(sig[p] > 0))
+    if (tot[p] < 3 || cnt[p][best[p]] < 3 || !(noise_var > 0) || !(sig[p] > 0) || !isfinite(pwr[p]) || !isfinite(sse[p]))
       continue;
-    float s = (float)(10.0 * log10(pwr[p] / ((double)tot[p] * n_ant) / noise_var + 1e-30));
+    /* channel SNR (spec 4.2a): E[mean|H|^2] = S + N, so subtract the noise; no signal left -> -100 dB (invalid) */
+    double sp = pwr[p] / ((double)tot[p] * n_ant) - noise_var;
+    float s = sp > 0 ? (float)(10.0 * log10(sp / noise_var)) : -100.0f;
     float r = (float)(sse[p] / sig[p]);
     if (s >= NR_SENSE_PRB_SNR_MIN_DB && r <= NR_SENSE_PRB_RESID_MAX) {
       q->valid_mask[p >> 3] |= (uint8_t)(1u << (p & 7));
@@ -145,4 +148,20 @@ void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_
   }
   if (pa > 0 && pb > 0)
     q->sym_consist = (float)(sqrt(cr * cr + ci * ci) / sqrt(pa * pb));
+}
+
+void nr_sense_quality_apply_recon(nr_sense_quality_t *q, const uint8_t recon_ok_abs[(NR_SENSE_MAX_PRB + 7) / 8])
+{
+  int n = 0;
+  for (int p = 0; p < NR_SENSE_MAX_PRB; p++) {
+    const int a = q->first_prb + p;
+    const bool ok = a >= 0 && a < NR_SENSE_MAX_PRB && (recon_ok_abs[a >> 3] >> (a & 7) & 1);
+    if (q->valid_mask[p >> 3] >> (p & 7) & 1) {
+      if (ok)
+        n++;
+      else
+        q->valid_mask[p >> 3] &= (uint8_t)~(1u << (p & 7));
+    }
+  }
+  q->valid_cfr_prbs = (uint16_t)n;
 }

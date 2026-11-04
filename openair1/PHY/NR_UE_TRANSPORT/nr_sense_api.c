@@ -4,7 +4,9 @@
 #include "common/utils/nr_cell.h"
 #include "nr_sense_api.h"
 #include "nr_sense_records.h"
+#include "nr_sense_unit.h"
 #include "nr_traffic_record.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 /* The standalone core test links without the receiver record module. The receiver
  * links that module through its emitters and supplies the formatter. */
 __attribute__((weak)) int nr_sense_rs_to_json(nr_sense_src_t, const nr_sense_rs_meta_t *, uint64_t, char *, size_t);
@@ -100,6 +102,12 @@ NR_CELL_STATIC(rs_job_t *, rs_jobs)
 #define rs_jobs NR_CELL_REF(rs_jobs)
 NR_CELL_STATIC(nr_sense_dci_rec_t *, dci_jobs)
 #define dci_jobs NR_CELL_REF(dci_jobs)
+/* S3: quality of the CFR frames still addressable by id, slot = frame_id % frame_cap, id 0 = empty. SENSING mode only; guarded by mu. */
+typedef struct { uint64_t id; bool ok; nr_sense_quality_t q; } qslot_t;
+NR_CELL_STATIC(qslot_t *, qring)
+#define qring NR_CELL_REF(qring)
+NR_CELL_STATIC(uint32_t, qcap)
+#define qcap NR_CELL_REF(qcap)
 NR_CELL_STATIC(uint8_t *, record_binary)
 #define record_binary NR_CELL_REF(record_binary)
 NR_CELL_STATIC_INIT(int, cfr_fd, -1)
@@ -188,6 +196,44 @@ static bool write_item(int fd, const void *buf, size_t len)
   }
   return true;
 }
+/* ---- S3 writer-side CFR quality (SENSING mode only) ---- */
+/* Quality of one packed frame, read in place from the ring slot (little-endian layout of push_cfr: header, k u16[keep], l u8[keep], pad to 4, iq). */
+static void frame_quality(const uint8_t *p, nr_sense_quality_t *q, bool *ok)
+{
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  uint32_t keep; float noise;
+  memcpy(&keep,p+20,4); memcpy(&noise,p+36,4);
+  const int n_ant=p[17];
+  if (!keep || n_ant<1) { *ok=false; return; }
+  const uint16_t *k=(const uint16_t *)(p+FRAME_HEADER);
+  const uint8_t *l=p+FRAME_HEADER+2*(size_t)keep;
+  const float *iq=(const float *)(p+((FRAME_HEADER+3*(size_t)keep+3)&~(size_t)3));
+  nr_sense_quality_compute(n_ant,iq,(int)keep,(int)keep,k,l,noise,q);
+  *ok=true;
+#else
+  (void)p; (void)q; *ok=false;
+#endif
+}
+/* Fill job->meta.q from the quality ring. 1 = settled (q_valid set, or definitively unavailable); 0 = the frame is still queued: format later.
+ * Caller does not hold mu. */
+static int job_quality(rs_job_t *job, bool may_wait)
+{
+  nr_sense_rs_meta_t *m=&job->meta;
+  m->q_valid=false;
+  if (!m->want_q || !job->frame_id) return 1;
+  nr_sense_quality_t q; int r=1;
+  pthread_mutex_lock(&mu);
+  const qslot_t *s=qring && qcap ? &qring[job->frame_id%qcap] : NULL;
+  if (s && s->id==job->frame_id && s->ok) q=s->q, m->q_valid=true;
+  else if (may_wait && frame_count && s && s->id<job->frame_id) r=0;
+  else stats.q_miss++;
+  pthread_mutex_unlock(&mu);
+  if (r && m->q_valid) {
+    if (m->recon_valid) { q.recon_conf=m->q.recon_conf; nr_sense_quality_apply_recon(&q,m->recon_prb_ok); }
+    m->q=q; m->wideband=q.valid_cfr_prbs>=m->min_prb;
+  }
+  return r;
+}
 static void *run_writer(void *arg)
 {
   nr_cell_bind((int)(intptr_t)arg); /* the writer serves the cell that opened the session (nr_core_plan_create has no cell argument) */
@@ -198,7 +244,13 @@ static void *run_writer(void *arg)
             (atomic_load(&writer_limit) && atomic_load(&written_items)>=atomic_load(&writer_limit))) && !stopping)
       pthread_cond_wait(&cv, &mu);
     if (stopping && frame_count == 0 && record_count == 0) { pthread_mutex_unlock(&mu); break; }
-    const bool frame = frame_count != 0 && (record_count == 0 || !last_frame);
+    /* an RS job whose frame has not been through the writer yet takes the frame stream first (its quality is computed there) */
+    bool need_frame=false;
+    if (frame_count && record_count && record_binary[record_head]==1) {
+      const rs_job_t *hj=&rs_jobs[record_head];
+      need_frame=hj->meta.want_q && hj->frame_id && qring && qcap && qring[hj->frame_id%qcap].id<hj->frame_id;
+    }
+    const bool frame = frame_count != 0 && (record_count == 0 || !last_frame || need_frame);
     uint32_t count=frame ? frame_count : record_count;
     /* Bound each run when both streams are ready; the test writer limit observes
      * one item from each stream, while normal operation amortises syscalls. */
@@ -225,6 +277,12 @@ static void *run_writer(void *arg)
         } else {
         rs_job_t *job=&rs_jobs[at];
         char *line=records+(size_t)at*RECORD_BYTES;
+        if (!job_quality(job,i>0) ) { count=i; break; }   /* frame still queued: stop the batch, the frame stream runs next */
+        if (job->meta.q_valid) { /* per-unit view of the record (sensing mode only: the call is a no-op otherwise) */
+          const int us=job->src==NR_SENSE_SRC_PDSCH_DMRS?NR_UNIT_PDSCH_DMRS:job->src==NR_SENSE_SRC_PDSCH_DATA?NR_UNIT_PDSCH_DATA:
+                       job->src==NR_SENSE_SRC_PUSCH_DMRS?NR_UNIT_PUSCH_DMRS:job->src==NR_SENSE_SRC_SRS?NR_UNIT_SRS:-1;
+          if (us>=0) nr_sense_unit_cfr((nr_unit_src_t)us,(uint16_t)job->meta.rnti,job->meta.q.valid_cfr_prbs,job->meta.q.snr_db_p50,nr_sense_now_ns());
+        }
         length=nr_sense_rs_to_json(job->src,&job->meta,job->frame_id,line,RECORD_BYTES-1);
         if (length>0) { line[length]='\n'; record_lengths[at]=(uint32_t)length+1; }
         else { record_lengths[at]=0; format_drops++; }
@@ -235,6 +293,17 @@ static void *run_writer(void *arg)
       vec[i].iov_base=frame ? (void *)(frames+(size_t)at*frame_stride)
                             : (void *)(records+(size_t)at*RECORD_BYTES);
       vec[i].iov_len=frame ? frame_lengths[at] : record_lengths[at];
+    }
+    nr_sense_quality_t fq[16]; uint64_t fid[16]; bool fok[16]; uint32_t fn=0;
+    if (frame && nr_isac_mode()==NR_ISAC_MODE_SENSING) {
+      for (uint32_t i=0;i<count;i++) {
+        const uint8_t *p=frames+(size_t)((frame_head+i)%frame_cap)*frame_stride;
+        const uint64_t t_q=nr_sense_now_ns();
+        memcpy(&fid[fn],p+8,8);
+        frame_quality(p,&fq[fn],&fok[fn]);
+        nr_sense_cost_add(NR_SENSE_COST_REC,(nr_sense_src_t)(p[16]<NR_SENSE_SRC_COUNT?p[16]:0),nr_sense_now_ns()-t_q);
+        fn++;
+      }
     }
     const int fd=frame ? cfr_fd : record_fd;
     const uint64_t t_write=fd>=0 ? nr_sense_now_ns() : 0;
@@ -264,6 +333,7 @@ static void *run_writer(void *arg)
 #ifdef NR_SENSE_HAVE_ZMQ
     if (zmq_failed) stats.zmq_drops++;
 #endif
+    for (uint32_t i=0;i<fn;i++) if (qring && qcap) { qslot_t *qs=&qring[fid[i]%qcap]; qs->id=fid[i]; qs->ok=fok[i]; if (fok[i]) { qs->q=fq[i]; stats.q_computed++; } }
     last_frame=frame;
     atomic_fetch_add(&written_items,count);
     if (frame) { frame_head=(frame_head+count)%frame_cap; frame_count-=count; }
@@ -299,9 +369,10 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
     atomic_store_explicit(&active,true,memory_order_release);
     pthread_mutex_unlock(&mu); return 0;
   }
-  const size_t stride=FRAME_HEADER + 3*(size_t)cfg->cfr_max_re + 3 + 8*max_ant*(size_t)cfg->cfr_max_re;
+  size_t stride=FRAME_HEADER + 3*(size_t)cfg->cfr_max_re + 3 + 8*max_ant*(size_t)cfg->cfr_max_re;
+  stride=(stride+3)&~(size_t)3;
   if (stride>UINT32_MAX || cfg->cfr_ring_frames > SIZE_MAX / stride) { pthread_mutex_unlock(&mu); return -1; }
-  frame_stride=(uint32_t)stride;
+  frame_stride=(uint32_t)((stride+3)&~(size_t)3); /* 4-aligned frames: the writer reads the iq floats in place */
   frames=malloc((size_t)cfg->cfr_ring_frames*frame_stride);
   frame_lengths=malloc((size_t)cfg->cfr_ring_frames*sizeof(*frame_lengths));
   records=malloc((size_t)cfg->rec_ring_slots*RECORD_BYTES);
@@ -309,6 +380,8 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
   rs_jobs=calloc(cfg->rec_ring_slots,sizeof(*rs_jobs));
   dci_jobs=calloc(cfg->rec_ring_slots,sizeof(*dci_jobs));
   record_binary=calloc(cfg->rec_ring_slots,sizeof(*record_binary));
+  qcap=cfg->cfr_ring_frames+64u; /* slack: the writer formats an RS job after processing its frame; a few batches of later frames may have landed */
+  qring=calloc(qcap,sizeof(*qring));
   if (cfg->cfr_path) cfr_fd=open(cfg->cfr_path,O_CREAT|O_WRONLY|O_TRUNC|O_CLOEXEC,0644);
   if (cfg->records_path) record_fd=open(cfg->records_path,O_CREAT|O_WRONLY|O_TRUNC|O_CLOEXEC,0644);
 #ifndef NR_SENSE_HAVE_ZMQ
@@ -326,7 +399,7 @@ int nr_sense_open(const nr_sense_cfg_t *cfg)
     if (!zmq_pub || zmq_bind(zmq_pub,cfg->endpoint) != 0) goto fail;
   }
 #endif
-  if (!frames || !frame_lengths || !records || !record_lengths || !rs_jobs || !dci_jobs || !record_binary ||
+  if (!frames || !frame_lengths || !records || !record_lengths || !rs_jobs || !dci_jobs || !record_binary || !qring ||
       (cfg->cfr_path && cfr_fd < 0) || (cfg->records_path && record_fd < 0)) goto fail;
   frame_cap=cfg->cfr_ring_frames; frame_re=cfg->cfr_max_re; record_cap=cfg->rec_ring_slots;
   frame_head=frame_count=record_head=record_count=0;
@@ -347,8 +420,8 @@ fail:
   if (cfr_fd>=0) close(cfr_fd);
   if (record_fd>=0) close(record_fd);
   cfr_fd=record_fd=-1;
-  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary);
-  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL;
+  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary); free(qring);
+  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL; qring=NULL;
   pthread_mutex_unlock(&mu);
   return -1;
 }
@@ -371,8 +444,8 @@ void nr_sense_close(void)
   if (zmq_context) zmq_ctx_term(zmq_context);
   zmq_pub=zmq_context=NULL;
 #endif
-  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary);
-  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL;
+  free(frames); free(frame_lengths); free(records); free(record_lengths); free(rs_jobs); free(dci_jobs); free(record_binary); free(qring);
+  frames=NULL; frame_lengths=NULL; records=NULL; record_lengths=NULL; rs_jobs=NULL; dci_jobs=NULL; record_binary=NULL; qring=NULL;
   pthread_mutex_unlock(&mu);
 }
 bool nr_sense_enabled(void) { return atomic_load_explicit(&active,memory_order_acquire) && !atomic_load_explicit(&paused,memory_order_acquire); }
@@ -453,6 +526,15 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
   pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return id;
 }
+bool nr_sense_quality_for_frame(uint64_t frame_id, nr_sense_quality_t *q)
+{
+  if (!frame_id || !q || !nr_sense_enabled() || nr_isac_mode()!=NR_ISAC_MODE_SENSING) return false;
+  pthread_mutex_lock(&mu);
+  const bool hit=opened && qring && qcap && qring[frame_id%qcap].id==frame_id && qring[frame_id%qcap].ok;
+  if (hit) *q=qring[frame_id%qcap].q;
+  pthread_mutex_unlock(&mu);
+  return hit;
+}
 uint64_t nr_sense_push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
                            const uint16_t *k_abs, const uint8_t *l_sym, uint64_t abs_slot, float slot_frac,
                            float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
@@ -525,6 +607,9 @@ void nr_sense_async_note(nr_sense_src_t src, int queued)
   if ((unsigned)src >= NR_SENSE_SRC_COUNT) return;
   __atomic_fetch_add(queued ? &stats.async_queued[src] : &stats.async_dropped[src], 1, __ATOMIC_RELAXED);
 }
+
+void nr_sense_recon_skip_note(void) { __atomic_fetch_add(&stats.recon_skip, 1, __ATOMIC_RELAXED); }
+void nr_sense_q_miss_note(void) { pthread_mutex_lock(&mu); stats.q_miss++; pthread_mutex_unlock(&mu); }
 
 void nr_sense_stats(nr_sense_stats_t *out)
 {

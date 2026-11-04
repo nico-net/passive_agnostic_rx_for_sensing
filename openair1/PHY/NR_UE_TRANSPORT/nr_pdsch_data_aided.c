@@ -29,6 +29,7 @@
 
 #include "nr_pdsch_data_aided.h"
 #include "nr_pdsch_da_snap.h"
+#include "nr_pdsch_da_recon.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_gpu_demod_host.h" // nr_bgq_prepare / nr_bgq_start
 #include "common/utils/nr_cell.h"
 
@@ -53,7 +54,9 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "nr_pdsch_mimo_ls.h"
 #include "nr_sense_api.h"
+#include "nr_sense_unit.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_prg_latched
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
@@ -166,6 +169,7 @@ static uint32_t da_tap_G(const fapi_nr_dl_cw_info_t *cw, const fapi_nr_dl_config
   return nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len, 0, cw->qamModOrder, cw->Nl);
 }
 
+static bool da_recon_backlogged(void);
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
                                      const fapi_nr_dl_cw_info_t *cw,
@@ -505,6 +509,22 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     .ta_est_samples=-1, .transform_precoding=-1,
     .dmrs_type=dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_config->nscid};
   nr_sense_meta_set_snr(&rs_meta, dmrs_snr_db);
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING) {
+    const int prg = nr_pdsch_prg_latched(rnti);
+    rs_meta.prg_valid = prg >= 0;
+    rs_meta.prg_size = prg >= 0 ? prg : 0;
+    if (nl == 1 && mod_idx == nof_re) { /* RE ordinal i <-> mod_syms[i] only when no RE was skipped */
+      if (da_recon_backlogged()) { /* bound by backlog only (no RE cap: big grants are the most valuable): recon_conf null, validity unchanged */
+        nr_sense_recon_skip_note();
+      } else {
+        /* MRC-combined data Es/N0 = the DM-RS post-estimation SNR (itself the MRC sum over the antennas) minus the DM-RS power boost */
+        const float boost_db = 20.0f * log10f(get_beta_dmrs(dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2));
+        rs_meta.q.recon_conf = nr_da_recon(isac_h, isac_max_re, isac_nof_ant, isac_k, isac_l, nof_re, (const int16_t *)mod_syms, cw->qamModOrder,
+                                           rs_meta.snr_valid ? rs_meta.snr_db - boost_db : NAN, rs_meta.recon_prb_ok, NULL);
+        rs_meta.recon_valid = rs_meta.q.recon_conf == rs_meta.q.recon_conf;
+      }
+    }
+  }
   /* the demodulator's noise estimate in the units of the exported |Y/X|^2; 0 = none measured (prints null) */
   const float nvar_f = nvar > 0.0 ? (float)nvar : NAN;
   /* Slow-time index for the CPI grid. `proc->frame_rx` WRAPS at 1024, so the obvious
@@ -638,6 +658,13 @@ typedef struct {
 } da_qs_t;
 NR_CELL_STATIC(da_qs_t, g_da_qs)
 #define g_da_qs NR_CELL_REF(g_da_qs)
+/* recon runs on a daBg worker only and is shed when the backlog (jobs in the pool = queued + running) is at least half the pool */
+static bool da_recon_backlogged(void)
+{
+  if (!da_on_worker)
+    return false;
+  return nr_da_recon_skip((unsigned)(DA_POOL - __builtin_popcount(__atomic_load_n(&g_da.free_mask, __ATOMIC_RELAXED))), DA_POOL);
+}
 static const char *const da_wname[DA_NW_MAX] = {"daBg0", "daBg1", "daBg2", "daBg3"};
 
 /* workers: the load at the design point over a planned share of a core, capped by the background lane's cores shared by every cell of the process */
@@ -787,11 +814,16 @@ static void da_run(void *arg)
     int b = w_us ? 64 - __builtin_clzll(w_us) : 0; /* 0, 1, 2-3, 4-7, ... us */
     atomic_fetch_add(&P->wait_hist[b > 23 ? 23 : b], 1);
   }
+  const uint64_t unit_c0 = nr_sense_unit_cpu_ns(); /* sensing mode: re-encode, recon, CFR export are the cost of the RNTI's PDSCH_DATA unit */
   nr_isac_abs_slot_override = j->abs_slot;
   nr_isac_pdsch_data_aided_submit(j->ue, &j->proc, &j->cw, &j->dlsch, &j->fa, j->rnti, j->tb, j->harq_tag, (const c16_t(*)[P->stride])j->rx, j->nvar, j->G,
                                   j->dmrs_snr_db);
   nr_isac_abs_slot_override = 0;
-  atomic_fetch_add(&P->run_ns, da_now_ns() - t0);
+  const uint64_t t1 = da_now_ns();
+  if (unit_c0)
+    nr_sense_unit_job(NR_UNIT_PDSCH_DATA, j->rnti, nr_sense_unit_cpu_ns() - unit_c0, t0 - j->t_enq_ns, t1 - j->t_enq_ns > NR_UNIT_LATE_NS,
+                      (uint16_t)j->fa.num_rbs, t1);
+  atomic_fetch_add(&P->run_ns, t1 - t0);
   const uint64_t n = atomic_fetch_add(&P->done, 1) + 1;
   if (n == 1 || n % 2000 == 0) {
     uint64_t q, d_, d, sv;

@@ -3,6 +3,7 @@
 #define NR_SENSE_RECORDS_H
 #include "nr_passive_obs.h"
 #include "nr_sense_api.h"
+#include "nr_sense_quality.h"
 #include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +55,19 @@ typedef struct nr_sense_rs_meta_s {
   int64_t rx_shift_cum_samples;
   uint32_t rx_shift_count;
   float rx_gain_db;
+  /* Sensing-mode CFR quality + link context (S3). The producer sets only recon_valid, q.recon_conf, recon_prb_ok, prg_*, cfg_ref_ver.
+   * nr_sense_emit_rs sets want_q (sensing mode and a pushed frame); the WRITER computes the quality of that frame (never the pushing
+   * thread), then sets q, q_valid and wideband just before formatting. q_valid=false (legacy, traffic, no CFR, quality unavailable) -> none
+   * of the keys is printed. */
+  nr_sense_quality_t q;
+  bool want_q, q_valid;
+  bool wideband;         /* q.valid_cfr_prbs >= min_prb as snapshotted at emit time */
+  int min_prb;           /* nr_isac_sense_min_prb() at emit time */
+  bool recon_valid;      /* the producer measured q.recon_conf and recon_prb_ok (data-aided, rank 1): spec 4(d) joins the PRB validity */
+  uint8_t recon_prb_ok[(NR_SENSE_MAX_PRB + 7) / 8]; /* bit = ABSOLUTE PRB (k/12) passes the reconstruction test */
+  bool prg_valid;        /* prg_size is the per-RNTI PRG sweep's latched value (nr_pdsch_prg_latched); false prints null = "not latched", NOT "wideband" */
+  int prg_size;          /* 0 = wideband, 2, 4 */
+  uint32_t cfg_ref_ver;  /* with identity_gen + dedicated_epoch = cfg_ref; 0 = unknown (prints null) */
 } nr_sense_rs_meta_t;
 
 /* The estimators floor a signal below their noise estimate at -30 dB (nr_ulsch_dmrs_snr_db) and the DL side reports <= -90 for "none":

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <cstdlib>
+#include <cstring>
 extern "C" {
 #include "nr_admit.h"
 }
@@ -8,6 +9,10 @@ static int g_tiers = 0;
 static uint64_t g_note[3];
 extern "C" int nr_pool_site_shed_tiers(void) { return g_tiers; }
 extern "C" void nr_pool_site_shed_note(int tier) { g_note[tier]++; }
+static int g_cells = 0, g_cell = 0, g_mode = 0;
+extern "C" int nr_pool_site_active_cells(void) { return g_cells; }
+extern "C" int nr_cell_idx_fn(void) { return g_cell; }
+extern "C" int nr_isac_mode(void) { return g_mode; }
 
 // Admission control is off (no active-cells hook): every class runs, even with a deadline already passed.
 TEST(Admit, AlwaysRuns)
@@ -36,6 +41,7 @@ TEST(Admit, AdmitTiersUnchanged)
 TEST(Admit, AdmitCountsAttempts)
 {
   nr_admit_reset_for_test();
+  g_cells = 2;
   g_tiers = 0;
   nr_admit_try(NR_ADMIT_JANON, 0, 0, 0);
   g_tiers = 3;
@@ -50,6 +56,53 @@ TEST(Admit, AdmitCountsAttempts)
   nr_admit_class_counts(NR_ADMIT_USS, &a, &s, &r, &e);
   EXPECT_EQ(1u, a);
   EXPECT_EQ(0u, s);
+  g_cells = 0;
+}
+
+// I2: below 2 active cells nothing is counted, for any class
+TEST(Admit, NoCountsWithOneCell)
+{
+  nr_admit_reset_for_test();
+  g_cells = 1;
+  for (int c = 0; c < NR_ADMIT_N; c++) nr_admit_try((nr_admit_class_t)c, 0, 0, 0);
+  uint64_t a, s, r, e;
+  for (int c = 0; c < NR_ADMIT_N; c++) {
+    nr_admit_class_counts((nr_admit_class_t)c, &a, &s, &r, &e);
+    EXPECT_EQ(0u, a + s + r + e) << c;
+  }
+  char b[256];
+  nr_admit_stats(b, sizeof b);
+  EXPECT_STREQ("", b);
+  g_cells = 0;
+}
+
+// I1: each cell reads and reports its own counts
+TEST(Admit, CountersPerCell)
+{
+  nr_admit_reset_for_test();
+  g_cells = 2;
+  g_mode = 2;
+  g_tiers = 3;
+  g_cell = 0;
+  nr_admit_try(NR_ADMIT_JANON, 0, 0, 0);
+  g_cell = 1;
+  nr_admit_try(NR_ADMIT_JANON, 0, 0, 0);
+  nr_admit_try(NR_ADMIT_JANON, 0, 0, 0);
+  uint64_t a, s, r, e;
+  nr_admit_class_counts(NR_ADMIT_JANON, &a, &s, &r, &e);
+  EXPECT_EQ(2u, a);
+  char b[512];
+  nr_admit_stats(b, sizeof b);
+  EXPECT_NE(nullptr, strstr(b, "janon[attempts=2 skipped=2")) << b;
+  g_cell = 0;
+  nr_admit_class_counts(NR_ADMIT_JANON, &a, &s, &r, &e);
+  EXPECT_EQ(1u, a);
+  nr_admit_stats(b, sizeof b);
+  EXPECT_NE(nullptr, strstr(b, "janon[attempts=1 skipped=1")) << b;
+  g_mode = 0; // legacy: the line does not carry the class segments
+  nr_admit_stats(b, sizeof b);
+  EXPECT_EQ(nullptr, strstr(b, "attempts=")) << b;
+  g_cells = 0; g_tiers = 0;
 }
 
 static int g_freed;
@@ -102,4 +155,43 @@ TEST(Admit, BacklogExpiresOld)
   EXPECT_EQ(1, *(int *)p); // item 0 was the dropped one; oldest survivor first
   free(p);
   while ((p = nr_admit_skipq_pop(NR_ADMIT_DMRS_ID, &q, 0, free_cb))) free(p);
+}
+
+// an expired item is purged even while the pool sheds (freed, counted), a live one stays
+TEST(Admit, PurgeWhileShedding)
+{
+  nr_admit_reset_for_test();
+  nr_admit_skipq_t q = {};
+  g_freed = 0;
+  nr_admit_skipq_push(NR_ADMIT_JANON, &q, mk(1), 1000, free_cb);
+  nr_admit_skipq_push(NR_ADMIT_JANON, &q, mk(2), 5000, free_cb);
+  g_tiers = 2;
+  EXPECT_EQ(nullptr, nr_admit_skipq_pop(NR_ADMIT_JANON, &q, 2000, free_cb));
+  EXPECT_EQ(1, g_freed);
+  EXPECT_EQ(1, nr_admit_skipq_len(&q));
+  uint64_t a, s, r, e;
+  nr_admit_class_counts(NR_ADMIT_JANON, &a, &s, &r, &e);
+  EXPECT_EQ(1u, e);
+  EXPECT_EQ(0u, r);
+  g_tiers = 0;
+  void *p = nr_admit_skipq_pop(NR_ADMIT_JANON, &q, 2000, free_cb);
+  ASSERT_NE(nullptr, p);
+  EXPECT_EQ(2, *(int *)p);
+  free(p);
+}
+
+// shutdown drain frees everything and counts it expired
+TEST(Admit, DrainFreesAndCounts)
+{
+  nr_admit_reset_for_test();
+  nr_admit_skipq_t q = {};
+  g_freed = 0;
+  nr_admit_skipq_push(NR_ADMIT_DMRS_ID, &q, mk(1), 1 << 30, free_cb);
+  nr_admit_skipq_push(NR_ADMIT_DMRS_ID, &q, mk(2), 1 << 30, free_cb);
+  nr_admit_skipq_drain(NR_ADMIT_DMRS_ID, &q, free_cb);
+  EXPECT_EQ(2, g_freed);
+  EXPECT_EQ(0, nr_admit_skipq_len(&q));
+  uint64_t a, s, r, e;
+  nr_admit_class_counts(NR_ADMIT_DMRS_ID, &a, &s, &r, &e);
+  EXPECT_EQ(2u, e);
 }

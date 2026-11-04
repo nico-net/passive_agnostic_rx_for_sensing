@@ -17,7 +17,8 @@ int nr_admit_try(nr_admit_class_t c, uint64_t now_ns, uint64_t deadline_ns, int 
 void nr_admit_done(nr_admit_class_t c, uint64_t busy_ns); /* feeds the duty floor */
 void nr_admit_stats(char *buf, int n);                    /* "ADMIT janon[run= skip_busy= expired= floor=] ..." */
 uint64_t nr_admit_now_ns(void);
-/* Per-class counters (all modes): attempts = every nr_admit_try call, skipped = refused calls, recovered = backlog items replayed, expired = backlog items dropped (age or full). */
+/* Per-class counters of the CALLING thread's cell (nr_cell_idx()); attempts are counted only while nr_admit_on() (>= 2 active cells), so a single cell
+ * counts nothing and prints nothing new. attempts = every nr_admit_try call while on, skipped = refused calls, recovered = backlog items replayed, expired = backlog items dropped (age or full). */
 void nr_admit_class_counts(nr_admit_class_t c, uint64_t *attempts, uint64_t *skipped, uint64_t *recovered, uint64_t *expired);
 /* Skip backlog (JANON, DMRS_ID): a skipped item is kept, not freed. One per cell and class, used by the single worker that owns the class; a spin lock makes a shared worker safe.
  * Zero-initialised = empty. Push drops the oldest when full (counted expired). Pop returns the oldest live item only while no tier is shed
@@ -27,6 +28,7 @@ void nr_admit_class_counts(nr_admit_class_t c, uint64_t *attempts, uint64_t *ski
 typedef struct { void *p[NR_ADMIT_SKIPQ_DEPTH]; uint64_t deadline[NR_ADMIT_SKIPQ_DEPTH]; int head, n, lock; } nr_admit_skipq_t;
 void nr_admit_skipq_push(nr_admit_class_t c, nr_admit_skipq_t *q, void *item, uint64_t deadline_ns, void (*free_fn)(void *));
 void *nr_admit_skipq_pop(nr_admit_class_t c, nr_admit_skipq_t *q, uint64_t now_ns, void (*free_fn)(void *));
+void nr_admit_skipq_drain(nr_admit_class_t c, nr_admit_skipq_t *q, void (*free_fn)(void *)); /* shutdown: free all, counted expired */
 int nr_admit_skipq_len(const nr_admit_skipq_t *q);
 /* test hooks */
 void nr_admit_reset_for_test(void);

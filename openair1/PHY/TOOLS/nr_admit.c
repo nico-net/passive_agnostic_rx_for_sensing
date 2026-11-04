@@ -4,10 +4,18 @@
 #include <string.h>
 #include <time.h>
 
-/* process-wide per-class counters (like the shed counters of the pool) */
-static struct { uint64_t att, skip, rec, exp; } g_cls[NR_ADMIT_N];
-#define CNT(f, c) __atomic_fetch_add(&g_cls[c].f, 1, __ATOMIC_RELAXED)
-#define LD(f, c) __atomic_load_n(&g_cls[c].f, __ATOMIC_RELAXED)
+/* Per-class counters, one row per cell (index = nr_cell_idx() of the calling thread; weak hook so a binary without the cell module counts in row 0). */
+#define ADMIT_CELLS 16 /* = NR_CELL_MAX (common/utils/nr_cell.h); utils is not included here, the hook returns an index that is clamped */
+extern int nr_cell_idx_fn(void) __attribute__((weak));
+extern int nr_isac_mode(void) __attribute__((weak)); /* 0 = legacy */
+static struct { uint64_t att, skip, rec, exp; } g_cls[ADMIT_CELLS][NR_ADMIT_N];
+static int cur_cell(void)
+{
+  const int k = nr_cell_idx_fn ? nr_cell_idx_fn() : 0;
+  return k >= 0 && k < ADMIT_CELLS ? k : 0;
+}
+#define CNT(f, c) __atomic_fetch_add(&g_cls[cur_cell()][c].f, 1, __ATOMIC_RELAXED)
+#define LD(f, c) __atomic_load_n(&g_cls[cur_cell()][c].f, __ATOMIC_RELAXED)
 
 /* Admission of background (speculative / discovery) work. mpci B6: the gate is the value order of the core pool under overload (common/utils/nr_core_pool.h,
  * SHED). With one cell, or while the pool has a free token or no urgent waiter, everything runs and nothing is counted: the behaviour of before. While the
@@ -45,7 +53,7 @@ int nr_admit_try(nr_admit_class_t c, uint64_t now, uint64_t deadline, int token)
 {
   (void)now; (void)deadline; (void)token; /* freshness stays with each producer (its own queue and age check) */
   const int tier = nr_admit_tier(c);
-  CNT(att, c);
+  if (nr_admit_on()) CNT(att, c); /* single cell: nothing counted, output as before */
   if (tier < 0 || !nr_pool_site_shed_tiers) return 1;
   if (nr_pool_site_shed_tiers() <= tier) return 1;
   if (nr_pool_site_shed_note) nr_pool_site_shed_note(tier);
@@ -71,6 +79,18 @@ static void skipq_purge(nr_admit_class_t c, nr_admit_skipq_t *q, uint64_t now, v
     q->n--;
     CNT(exp, c);
   }
+}
+/* shutdown: release what is still waiting (counted expired) */
+void nr_admit_skipq_drain(nr_admit_class_t c, nr_admit_skipq_t *q, void (*free_fn)(void *))
+{
+  skipq_lock(q);
+  while (q->n > 0) {
+    free_fn(q->p[q->head]);
+    q->head = (q->head + 1) % NR_ADMIT_SKIPQ_DEPTH;
+    q->n--;
+    CNT(exp, c);
+  }
+  skipq_unlock(q);
 }
 void nr_admit_skipq_push(nr_admit_class_t c, nr_admit_skipq_t *q, void *item, uint64_t deadline, void (*free_fn)(void *))
 {
@@ -113,7 +133,7 @@ void nr_admit_stats(char *buf, int n)
   static const char *const nm[NR_ADMIT_N] = {"janon", "uss", "nid", "csirs", "dmrs_scan", "dmrs_id", "probe", "ul_disc"};
   if (s[0] || s[1] || s[2]) o = snprintf(buf, (size_t)n, "ADMIT shed tier0(housekeeping)=%llu tier1(csirs,dmrs_id)=%llu tier2(janon,nid)=%llu", (unsigned long long)s[0], (unsigned long long)s[1], (unsigned long long)s[2]);
   if (o < 0 || o >= n) return;
-  for (int c = 0; c < NR_ADMIT_N && o < n; c++) {
+  for (int c = 0; c < NR_ADMIT_N && o < n && nr_isac_mode && nr_isac_mode() != 0; c++) { /* legacy mode: the line stays as before */
     uint64_t a, k, r, e;
     nr_admit_class_counts((nr_admit_class_t)c, &a, &k, &r, &e);
     if (!a && !e) continue;

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
+#include "nr_sense_quality.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,6 +31,10 @@ void nr_sense_close(void);
 bool nr_sense_enabled(void);
 /* iq is antenna-major complex float pairs; ant_stride is in complex RE, not floats.
  * A gap in frame_id = frames dropped. */
+/* SENSING mode only: the quality the WRITER thread computed when it packed frame `frame_id` (never the pushing thread). false when the
+ * frame has not been processed yet, was never pushed, was dropped, was overwritten in the per-cell quality ring (frame_id % (cfr_ring_frames+64),
+ * id-tagged), or the mode is not SENSING. RS records use it internally; it is exported for tests and S4. */
+bool nr_sense_quality_for_frame(uint64_t frame_id, nr_sense_quality_t *q);
 uint64_t nr_sense_push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant_stride, int n_re,
                            const uint16_t *k_abs, const uint8_t *l_sym, uint64_t abs_slot, float slot_frac,
                            float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated);
@@ -64,9 +69,13 @@ typedef struct {
   uint64_t rec_count, write_count;
   uint64_t dci_generated, dci_persisted, dci_lost; /* traffic-mode DCI records: reached the ring / written / dropped (ring full, no sink, format or write failure) */
   uint64_t async_queued[NR_SENSE_SRC_COUNT], async_dropped[NR_SENSE_SRC_COUNT]; /* producer work handed to its background worker / shed because the worker was saturated (never run on the decode thread) */
+  uint64_t recon_skip; /* data-aided recon shed because the daBg backlog was >= half the pool (recon_conf null, validity unchanged) */
+  uint64_t q_computed, q_miss; /* sensing mode: frames whose quality the writer computed / RS records formatted without quality because the frame was overwritten, unavailable or never queued */
 } nr_sense_stats_t;
 /* A producer that moves its work off the decode-critical thread reports each hand-off: queued = 1 taken by the worker, 0 = dropped (counted per source, no lock, any thread of the cell). */
 void nr_sense_async_note(nr_sense_src_t src, int queued);
+void nr_sense_recon_skip_note(void);
+void nr_sense_q_miss_note(void); /* an RS record that wanted quality was formatted without it outside the writer (JSON fallback) */
 void nr_sense_stats(nr_sense_stats_t *out);
 /* The session is per cell: every call below acts on the session of the calling thread's cell (nr_cell_idx()). */
 void nr_sense_cell_file(int cell, const char *def, char *out, size_t n);

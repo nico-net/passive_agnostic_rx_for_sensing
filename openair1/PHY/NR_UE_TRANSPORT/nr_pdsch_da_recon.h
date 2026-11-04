@@ -1,0 +1,204 @@
+/* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#ifndef NR_PDSCH_DA_RECON_H
+#define NR_PDSCH_DA_RECON_H
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "nr_blind_stats.h"   /* nbs_binom_sf: exact binomial tail */
+#include "nr_sense_quality.h" /* NR_SENSE_MAX_PRB, NR_SENSE_PRB_RECON_ALPHA */
+
+/* Per-RE symbol accuracy of a data-aided reconstruction (spec 4(d)).
+ *
+ * WHAT IT MEASURES. Data-aided reconstructs X only from CRC-verified TBs, so X is right by construction. This is therefore NOT "is the
+ * reconstruction correct": it is the share of data REs whose RAW hard decision, taken from the received Y equalised with a channel estimate
+ * that never used that RE's own Y, equals the verified X. It reads high when the local channel model (precoder/PRG, delay, Doppler) and
+ * the SNR support symbol decisions, and low when they do not. S4 must read it as a per-PRB model-fit/SNR measure, not as a correctness flag.
+ *
+ * ESTIMATOR. For RE i (symbol l, subcarrier k, PRB p = k/12) the equaliser uses the leave-one-out, symmetric local window
+ * {l-1,l,l+1} x {k-2..k+2} clipped to PRB p (never across a PRB/PRG boundary) and to symbols that exist:
+ *   Hs_a = sum_n Y_a,n conj(X_n) / sum_n |X_n|^2 = sum_n H_a,n w_n / sum_n w_n     (n != i; ML weighting w_n = |X_n|^2, H = Y/X;
+ *          the window is used as point-reflected pairs about (l,k), both members present, each with the pair's smaller |X|^2)
+ *   eq   = sum_a Y_a,i conj(Hs_a) / sum_a |Hs_a|^2 = X_i * (sum_a H_a,i conj(Hs_a) / sum_a |Hs_a|^2)
+ * Pairing makes the window exactly symmetric, so the first-order phase slope (delay) across subcarriers and the first-order rotation
+ * (CFO/Doppler) across symbols cancel in the weighted mean whatever the random |X|.
+ * The decision is the nearest odd QAM level per axis. The constellation unit u is the smallest |component| of the grant's symbols,
+ * cross-checked against the unit implied by the symbols' mean energy (the modulator normalises to unit mean energy): a mismatch > 15 %
+ * or too few symbols (< 64, < 256 for 256QAM, so the innermost level is present) gives NAN and no PRB verdicts.
+ *
+ * PER-PRB VERDICT IS RELATIVE (spec 4(d)), not an absolute agreement level. CRC passes at low code rate with raw symbol agreement far below 1,
+ * so a fixed threshold would remove good PRBs. Instead each RE has an EXPECTED success probability from the record's SNR and Qm, and a PRB
+ * fails only when its agreement is significantly BELOW the expectation:
+ *   gamma      = the MRC-COMBINED Es/N0 of the data REs, i.e. the SNR of the symbol that is actually compared (eq above is the MRC
+ *                combination over all antennas, so its SNR is the sum over antennas: array gain INCLUDED). The caller passes the record's
+ *                post-estimation SNR (nr_pdsch_dmrs_snr comb_db, itself the MRC sum) minus the DM-RS boost, 20 log10(get_beta_dmrs()) (TS 38.214
+ *                Table 4.1-1). A per-antenna SNR must be multiplied by the number of combined antennas before it is passed in.
+ *   gamma_i    = gamma / (1 + pen),  pen = |X_i|^2 v + Es v A / gamma,  A = number of combined antennas, Es = mean |X|^2 of the grant.
+ *                The local per-antenna estimate Hs = H + e is a weighted mean of H_n = H + noise_n / X_n, so var(e) = N v with N the per-antenna
+ *                noise variance and v = sum_n w_n^2 / |X_n|^2 / (sum_n w_n)^2 (the window members n, w_n = the pair's smaller |X|^2; v = 1/sum_w
+ *                for pure ML weights w_n = |X_n|^2, and slightly smaller with the pair-min weights). For z = sum_a conj(Hs_a) Y_a (S = sum_a |H_a|^2)
+ *                the signal is X S and the error variance is |X|^2 S var(e) + N S + A var(e) N (the noise x e product is uncorrelated with the
+ *                data and MRC keeps it), so after dividing by S^2:  SNR_eff = gamma / (1 + |X|^2 v + A N v / S).  Equal-gain approximation (unequal
+ *                antennas only make the real penalty larger at the weak ones): S = A |H|^2 and gamma = S Es / N, hence N/S = Es/gamma and the
+ *                third term is Es v A / gamma (dimensionless: Es v is the inverse window size in symbols, A/gamma the noise-to-signal ratio).
+ *                Neglected: eq is divided by sum|Hs|^2 = S + A N v, a gain bias of about Es v A / gamma (3 % at 16QAM 8 dB, where the modelled
+ *                agreement is then 0.017 above the measured one; below 0.01 from 12 dB). It uses the constellation mean Es, not the instantaneous |X_i|^2: the noise-times-estimate-error product does not depend on X_i.
+ *                Negligible at high SNR, dominant at low per-antenna SNR, which is why A enters. Edge subcarriers and symbols have fewer pairs,
+ *                hence a larger penalty, so they are not punished for the noisier estimate.
+ *   P_axis     = 2 (1 - 1/sqrt(M)) Q( sqrt(3 gamma_i / (M - 1)) ),  p_i = (1 - P_axis)^2           (square M-QAM, AWGN, nearest-level decision;
+ *                Proakis, Digital Communications 5th ed., eq. 4.3-30 and 4.3-31; Goldsmith, Wireless Communications, eq. 6.23; Q(x) = erfc(x/sqrt 2)/2)
+ *   floor      = pbar is capped at 1 - NR_SENSE_RECON_IMPL_LOSS: the model has no EVM / phase noise / quantisation, so at high SNR it would call a
+ *                single real mismatch significant.
+ *   test       = with n scored REs and D disagreements, pbar = mean p_i, deff (below), n_eff = floor(n/deff), D_eff = floor(D/deff):
+ *                P(Binomial(n_eff, 1-pbar) >= D_eff) < NR_SENSE_PRB_RECON_ALPHA (1e-3)  => fail. Exact tail (nbs_binom_sf); the Poisson-binomial is
+ *                approximated by the binomial with the same mean, which has the larger variance, i.e. the test errs towards keeping a PRB.
+ *   deff       = 1 + mean_i(f_i W_i): variance inflation of the disagreement count from overlapping windows. RE i's estimate error e_i is shared with
+ *                its W_i window members (4 same-symbol + 10 adjacent-symbol partners in the interior, W_i = 2 x pairs used, fewer at the edges), and
+ *                each partner is in turn windowed with overlapping REs, so corr(e_i, e_j) is taken as 1 for the W_i partners (an upper bound: partners
+ *                farther away share less). Only the e-term of the error is shared; the own noise is not. Its share of the total error variance is
+ *                f_i = (|X_i|^2 v) / (1 + pen_i) (the noise x e product, also built from e, is multiplied by the independent noise of RE i
+ *                and is counted as unshared). Indicator correlations are then <= f_i, so Var(D) <= (1 + f W) sum p(1-p) (the usual n/deff
+ *                design-effect rule). Computed per PRB from the same quantities as the expectation. deff = 1 + fW is >= 1 and typically 1.1-2.
+ * A low-SNR record has a low expectation and is NOT rejected for being low SNR; a wrong channel model or interference decides near chance
+ * and is rejected whenever the expectation is clearly above chance. snr_db NaN gives NAN and no verdicts (validity unchanged).
+ *
+ * h: antenna-major complex float H = Y/X, stride in complex REs. k/l: subcarrier (absolute) and symbol of each RE, REs ordered symbol by
+ * symbol with k ascending (the data-aided enumeration). x: interleaved int16 (re,im) of the re-encoded symbols, RE ordinal i <-> x[2i].
+ * ok_abs (out, (NR_SENSE_MAX_PRB+7)/8 bytes): bit p = PRB p passes (>= 6 scored REs and not significantly below expectation).
+ * scored_out (optional): number of scored REs. Returns the grant-level agreement (all scored REs), NAN when not computable. Stack use < 4 KB. */
+/* Backlog bound of the data-aided worker pool: skip the recon when at least half the pool is in flight. */
+static inline bool nr_da_recon_skip(unsigned in_flight, unsigned pool) { return pool && 2u * in_flight >= pool; }
+#define NR_DA_RECON_MAXSYM 16
+/* model_out (optional): grant-mean MODELLED agreement (mean of p_i over the scored REs, before the floor), for tests/diagnostics. */
+static inline float nr_da_recon_x(const float *h, uint32_t stride, uint32_t nant, const uint32_t *k, const uint32_t *l, uint32_t n,
+                                  const int16_t *x, uint32_t qm, float snr_db, uint8_t ok_abs[(NR_SENSE_MAX_PRB + 7) / 8],
+                                  uint32_t *scored_out, float *model_out)
+{
+  if (model_out)
+    *model_out = NAN;
+  memset(ok_abs, 0, (NR_SENSE_MAX_PRB + 7) / 8);
+  if (scored_out)
+    *scored_out = 0;
+  if (!(snr_db > -40.0f && snr_db < 100.0f))
+    return NAN;
+  if (qm < 2 || (qm & 1) || qm > 8 || nant < 1 || n < (qm >= 8 ? 256u : 64u))
+    return NAN;
+  if (nant > 8)
+    nant = 8;
+  const int M = 1 << (qm / 2);
+  int umin = 0;
+  double e = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    const int r = abs((int)x[2 * i]), q = abs((int)x[2 * i + 1]);
+    if (r && (!umin || r < umin)) umin = r;
+    if (q && (!umin || q < umin)) umin = q;
+    e += (double)x[2 * i] * x[2 * i] + (double)x[2 * i + 1] * x[2 * i + 1];
+  }
+  if (!umin)
+    return NAN;
+  const double u_e = sqrt(e / n * 3.0 / (2.0 * ((double)M * M - 1.0))); /* E|x|^2 = 2 (M^2-1)/3 u^2 */
+  if (fabs(umin - u_e) > 0.15 * u_e)
+    return NAN;
+  const float u = (float)umin;
+  const int maxlev = M - 1;
+  const double gamma = pow(10.0, snr_db / 10.0), qam_m = (double)M * M;
+  struct { uint32_t b, e; uint32_t l; } sp[NR_DA_RECON_MAXSYM];
+  int ns = 0;
+  for (uint32_t i = 0; i < n;) {
+    uint32_t j = i;
+    while (j < n && l[j] == l[i]) j++;
+    if (ns == NR_DA_RECON_MAXSYM) return NAN;
+    sp[ns].b = i; sp[ns].e = j; sp[ns].l = l[i]; ns++;
+    i = j;
+  }
+  uint16_t seen[NR_SENSE_MAX_PRB] = {0}, match[NR_SENSE_MAX_PRB] = {0};
+  float pexp[NR_SENSE_MAX_PRB] = {0}, fw[NR_SENSE_MAX_PRB] = {0};
+  for (int s = 0; s < ns; s++) {
+    const int up = (s > 0 && sp[s - 1].l + 1 == sp[s].l) ? s - 1 : -1, dn = (s + 1 < ns && sp[s].l + 1 == sp[s + 1].l) ? s + 1 : -1;
+    for (uint32_t i = sp[s].b; i < sp[s].e; i++) {
+      const uint32_t p = k[i] / 12;
+      if (p >= NR_SENSE_MAX_PRB) return NAN;
+      float num[8][2] = {{0}};
+      double den = 0;
+      int wcnt = 0; /* window members used (pairs x 2) */
+      double vs = 0; /* sum w^2 / |X_n|^2: var(e) = N vs / den^2 */
+      /* point-reflected pairs about (l,k): a pair is used only when BOTH members exist, each with the pair's smaller weight, so the window is
+       * exactly symmetric and the linear phase terms (delay across k, CFO across l) cancel in the weighted mean whatever |X| is */
+      for (int pass = 0; pass < 2; pass++) {
+        for (int dk = (pass ? -2 : 1); dk <= 2; dk++) {
+          const int sa = pass ? up : s, sb = pass ? dn : s;
+          if (sa < 0 || sb < 0) break;
+          const int ka = (int)k[i] + (pass ? dk : -dk), kb = (int)k[i] + (pass ? -dk : dk);
+          if (ka < 0 || kb < 0 || (uint32_t)ka / 12 != p || (uint32_t)kb / 12 != p) continue;
+          int ja = -1, jb = -1;
+          { uint32_t lo = sp[sa].b, hi = sp[sa].e; while (lo < hi) { uint32_t m = (lo + hi) / 2; if ((int)k[m] < ka) lo = m + 1; else hi = m; }
+            if (lo < sp[sa].e && (int)k[lo] == ka) ja = (int)lo; }
+          { uint32_t lo = sp[sb].b, hi = sp[sb].e; while (lo < hi) { uint32_t m = (lo + hi) / 2; if ((int)k[m] < kb) lo = m + 1; else hi = m; }
+            if (lo < sp[sb].e && (int)k[lo] == kb) jb = (int)lo; }
+          if (ja < 0 || jb < 0) continue;
+          const float wa = (float)x[2 * ja] * x[2 * ja] + (float)x[2 * ja + 1] * x[2 * ja + 1];
+          const float wb = (float)x[2 * jb] * x[2 * jb] + (float)x[2 * jb + 1] * x[2 * jb + 1];
+          const float w = wa < wb ? wa : wb;
+          den += 2.0 * w;
+          wcnt += 2;
+          vs += (double)w * w * ((wa > 0 ? 1.0 / wa : 0.0) + (wb > 0 ? 1.0 / wb : 0.0));
+          for (uint32_t a = 0; a < nant; a++)
+            for (int c = 0; c < 2; c++)
+              num[a][c] += w * (h[2 * ((size_t)a * stride + ja) + c] + h[2 * ((size_t)a * stride + jb) + c]);
+        }
+      }
+      if (!(den > 0)) continue;
+      double nr = 0, ni = 0, dd = 0;
+      for (uint32_t a = 0; a < nant; a++) {
+        const double sr = num[a][0] / den, si = num[a][1] / den;
+        const double hr = h[2 * ((size_t)a * stride + i)], hi = h[2 * ((size_t)a * stride + i) + 1];
+        nr += hr * sr + hi * si; /* H conj(Hs) */
+        ni += hi * sr - hr * si;
+        dd += sr * sr + si * si;
+      }
+      if (!(dd > 0)) continue;
+      const double rr = nr / dd, ri = ni / dd;
+      const double er = (x[2 * i] * rr - x[2 * i + 1] * ri) / u, ei = (x[2 * i] * ri + x[2 * i + 1] * rr) / u; /* eq = X r, units of u */
+      int lr = 2 * (int)floor(er / 2.0) + 1, li = 2 * (int)floor(ei / 2.0) + 1; /* nearest odd level */
+      lr = lr > maxlev ? maxlev : (lr < -maxlev ? -maxlev : lr);
+      li = li > maxlev ? maxlev : (li < -maxlev ? -maxlev : li);
+      const int xr = 2 * (int)floor((double)x[2 * i] / u / 2.0) + 1, xi = 2 * (int)floor((double)x[2 * i + 1] / u / 2.0) + 1;
+      {
+        const double xe = (double)x[2 * i] * x[2 * i] + (double)x[2 * i + 1] * x[2 * i + 1];
+        const double ve = vs / (den * den); /* var(e) / N */
+        const double pen = xe * ve + (e / n) * ve * ((double)nant / gamma); /* header: gamma_i; Es = e/n */
+        const double gi = gamma / (1.0 + pen);
+        const double pax = 2.0 * (1.0 - 1.0 / (double)M) * 0.5 * erfc(sqrt(3.0 * gi / (qam_m - 1.0)) / sqrt(2.0));
+        pexp[p] += (float)((1.0 - pax) * (1.0 - pax));
+        fw[p] += (float)(xe * ve / (1.0 + pen) * wcnt);
+      }
+      seen[p]++;
+      match[p] += (lr == xr && li == xi);
+    }
+  }
+  uint32_t S = 0, Mt = 0;
+  double psum = 0;
+  for (uint32_t p = 0; p < NR_SENSE_MAX_PRB; p++) {
+    S += seen[p]; Mt += match[p]; psum += pexp[p];
+    if (seen[p] < 6) continue;
+    double pbar = (double)pexp[p] / seen[p];
+    if (pbar > 1.0 - NR_SENSE_RECON_IMPL_LOSS) pbar = 1.0 - NR_SENSE_RECON_IMPL_LOSS; /* implementation-loss floor, see nr_sense_quality.h */
+    /* variance inflation from overlapping windows, header (deff); n_eff and D_eff floored (errs towards keeping the PRB) */
+    const double deff = 1.0 + (double)fw[p] / seen[p];
+    if (nbs_binom_sf((uint64_t)((seen[p] - match[p]) / deff), (uint64_t)(seen[p] / deff), 1.0 - pbar) >= NR_SENSE_PRB_RECON_ALPHA)
+      ok_abs[p >> 3] |= (uint8_t)(1u << (p & 7));
+  }
+  if (scored_out)
+    *scored_out = S;
+  if (model_out && S)
+    *model_out = (float)(psum / S);
+  return S ? (float)Mt / (float)S : NAN;
+}
+static inline float nr_da_recon(const float *h, uint32_t stride, uint32_t nant, const uint32_t *k, const uint32_t *l, uint32_t n,
+                                const int16_t *x, uint32_t qm, float snr_db, uint8_t ok_abs[(NR_SENSE_MAX_PRB + 7) / 8],
+                                uint32_t *scored_out)
+{
+  return nr_da_recon_x(h, stride, nant, k, l, n, x, qm, snr_db, ok_abs, scored_out, NULL);
+}
+#endif

@@ -1152,6 +1152,7 @@ static void mpci_stop_cell_queues(int k)
 {
   (void)k;
   nr_shutdown_step("passive_pdcch_stop_begin");
+  nr_pdsch_passive_queue_drain_skipq();
   nr_pdcch_blind_monitor_rt_final_stats();
   nr_pdcch_passive_queue_stop();
   nr_shutdown_step("passive_pdsch_gpu_fep_stop_begin");

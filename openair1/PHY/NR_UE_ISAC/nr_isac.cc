@@ -436,6 +436,9 @@ extern "C" void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac
     m.dmrs_add_pos=detail->dmrs_add_pos; m.dmrs_n_scid=detail->dmrs_n_scid;
     m.layer_idx1=detail->layer_idx1; m.n_layers=detail->n_layers;
     m.snr_db=detail->snr_db; m.snr_valid=detail->snr_valid;
+    m.recon_valid=detail->recon_valid; m.q.recon_conf=detail->q.recon_conf;
+    memcpy(m.recon_prb_ok,detail->recon_prb_ok,sizeof m.recon_prb_ok);
+    m.prg_valid=detail->prg_valid; m.prg_size=detail->prg_size; m.cfg_ref_ver=detail->cfg_ref_ver;
   }
   m.truncated=truncated;
   nr_sense_emit_rs(source_map[source],&m,frame_id);

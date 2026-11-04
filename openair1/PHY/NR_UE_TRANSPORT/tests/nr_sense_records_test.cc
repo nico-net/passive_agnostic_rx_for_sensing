@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cmath>
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -432,4 +433,267 @@ TEST(SenseRecords, RsCarriesMeasuredQuality)
   nr_sense_rs_meta_t neg{}; nr_sense_meta_set_snr(&neg,-6.25f);   /* a real negative SNR is a measurement */
   ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PUSCH_DMRS,&neg,1,line,sizeof line),0);
   EXPECT_NE(strstr(line,"\"snr_db\":-6.25,"),nullptr);
+}
+
+/* ---- S3: quality + link context ---- */
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
+#include "nr_sense_quality.h"
+#include <thread>
+
+namespace {
+/* deterministic meta (no clock, no stamp lookups) for byte comparisons */
+nr_sense_rs_meta_t s3_meta(uint16_t rnti, int pci)
+{
+  nr_sense_rs_meta_t m{};
+  m.rnti=rnti; m.start_rb=0; m.nb_rb=20; m.n_re=240; m.n_ant=4; m.ports=1; m.ssb_index=-1; m.k_ssb=-1;
+  m.noise_var=1.f; m.abs_slot=42; m.frame=4; m.slot=2; m.pci=pci; m.rx_ts=1000; m.t_mono_ns=5000;
+  m.l_sym_mask=(1u<<2)|(1u<<3); m.layer_idx1=0; m.stamp_valid=true; m.epoch=1; m.identity_gen=2; m.dedicated_epoch=3;
+  m.ta_est_samples=-1; m.dmrs_type=1; m.dmrs_add_pos=-1; m.dmrs_n_scid=0;
+  nr_sense_meta_set_snr(&m,15.f);
+  return m;
+}
+/* 4-antenna, 20-PRB DM-RS-like CFR (even k, symbols 2 and 3) at ~20 dB: flat per-(ant,k) channel, tiny deterministic noise */
+struct S3Cfr { std::vector<float> iq; std::vector<uint16_t> k; std::vector<uint8_t> l; int n_ant=4, n_re=0; };
+S3Cfr s3_cfr(int nprb, float amp)
+{
+  S3Cfr c;
+  for (int s=2;s<=3;s++) for (int p=0;p<nprb;p++) for (int i=0;i<6;i++) { c.k.push_back(12*p+2*i); c.l.push_back(s); }
+  c.n_re=c.k.size();
+  c.iq.resize(2*c.n_ant*c.n_re);
+  for (int a=0;a<c.n_ant;a++) for (int i=0;i<c.n_re;i++) {
+    const float th=-2.f*float(M_PI)*2.f*c.k[i]/4096.f+0.7f*a;
+    c.iq[2*(a*c.n_re+i)]=amp*std::cos(th); c.iq[2*(a*c.n_re+i)+1]=amp*std::sin(th);
+  }
+  return c;
+}
+std::vector<std::string> s3_lines(const char *path)
+{
+  std::ifstream f(path); std::vector<std::string> v; std::string s;
+  while (std::getline(f,s)) v.push_back(s);
+  return v;
+}
+struct S3Sink {
+  char rec[40]="/tmp/nr_s3_rec_XXXXXX", cfr[40]="/tmp/nr_s3_cfr_XXXXXX";
+  S3Sink(uint32_t ring=8) {
+    int a=mkstemp(rec), b=mkstemp(cfr); close(a); close(b);
+    nr_sense_cfg_t cfg{}; cfg.records_path=rec; cfg.cfr_path=cfr; cfg.rec_ring_slots=16; cfg.cfr_ring_frames=ring; cfg.cfr_max_re=4096;
+    EXPECT_EQ(nr_sense_open(&cfg),0);
+  }
+  ~S3Sink() { nr_sense_test_pause_writer(false); nr_sense_close(); nr_isac_mode_set(NR_ISAC_MODE_LEGACY); nr_isac_sense_min_prb_set(128); unlink(rec); unlink(cfr); }
+};
+/* captured from nr_sense_rs_to_json BEFORE the S3 change (pre-S3 binary), same meta */
+/* UL and SSB goldens: current formatter output with q_valid=false; that path is textually the pre-S3 code (git diff 5f6733d34d shows only the dir ternary, since reverted, and the appended q_valid block) */
+const char *kGoldenLegacyUl = "{\"schema\":2,\"type\":\"rs\",\"epoch\":1,\"identity_gen\":2,\"dedicated_epoch\":3,\"abs_slot\":42,\"frame\":4,\"slot\":2,\"t_mono_ns\":5000,\"rx_ts\":1000,\"pci\":7,\"source\":\"pusch_dmrs\",\"dir\":\"UL\",\"rnti\":17767,\"start_rb\":0,\"nb_rb\":20,\"n_re\":240,\"l_syms\":[2,3],\"ports\":1,\"n_ant\":4,\"port_mask\":null,\"noise_var\":1,\"slot_frac\":0,\"snr_db\":15,\"cfr_frame_id\":3,\"truncated\":false,\"ssb_index\":null,\"k_ssb\":null,\"csirs_resource\":null,\"ta_est_samples\":5,\"k_abs_convention\":\"crb0_point_a\",\"freq_hopping\":null,\"cfo_est_hz\":null,\"rx_cfo_applied_hz\":null,\"rx_shift_cum_samples\":null,\"rx_shift_count\":null,\"rx_gain_db\":null,\"ta_applied_samples\":null,\"transform_precoding\":0,\"dmrs_type\":1,\"dmrs_add_pos\":null,\"dmrs_n_scid\":0,\"ul_timing_ref\":\"dl_frame\",\"preamble\":null,\"energy\":null,\"delay\":null,\"comb\":null,\"offset\":null,\"comb_offset\":null,\"cs\":null,\"group\":null,\"period\":null,\"srs_track_id\":null,\"attribution\":null}";
+const char *kGoldenLegacySsb = "{\"schema\":2,\"type\":\"rs\",\"epoch\":1,\"identity_gen\":2,\"dedicated_epoch\":3,\"abs_slot\":42,\"frame\":4,\"slot\":2,\"t_mono_ns\":5000,\"rx_ts\":1000,\"pci\":7,\"source\":\"ssb\",\"dir\":\"DL\",\"rnti\":null,\"start_rb\":0,\"nb_rb\":20,\"n_re\":240,\"l_syms\":[2,3],\"ports\":1,\"n_ant\":4,\"port_mask\":null,\"noise_var\":1,\"slot_frac\":0,\"snr_db\":15,\"cfr_frame_id\":null,\"truncated\":false,\"ssb_index\":2,\"k_ssb\":6,\"csirs_resource\":null,\"ta_est_samples\":null,\"k_abs_convention\":\"crb0_point_a\",\"freq_hopping\":null,\"cfo_est_hz\":null,\"rx_cfo_applied_hz\":null,\"rx_shift_cum_samples\":null,\"rx_shift_count\":null,\"rx_gain_db\":null,\"ta_applied_samples\":null,\"transform_precoding\":null,\"dmrs_type\":1,\"dmrs_add_pos\":null,\"dmrs_n_scid\":0,\"ul_timing_ref\":null,\"preamble\":null,\"energy\":null,\"delay\":null,\"comb\":null,\"offset\":null,\"comb_offset\":null,\"cs\":null,\"group\":null,\"period\":null,\"srs_track_id\":null,\"attribution\":null}";
+const char *kGoldenLegacyRs = "{\"schema\":2,\"type\":\"rs\",\"epoch\":1,\"identity_gen\":2,\"dedicated_epoch\":3,\"abs_slot\":42,\"frame\":4,\"slot\":2,\"t_mono_ns\":5000,\"rx_ts\":1000,\"pci\":7,\"source\":\"pdsch_dmrs\",\"dir\":\"DL\",\"rnti\":4660,\"start_rb\":0,\"nb_rb\":20,\"n_re\":240,\"l_syms\":[2,3],\"ports\":1,\"n_ant\":4,\"port_mask\":null,\"noise_var\":1,\"slot_frac\":0,\"snr_db\":15,\"cfr_frame_id\":1,\"truncated\":false,\"ssb_index\":null,\"k_ssb\":null,\"csirs_resource\":null,\"ta_est_samples\":null,\"k_abs_convention\":\"crb0_point_a\",\"freq_hopping\":null,\"cfo_est_hz\":null,\"rx_cfo_applied_hz\":null,\"rx_shift_cum_samples\":null,\"rx_shift_count\":null,\"rx_gain_db\":null,\"ta_applied_samples\":null,\"transform_precoding\":null,\"dmrs_type\":1,\"dmrs_add_pos\":null,\"dmrs_n_scid\":0,\"ul_timing_ref\":null,\"preamble\":null,\"energy\":null,\"delay\":null,\"comb\":null,\"offset\":null,\"comb_offset\":null,\"cs\":null,\"group\":null,\"period\":null,\"srs_track_id\":null,\"attribution\":null}";
+}
+
+TEST(SenseRecordsS3, LegacyRecordUnchanged)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+  const S3Cfr c=s3_cfr(20,4.f);
+  nr_sense_rs_meta_t m=s3_meta(0x1234,7);
+  char direct[2048];
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,direct,sizeof direct),0);
+  EXPECT_STREQ(direct,kGoldenLegacyRs);
+  { /* UL and SSB variants (same formatter, different branches); not through the writer */
+    nr_sense_rs_meta_t u=s3_meta(0x4567,7); u.ta_est_samples=5; u.transform_precoding=0;
+    char b[2048];
+    ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PUSCH_DMRS,&u,3,b,sizeof b),0);
+    EXPECT_STREQ(b,kGoldenLegacyUl);
+    nr_sense_rs_meta_t sb=s3_meta(0,7); sb.ssb_index=2; sb.k_ssb=6;
+    ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_SSB,&sb,0,b,sizeof b),0);
+    EXPECT_STREQ(b,kGoldenLegacySsb);
+  }
+  { S3Sink sink;
+    const uint64_t id=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DMRS,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),42,0,1.f,0,0,nullptr);
+    ASSERT_EQ(id,1u);
+    nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DMRS,&m,id);
+    nr_sense_close();
+    const auto v=s3_lines(sink.rec);
+    std::string line; for (const auto &s : v) if (s.find("\"type\":\"rs\"")!=std::string::npos) line=s;
+    EXPECT_EQ(line.find("valid_cfr_prbs"),std::string::npos);
+    EXPECT_EQ(line.find("\"prg_size\""),std::string::npos);
+    EXPECT_EQ(line.find("\"tx\""),std::string::npos);
+    /* the stored line is the golden with only the cfr_frame_id link changed (1 in both) */
+    EXPECT_EQ(line,std::string(kGoldenLegacyRs));
+  }
+}
+
+TEST(SenseRecordsS3, QualityKeysInSensingMode)
+{
+  const S3Cfr c=s3_cfr(20,4.f);
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_isac_sense_min_prb_set(10);
+  nr_sense_quality_t want; /* the S2 function on the same input is the reference for the numbers */
+  nr_sense_quality_compute(c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),1.f,&want);
+  ASSERT_EQ(want.valid_cfr_prbs,20);
+  S3Sink sink;
+  nr_sense_rs_meta_t dl=s3_meta(0x1234,7); dl.prg_valid=true; dl.prg_size=2;
+  const uint64_t a=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DMRS,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),42,0,1.f,0,0,nullptr);
+  nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DMRS,&dl,a);
+  nr_sense_rs_meta_t ul=s3_meta(0x1a2b,7);
+  const uint64_t b=nr_sense_push_cfr(NR_SENSE_SRC_PUSCH_DMRS,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),43,0,1.f,0,0,nullptr);
+  nr_sense_emit_rs(NR_SENSE_SRC_PUSCH_DMRS,&ul,b);
+  nr_sense_rs_meta_t da=s3_meta(0x1234,7); da.recon_valid=true; da.q.recon_conf=0.75f; da.cfg_ref_ver=4; memset(da.recon_prb_ok,0xff,sizeof da.recon_prb_ok);
+  const uint64_t d=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DATA,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),44,0,1.f,0,0,nullptr);
+  nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DATA,&da,d);
+  nr_isac_sense_min_prb_set(128);
+  nr_sense_rs_meta_t nw=s3_meta(0x1234,7);
+  const uint64_t e=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DMRS,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),45,0,1.f,0,0,nullptr);
+  nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DMRS,&nw,e);
+  nr_sense_close();
+  std::vector<std::string> rs;
+  for (const auto &s : s3_lines(sink.rec)) if (s.find("\"type\":\"rs\"")!=std::string::npos) rs.push_back(s);
+  ASSERT_EQ(rs.size(),4u);
+  auto has=[](const std::string &s,const char *k){ return s.find(k)!=std::string::npos; };
+  EXPECT_TRUE(has(rs[0],"\"valid_cfr_prbs\":20,")) << rs[0];
+  EXPECT_TRUE(has(rs[0],"\"allocated_prbs\":20,"));
+  EXPECT_TRUE(has(rs[0],"\"estimated_usable_prbs\":20,"));
+  EXPECT_TRUE(has(rs[0],"\"first_prb\":0,"));
+  EXPECT_TRUE(has(rs[0],"\"valid_mask\":\"ffff0f\""));
+  EXPECT_TRUE(has(rs[0],"\"wideband\":true"));
+  EXPECT_TRUE(has(rs[0],"\"dir\":\"DL\""));
+  EXPECT_FALSE(has(rs[0],"\"dir\":\"dl\""));
+  EXPECT_TRUE(has(rs[0],"\"tx\":7,"));
+  EXPECT_TRUE(has(rs[0],"\"prg_size\":2"));
+  EXPECT_TRUE(has(rs[0],"\"cfg_ref\":null"));
+  EXPECT_TRUE(has(rs[0],"\"ssb_beam\":null"));
+  EXPECT_TRUE(has(rs[0],"\"recon_conf\":null"));
+  char key[64]; snprintf(key,sizeof key,"\"snr_db_p50\":%.9g",want.snr_db_p50);
+  EXPECT_TRUE(has(rs[0],key)) << key << "\n" << rs[0];
+  snprintf(key,sizeof key,"\"resid_db\":%.9g",want.resid_db);
+  EXPECT_TRUE(has(rs[0],key)) << key;
+  EXPECT_TRUE(has(rs[0],"\"sym_consist\":")); EXPECT_FALSE(has(rs[0],"\"sym_consist\":null"));
+  EXPECT_TRUE(has(rs[0],"\"snr_db_p10\":"));
+  EXPECT_TRUE(has(rs[0],"\"layer\"") == false);                 /* layer keys stay absent without a layer frame */
+  EXPECT_TRUE(has(rs[1],"\"dir\":\"UL\"")); EXPECT_TRUE(has(rs[1],"\"tx\":\"rnti:1a2b\""));
+  EXPECT_TRUE(has(rs[1],"\"prg_size\":null"));
+  EXPECT_TRUE(has(rs[2],"\"recon_conf\":0.75")); EXPECT_TRUE(has(rs[2],"\"cfg_ref\":\"2.3.4\""));
+  EXPECT_TRUE(has(rs[3],"\"wideband\":false")) << rs[3];
+  EXPECT_TRUE(has(rs[3],"\"valid_cfr_prbs\":20,"));
+}
+
+TEST(SenseRecordsS3, NoQualityWithoutCfrOrInTraffic)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_sense_rs_meta_t m=s3_meta(0x1234,7);
+  char line[4096];
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,0,line,sizeof line),0);   /* q_valid false: no keys */
+  EXPECT_EQ(strstr(line,"valid_cfr_prbs"),nullptr);
+  EXPECT_EQ(strstr(line,"\"tx\""),nullptr);
+  EXPECT_NE(strstr(line,"\"dir\":\"DL\""),nullptr);
+  nr_isac_mode_set(NR_ISAC_MODE_TRAFFIC);
+  const S3Cfr c=s3_cfr(20,4.f);
+  S3Sink sink;
+  const uint64_t a=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DMRS,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),42,0,1.f,0,0,nullptr);
+  nr_sense_quality_t q;
+  EXPECT_FALSE(nr_sense_quality_for_frame(a,&q));
+  nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DMRS,&m,a);
+  nr_sense_close();
+  for (const auto &s : s3_lines(sink.rec)) { if (s.find("\"type\":\"rs\"")!=std::string::npos) EXPECT_EQ(s.find("valid_cfr_prbs"),std::string::npos); }
+}
+
+TEST(SenseRecordsS3, DirIdenticalWithAndWithoutQuality)
+{
+  const S3Cfr c=s3_cfr(20,4.f);
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  S3Sink sink;
+  for (int src : {NR_SENSE_SRC_PDSCH_DMRS, NR_SENSE_SRC_PUSCH_DMRS}) {
+    nr_sense_rs_meta_t m=s3_meta(0x1234,7);
+    const uint64_t id=nr_sense_push_cfr(nr_sense_src_t(src),c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),42,0,1.f,0,0,nullptr);
+    nr_sense_emit_rs(nr_sense_src_t(src),&m,id);   /* ring hit: quality keys */
+    nr_sense_emit_rs(nr_sense_src_t(src),&m,0);    /* no CFR (id 0): no keys */
+  }
+  nr_sense_close();
+  std::vector<std::string> rs;
+  for (const auto &s : s3_lines(sink.rec)) { if (s.find("\"type\":\"rs\"")!=std::string::npos) rs.push_back(s); }
+  ASSERT_EQ(rs.size(),4u);
+  EXPECT_NE(rs[0].find("valid_cfr_prbs"),std::string::npos); EXPECT_EQ(rs[1].find("valid_cfr_prbs"),std::string::npos);
+  EXPECT_NE(rs[2].find("valid_cfr_prbs"),std::string::npos); EXPECT_EQ(rs[3].find("valid_cfr_prbs"),std::string::npos);
+  for (int i : {0,1}) EXPECT_NE(rs[i].find("\"dir\":\"DL\""),std::string::npos) << rs[i];
+  for (int i : {2,3}) EXPECT_NE(rs[i].find("\"dir\":\"UL\""),std::string::npos) << rs[i];
+}
+
+TEST(SenseRecordsS3, ReconMaskJoinsPrbValidity)
+{
+  const S3Cfr c=s3_cfr(20,4.f);
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_isac_sense_min_prb_set(11);
+  S3Sink sink;
+  nr_sense_rs_meta_t half=s3_meta(0x1234,7); half.recon_valid=true; half.q.recon_conf=0.6f; half.recon_prb_ok[0]=0xff; half.recon_prb_ok[1]=0x03; /* PRB 0..9 pass */
+  nr_sense_rs_meta_t none=s3_meta(0x1234,7);   /* no data-aided verdict: validity unchanged */
+  for (const nr_sense_rs_meta_t *m : {&half,&none}) {
+    const uint64_t id=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DATA,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),42,0,1.f,0,0,nullptr);
+    nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DATA,m,id);
+  }
+  nr_sense_close();
+  std::vector<std::string> rs;
+  for (const auto &s : s3_lines(sink.rec)) { if (s.find("\"type\":\"rs\"")!=std::string::npos) rs.push_back(s); }
+  ASSERT_EQ(rs.size(),2u);
+  EXPECT_NE(rs[0].find("\"valid_cfr_prbs\":10,"),std::string::npos) << rs[0];
+  EXPECT_NE(rs[0].find("\"valid_mask\":\"ff03\""),std::string::npos);
+  EXPECT_NE(rs[0].find("\"allocated_prbs\":20,"),std::string::npos);
+  EXPECT_NE(rs[0].find("\"wideband\":false"),std::string::npos) << "wideband follows the validity after (d)";
+  EXPECT_NE(rs[0].find("\"recon_conf\":0.600000024"),std::string::npos);
+  EXPECT_NE(rs[1].find("\"valid_cfr_prbs\":20,"),std::string::npos);
+  EXPECT_NE(rs[1].find("\"wideband\":true"),std::string::npos);
+  EXPECT_NE(rs[1].find("\"recon_conf\":null"),std::string::npos);
+}
+
+TEST(SenseRecordsS3, JobsQueuedBeforeTheirFrameAreProcessedKeepOrderAndGetQuality)
+{
+  const S3Cfr c=s3_cfr(20,4.f);
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  S3Sink sink(16);
+  nr_sense_test_pause_writer(true);   /* every job and frame is queued before the writer starts */
+  for (int i=0;i<6;i++) {
+    nr_sense_rs_meta_t m=s3_meta(0x1000+i,7); m.abs_slot=100+i;
+    const uint64_t id=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DMRS,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),100+i,0,1.f,0,0,nullptr);
+    ASSERT_NE(id,0u);
+    nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DMRS,&m,id);
+  }
+  nr_sense_test_pause_writer(false);
+  nr_sense_close();
+  std::vector<std::string> rs;
+  for (const auto &s : s3_lines(sink.rec)) { if (s.find("\"type\":\"rs\"")!=std::string::npos) rs.push_back(s); }
+  ASSERT_EQ(rs.size(),6u);
+  for (int i=0;i<6;i++) {
+    EXPECT_NE(rs[i].find("\"abs_slot\":"+std::to_string(100+i)+","),std::string::npos) << "order " << i;
+    EXPECT_NE(rs[i].find("\"valid_cfr_prbs\":20,"),std::string::npos) << i;
+  }
+}
+
+TEST(SenseRecordsS3, ProducersNeverBlockWhenTheWriterStalls)
+{
+  const S3Cfr c=s3_cfr(20,4.f);
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  S3Sink sink(2);
+  nr_sense_test_pause_writer(true);
+  const auto t0=std::chrono::steady_clock::now();
+  for (int i=0;i<300;i++) {
+    nr_sense_rs_meta_t m=s3_meta(0x1000,7);
+    const uint64_t id=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DMRS,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),i,0,1.f,0,0,nullptr);
+    nr_sense_emit_rs(NR_SENSE_SRC_PDSCH_DMRS,&m,id);
+  }
+  const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
+  nr_sense_stats_t st; nr_sense_stats(&st);
+  EXPECT_LT(ms,1000.0) << "producers returned without waiting for the stalled writer";
+  EXPECT_GT(st.cfr_dropped[NR_SENSE_SRC_PDSCH_DMRS],0u);   /* drops stay counted: ring semantics unchanged */
+  EXPECT_GT(st.rec_dropped,0u);
+  nr_sense_test_pause_writer(false);
+}
+
+TEST(SenseRecordsS3, JsonFallbackRecordCountsAsQualityMiss)
+{
+  const S3Cfr c=s3_cfr(20,4.f);
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  S3Sink sink;
+  std::string longname(300,'x');   /* >= 256: the binary job path is unavailable, the record is formatted on the pushing thread */
+  nr_sense_rs_meta_t m=s3_meta(0,7); m.csirs_resource=longname.c_str();
+  const uint64_t id=nr_sense_push_cfr(NR_SENSE_SRC_CSIRS,c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),42,0,1.f,0,0,nullptr);
+  nr_sense_emit_rs(NR_SENSE_SRC_CSIRS,&m,id);
+  nr_sense_stats_t st; nr_sense_stats(&st);
+  EXPECT_EQ(st.q_miss,1u);
+  nr_sense_close();
 }

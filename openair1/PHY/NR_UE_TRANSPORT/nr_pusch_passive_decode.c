@@ -32,6 +32,7 @@
 #include "nr_pusch_passive_decode.h"
 #include "nr_traffic_record.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
+#include "nr_sense_unit.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
 #include "PHY/MODULATION/nr_sfo_state.h" /* the receiver SFO (one provider, DL and UL) */
 #include "nr_pusch_ul_disc.h"
@@ -2600,6 +2601,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       double   pw = 0.0;
       double   ant_pw[PASSIVE_UL_MAX_ANT] = {0};
       const uint64_t t_sense_prod=nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS) ? nr_sense_now_ns() : 0;
+      const uint64_t uc_pusch = t_sense_prod ? nr_sense_unit_cpu_ns() : 0; /* per-unit cost (sensing mode): extraction + hand-off of the DM-RS CFR */
       /* TWO DIFFERENT SUBCARRIER CONVENTIONS, and mixing them is what this loop got wrong.
        *
        * nr_pusch_channel_estimation() writes ul_ch_estimates[..][symbolSize*symbol + n] with n
@@ -2678,6 +2680,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         nr_isac_submit_cfr_multi_meta(ul_slot_idx, 0.0f,
                                       NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
                                       ul_k, ul_l, nof_re, pvp->ul_dmrs_noise_var, &rs_meta);
+        if (uc_pusch)
+          nr_sense_unit_job(NR_UNIT_PUSCH_DMRS, g->rnti, nr_sense_unit_cpu_ns() - uc_pusch, 0, false, (uint16_t)g->num_rb, nr_sense_now_ns());
         /* Attribution uses a measured arrival estimate: actual FFT advance minus
          * final residual delay. It is not S34's applied-window metadata or UE TA. */
         if (nr_srs_passive_enabled())

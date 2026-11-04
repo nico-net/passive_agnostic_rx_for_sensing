@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_sense_records.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "common/utils/nr_cell.h"
 #include "nr_passive_cfg_epoch.h"
 #include "nr_passive_ue_ctx.h"
@@ -76,7 +77,7 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
   put(&j,"{\"schema\":2,\"type\":\"rs\"");
   common(&j,m->epoch,m->identity_gen,m->dedicated_epoch,(int64_t)m->abs_slot,m->frame,m->slot,
          m->t_mono_ns ? m->t_mono_ns : mono_ns(),m->rx_ts,m->pci);
-  quoted(&j,"source",names[src]); quoted(&j,"dir",ul ? "UL" : "DL");
+  quoted(&j,"source",names[src]); quoted(&j,"dir",ul ? "UL" : "DL"); /* same in every mode (spec: DL/UL); with q_valid it is the link-context direction */
   integer(&j,"rnti",src==NR_SENSE_SRC_SSB || src==NR_SENSE_SRC_CSIRS || !m->rnti ? -1 : m->rnti);
   integer(&j,"start_rb",m->start_rb); integer(&j,"nb_rb",m->nb_rb);
   integer(&j,"n_re",m->n_re);
@@ -136,6 +137,28 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
     integer(&j,"rar_rapid",m->prach_rar_rapid); integer(&j,"rar_ta",m->prach_rar_ta);
   }
   quoted(&j,"attribution",src==NR_SENSE_SRC_SRS?m->srs_attribution:NULL);
+  if (m->q_valid) { /* sensing mode, record with a CFR: quality + physical link context (spec 4.2); absent otherwise */
+    const nr_sense_quality_t *q=&m->q;
+    integer(&j,"allocated_prbs",q->allocated_prbs); integer(&j,"estimated_usable_prbs",q->estimated_usable_prbs);
+    integer(&j,"valid_cfr_prbs",q->valid_cfr_prbs);
+    int nb=(NR_SENSE_MAX_PRB+7)/8;
+    while (nb>0 && !q->valid_mask[nb-1]) nb--;   /* trailing zero bytes omitted; bit p = PRB first_prb+p */
+    put(&j,",\"valid_mask\":\"");
+    for (int i=0;i<nb;i++) put(&j,"%02x",q->valid_mask[i]);
+    put(&j,"\"");
+    integer(&j,"first_prb",q->first_prb);
+    real(&j,"snr_db_p50",q->snr_db_p50); real(&j,"snr_db_p10",q->snr_db_p10); real(&j,"resid_db",q->resid_db);
+    real(&j,"sym_consist",q->sym_consist); real(&j,"recon_conf",q->recon_conf);
+    put(&j,",\"wideband\":%s",m->wideband?"true":"false");
+    if (ul) put(&j,",\"tx\":\"rnti:%x\"",(unsigned)m->rnti);
+    else if (m->pci>=0) integer(&j,"tx",m->pci);
+    else put(&j,",\"tx\":null");
+    if (src==NR_SENSE_SRC_SSB && m->ssb_index>=0) integer(&j,"ssb_beam",m->ssb_index); else put(&j,",\"ssb_beam\":null");
+    if (m->identity_gen>=0 && m->dedicated_epoch>=0 && m->cfg_ref_ver>0)
+      put(&j,",\"cfg_ref\":\"%d.%d.%u\"",m->identity_gen,m->dedicated_epoch,m->cfg_ref_ver);
+    else put(&j,",\"cfg_ref\":null");
+    if (m->prg_valid) integer(&j,"prg_size",m->prg_size); else put(&j,",\"prg_size\":null");
+  }
   put(&j,"}");
   return j.bad ? -1 : (int)j.w;
 }
@@ -299,12 +322,17 @@ void nr_sense_emit_rs(nr_sense_src_t src, const nr_sense_rs_meta_t *in, uint64_t
   if (!m.stamp_valid) stamp(&m.epoch,&m.identity_gen,&m.dedicated_epoch);
   if (!m.t_mono_ns) m.t_mono_ns=mono_ns();
   stamp_rx_state(&m);
+  /* quality of the pushed CFR (sensing mode only): computed by the writer from the frame, never here (the pushing thread is an RX path) */
+  m.q_valid=false;
+  m.want_q=frame_id && nr_isac_mode()==NR_ISAC_MODE_SENSING;
+  m.min_prb=nr_isac_sense_min_prb();
   if ((!m.csirs_resource || strnlen(m.csirs_resource,256)<256) &&
       (!m.srs_attribution || strnlen(m.srs_attribution,256)<256)) {
     if (nr_sense_push_rs_binary(src,&m,frame_id)>=0) return;
   }
+  if (m.want_q) nr_sense_q_miss_note(); /* JSON fallback: formatted here without quality */
   const uint64_t t_rec=nr_sense_now_ns();
-  char line[2048];
+  char line[3072];
   if (nr_sense_rs_to_json(src,&m,frame_id,line,sizeof line)>0) nr_sense_push_record(line);
   nr_sense_cost_add(NR_SENSE_COST_REC,src,nr_sense_now_ns()-t_rec);
 }

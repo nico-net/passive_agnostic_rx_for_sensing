@@ -77,6 +77,14 @@ TEST(IsacMode, SensingDefaults)
   EXPECT_FALSE(o.narrowed);
 }
 
+TEST(IsacMode, SensingExplicitSourcesAllOutsideSetFallBack)
+{
+  nr_isac_mode_cfg_t o;
+  ASSERT_TRUE(nr_isac_mode_resolve("sensing", 1u << 20, -1, -1, &o)); // no valid source left: never 0 ("unset")
+  EXPECT_NE(o.sources, 0u);
+  EXPECT_TRUE(o.narrowed);
+}
+
 TEST(IsacMode, SensingNarrowedByExplicitSources)
 {
   nr_isac_mode_cfg_t o;
