@@ -83,6 +83,7 @@ typedef struct {
   nr_dci_bits_t hq_ring[HQ_RING]; /* DCIRV: this RNTI's last DCI 1_1 payloads (oldest overwritten) */
   uint32_t hq_cnt, rvmis;  /*   payloads seen; RV-rescue notes since the last re-selection */
   uint64_t hq_abs;         /*   slot of the last payload (duplicate candidates of one DCI) */
+  uint32_t hq_bad_prev;    /*   violations seen at the last re-selection (the alert fires when the count rises) */
   bool hrv_alert;          /*   traffic mode: a HARQ/RV violation was counted (nr_pdsch_solver_take_hrv_alert) */
   bool mcs_pos, promoted;  /*   a CRC pass at MCS > 0 happened; the solution has been allowed to seed the cell */
 } solver_rnti_t;
@@ -2005,7 +2006,8 @@ static void hq_reselect(solver_rnti_t *r, bool force)
   int n, bad;
   hq_score(r, r->rep, &n, &bad);
   const bool refuted = nr_pdsch_solver_hq_refuted(n, bad);
-  if (bad > 0) r->hrv_alert = true;
+  if ((uint32_t)bad > r->hq_bad_prev) r->hrv_alert = true; /* a NEW violation, not an old one still in the ring */
+  r->hq_bad_prev = (uint32_t)bad;
   LOG_A(PHY, "SENSING: PDSCH_SOLVER rnti=0x%04x HQSCORE layout %d: %d violations in %d grants (%s)%s\n", r->rnti, r->rep, bad, n,
         refuted ? "refuted" : "kept", force ? " [rv rescues]" : "");
   if (!refuted && !(force && bad > 0)) return;

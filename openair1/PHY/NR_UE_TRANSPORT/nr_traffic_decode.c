@@ -38,7 +38,7 @@ bool nr_traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_
   td_ent_t *e = ent(t, dir, rnti);
   if (!e->last_check_ns) e->last_check_ns = t_ns ? t_ns : 1;
   e->last_t_ns = t_ns;
-  const bool want = hrv_alert || ++e->grants >= NR_TRAFFIC_CHECK_EVERY_GRANTS || t_ns - e->last_check_ns >= NR_TRAFFIC_T_CHECK_NS;
+  const bool want = hrv_alert || ++e->grants >= NR_TRAFFIC_CHECK_EVERY_GRANTS || (t_ns > e->last_check_ns && t_ns - e->last_check_ns >= NR_TRAFFIC_T_CHECK_NS);
   pthread_mutex_unlock(&g_td_mu);
   return want;
 }

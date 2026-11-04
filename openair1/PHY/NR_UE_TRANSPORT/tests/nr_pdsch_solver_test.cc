@@ -2009,3 +2009,33 @@ TEST(PdschSolver, ReopenClearsSolution)
   EXPECT_EQ(nr_pdsch_solver_layout_state(0x7777, nullptr, nullptr), NR_LAYOUT_UNSOLVED);
   nr_pdsch_solver_reset();
 }
+
+namespace {
+// layout-blind HARQ reading of Dci(): ndi = bit 15, rv = bits 14..13, pid = bits 12..9
+bool hq_fn_plain(void *, uint16_t, nr_dci_bits_t p, uint8_t *ndi, uint8_t *rv, uint8_t *pid)
+{
+  *ndi = (uint8_t)((p.w[0] >> 15) & 1);
+  *rv = (uint8_t)((p.w[0] >> 13) & 3);
+  *pid = (uint8_t)((p.w[0] >> 9) & 15);
+  return true;
+}
+}
+TEST(PdschSolverRvc, HrvAlertFiresOncePerNewViolation)
+{
+  RvcSetup();
+  std::mt19937 rng(5);
+  const Cell c = RvcCell();
+  ASSERT_GT(SolveGrants(0x5266, c, 0, 16, 400, rng), 0);
+  nr_pdsch_solver_set_hq_fn(hq_fn_plain, nullptr);
+  const uint16_t r = 0x5266;
+  for (int g = 0; g < 48; g++) {
+    nr_dci_bits_t d = Dci(g, 0);
+    if (g == 20) d.w[0] |= 1ull << 13; // a new transmission read with rv 1: one violation
+    nr_pdsch_solver_note_dci(r, d, (uint64_t)g + 1);
+    if (g == 31) EXPECT_TRUE(nr_pdsch_solver_take_hrv_alert(r)) << "the violation entered the ring";
+    if (g == 47) EXPECT_FALSE(nr_pdsch_solver_take_hrv_alert(r)) << "same old violation: no new alert";
+  }
+  EXPECT_FALSE(nr_pdsch_solver_take_hrv_alert(r));
+  nr_pdsch_solver_set_hq_fn(nullptr, nullptr);
+  nr_pdsch_solver_reset();
+}
