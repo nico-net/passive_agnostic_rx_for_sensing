@@ -1,6 +1,6 @@
 # Addendum to the two-modes design: CRC-free parameter extraction (2026-11-04)
 
-Status: DRAFT, for operator review. Extends `2026-11-03-two-modes-design.md`. No code yet.
+Status: APPROVED by the operator 2026-11-04 (decisions in §9). Extends `2026-11-03-two-modes-design.md`. No code yet.
 
 ## 1. Why
 
@@ -112,7 +112,8 @@ parsed with no probe decode at all. Families are per cell and per DCI format, an
   - field consistency: constraint violations 0 on SOLVED layouts.
 - Never claim absolute DCI recall on DEIB.
 
-## 9. Open points for the operator
-- FDD cells lose the K1 TDD test; DAI and the other levels remain. Accept?
-- E4 makes traffic-mode PUSCH off by default. Accept?
-- Order: E1 -> E4 (quick load cut) -> E2 -> E3 -> E5, interleaved after the sensing plan or before it?
+## 9. Operator decisions (2026-11-04)
+- FDD is out of scope: the K1 TDD test may be relied on.
+- Traffic-mode PUSCH decode is off by default, because the UL payload is not needed for data collection.
+- Order: E1-E5 run before the sensing plan resumes. The goal is a perfect traffic mode. The sensing tasks already
+  done (S1, S2) wait.
