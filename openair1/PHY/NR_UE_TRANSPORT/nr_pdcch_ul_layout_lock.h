@@ -164,6 +164,7 @@ int nr_ul_layout_hyp_list_ref(uint16_t rnti, uint16_t len, nr_dci_bits_t payload
                               uint32_t *total, uint32_t *next);
 extern void (*nr_ul_layout_hyp_list_gap_hook)(void);
 uint64_t nr_ul_layout_hyp_list_discarded(void);
+bool nr_ul_layout_test_tp_tail_to_walked(uint16_t len);
 void nr_ul_layout_test_tp_counters(uint16_t len, uint32_t *ill, uint32_t *ok, uint64_t *spec);
 /* a reset or re-fit during the unlocked walk discards it once and retries once; a second discard returns 0 */
 void nr_ul_layout_trial_add(const nr_pdcch_blind_ul_result_t *g, uint32_t n);

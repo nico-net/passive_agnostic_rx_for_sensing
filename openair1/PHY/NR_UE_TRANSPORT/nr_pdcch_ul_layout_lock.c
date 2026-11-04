@@ -1799,6 +1799,24 @@ int nr_ul_layout_hyp_list(uint16_t rnti, uint16_t len, nr_dci_bits_t payload, ui
   return n;
 }
 
+/* test only: move the first transform-precoding tail of length `len` to position 1, so that the two tails nr_ul_layout_hyp_list walks include one (the fit orders
+ * tails by prior cost and the cheap CP-OFDM readings of every generator length fill the first two). Returns true if there is a TP tail. */
+bool nr_ul_layout_test_tp_tail_to_walked(uint16_t len)
+{
+  bool found = false;
+  nr_lockhold_lock(&g_mu_lh, &g_mu, __func__, __LINE__);
+  for (int l = 0; l < g_nlen; l++) if (g_len[l].len == len) {
+    len_state_t *ls = &g_len[l];
+    for (int t = 0; t < ls->ntail && !found; t++)
+      if (ls->tail[t].tp) {
+        found = true;
+        if (t > 1) { const nr_ul_layout_tail_t x = ls->tail[t]; ls->tail[t] = ls->tail[1]; ls->tail[1] = x; }
+      }
+  }
+  nr_lockhold_unlock(&g_mu_lh, &g_mu, "ullayout");
+  return found;
+}
+
 /* test only: the tp counters of length `len` and g_tp_spec_refuted */
 void nr_ul_layout_test_tp_counters(uint16_t len, uint32_t *ill, uint32_t *ok, uint64_t *spec)
 {
