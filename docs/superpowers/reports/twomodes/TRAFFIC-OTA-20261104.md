@@ -128,3 +128,79 @@ Solved RNTIs: n/a (not comparable), excluded from the failed-bound count. Field 
 - Live traffic differs run to run (3 runs per arm, bursty drops), so means/sd of drops are weak; use the per-run lines.
 - 415: 1_1 was absent in 5 of 6 T runs (only fixed 1_0 records); "no 1_1 traffic" cannot be told from "no dedicated CORESET discovered" with these data.
 - Frozen check (sens6): exit 0.
+
+## Daytime repeat 2026-11-04 08:00-09:33 [MEASURED OTA], build 4759260bbf (final fixes; early start off in traffic mode)
+
+Campaign /home/nicola/NICOLA/ota_runs/tm_ota_20261104_080000, 18/18 runs pci=OK, no assert/segfault. Run folders may embed a newer git hash: the binary was not rebuilt during the campaign (heavy.lock held exclusive).
+
+```
+
+== case B cell PCI 415: L runs=3 T runs=3
+  queued    L mean=315602.3 sd=4342.3 | T mean=319244.3 sd=1347.3
+  solved    L mean=46.0 sd=24.2 | T mean=67.3 sd=29.7
+  drop      L mean=120604.3 sd=103271.0 | T mean=89343.3 sd=121914.2
+  drop_pct  L mean=38.0 sd=32.4 | T mean=27.9 sd=38.0
+  cpu       L mean=11.5 sd=0.5 | T mean=11.4 sd=0.9
+  emit_p99  L mean=n/a sd=n/a | T mean=28.7 sd=6.4
+  per-run L: q=310596 drop=25436 (8.2%) cpu=11.287; q=318347 drop=105962 (33.3%) cpu=12.131; q=317864 drop=230415 (72.5%) cpu=11.145
+  per-run T: q=318456 drop=20156 (6.3%) cpu=11.764; q=320800 drop=230111 (71.7%) cpu=10.322; q=318477 drop=17763 (5.6%) cpu=11.969
+  rec_lost==0            PASS lost=[0, 0, 0]
+  solved RNTIs           n/a  n/a (not comparable); T=67.3 L=46.0 info
+  scanq drop_pct<=L+sd   PASS T=27.9% L=38.0% sd=32.4
+  cpu T<L-sd             FAIL T=11.4 L=11.5 sd=0.5 cores (process)
+  field agreement>=99%   n/a  n/a OTA
+
+== case B cell PCI 923: L runs=3 T runs=3
+  queued    L mean=314111.7 sd=5528.0 | T mean=318956.0 sd=933.6
+  solved    L mean=56.0 sd=9.0 | T mean=60.0 sd=4.6
+  drop      L mean=78605.0 sd=50459.6 | T mean=38221.0 sd=13165.3
+  drop_pct  L mean=24.8 sd=15.8 | T mean=12.0 sd=4.1
+  cpu       L mean=11.5 sd=0.5 | T mean=11.4 sd=0.9
+  emit_p99  L mean=n/a sd=n/a | T mean=31.0 sd=4.0
+  per-run L: q=307764 drop=20352 (6.6%) cpu=11.287; q=317868 drop=108784 (34.2%) cpu=12.131; q=316703 drop=106679 (33.7%) cpu=11.145
+  per-run T: q=318407 drop=23095 (7.3%) cpu=11.764; q=320034 drop=47099 (14.7%) cpu=10.322; q=318427 drop=44469 (14.0%) cpu=11.969
+  rec_lost==0            PASS lost=[0, 0, 0]
+  solved RNTIs           n/a  n/a (not comparable); T=60.0 L=56.0 info
+  scanq drop_pct<=L+sd   PASS T=12.0% L=24.8% sd=15.8
+  cpu T<L-sd             FAIL T=11.4 L=11.5 sd=0.5 cores (process)
+  field agreement>=99%   n/a  n/a OTA
+
+== case S415 cell PCI 415: L runs=3 T runs=3
+  queued    L mean=336586.0 sd=867.8 | T mean=336060.0 sd=29.3
+  solved    L mean=128.0 sd=54.1 | T mean=157.7 sd=14.8
+  drop      L mean=58655.7 sd=100860.2 | T mean=90.3 sd=58.9
+  drop_pct  L mean=17.4 sd=29.9 | T mean=0.0 sd=0.0
+  cpu       L mean=6.6 sd=0.7 | T mean=6.7 sd=0.1
+  emit_p99  L mean=n/a sd=n/a | T mean=14.3 sd=0.6
+  per-run L: q=337588 drop=175119 (51.9%) cpu=5.778; q=336089 drop=371 (0.1%) cpu=6.942; q=336081 drop=477 (0.1%) cpu=7.096
+  per-run T: q=336050 drop=28 (0.0%) cpu=6.772; q=336093 drop=145 (0.0%) cpu=6.643; q=336037 drop=98 (0.0%) cpu=6.687
+  rec_lost==0            PASS lost=[0, 0, 0]
+  solved RNTIs           n/a  n/a (not comparable); T=157.7 L=128.0 info
+  scanq drop_pct<=L+sd   PASS T=0.0% L=17.4% sd=29.9
+  cpu T<L-sd             FAIL T=6.7 L=6.6 sd=0.7 cores (process)
+  field agreement>=99%   n/a  n/a OTA
+
+== case S923 cell PCI 923: L runs=3 T runs=3
+  queued    L mean=336050.7 sd=3.2 | T mean=336054.3 sd=1.5
+  solved    L mean=89.0 sd=6.9 | T mean=103.3 sd=6.5
+  drop      L mean=8210.0 sd=6175.3 | T mean=362.7 sd=142.8
+  drop_pct  L mean=2.4 sd=1.8 | T mean=0.1 sd=0.0
+  cpu       L mean=7.6 sd=0.1 | T mean=7.4 sd=0.1
+  emit_p99  L mean=n/a sd=n/a | T mean=13.7 sd=1.5
+  per-run L: q=336053 drop=7864 (2.3%) cpu=7.629; q=336047 drop=14551 (4.3%) cpu=7.644; q=336052 drop=2215 (0.7%) cpu=7.447
+  per-run T: q=336053 drop=330 (0.1%) cpu=7.511; q=336056 drop=519 (0.2%) cpu=7.289; q=336054 drop=239 (0.1%) cpu=7.495
+  rec_lost==0            PASS lost=[0, 0, 0]
+  solved RNTIs           n/a  n/a (not comparable); T=103.3 L=89.0 info
+  scanq drop_pct<=L+sd   PASS T=0.1% L=2.4% sd=1.8
+  cpu T<L-sd             PASS T=7.4 L=7.6 sd=0.1 cores (process)
+  field agreement>=99%   n/a  n/a OTA
+
+failed bounds: 3
+```
+
+Reading (per cell, not merged):
+- Records: accepted == generated and lost == 0 in every T cell-run.
+- scanq_queued now equal across arms (early start off in T), so drop_pct compares like for like.
+- Single cells: T scan drop_pct 0.0-0.1 %; L 0.1-51.9 % (bursty).
+- Pair: both arms overloaded (process ~11.5 cores); drop_pct T 6-72 % vs L 7-73 % on 415, T 7-15 % vs L 7-34 % on 923.
+- CPU: T is not cheaper than L (S923 -0.2 cores; others within sd). Failed bounds: 3, all cpu T<L-sd. Cause not measured.
