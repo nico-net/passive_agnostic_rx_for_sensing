@@ -112,6 +112,7 @@ typedef struct {
    * (nr_sense_unit_cell_stats); ss_*: the process-wide scheduler (one thread for every cell), repeated in each cell's line, never summed across cells. */
   int has_sense_sched;
   uint64_t su_units_enabled, su_violations, su_disabled_skips, su_wb_valid, su_wb_valid_prbs, su_gap_max_ms;
+  uint64_t su_floor_prb, su_cont_gap_p95_ms; int su_in_gap; /* S9: this cell's continuity floor T_cell (PRBs; 0 = no decision yet), its p95 gap between valid CFRs at T_cell, whether it was in a gap */
   uint64_t ss_decisions, ss_enables, ss_disables, ss_bad_cap, ss_deferrals;
   int ss_binding; /* nr_res_id_t of the last decision, -1 = none yet */
   uint64_t dci_rec_generated, dci_rec_persisted, dci_rec_lost;

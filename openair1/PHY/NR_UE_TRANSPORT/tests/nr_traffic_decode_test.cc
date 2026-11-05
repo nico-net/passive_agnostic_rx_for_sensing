@@ -5,6 +5,7 @@ extern "C" {
 #include "nr_traffic_decode.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_sense_unit.h"
+#include "nr_sense_sched.h"
 #include "common/utils/nr_cell.h"
 #include "nr_pdcch_blind_monitor.h"
 }
@@ -264,23 +265,84 @@ TEST(TrafficDecode, SensingWidebandGrantsAreDecodedWhateverTheUnitSaysOnlyTheExp
   nr_sense_unit_reset(0);
   nr_cell_bind(0);
   /* a disabled unit: every wideband grant is decoded (FIXED layout, no traffic policy would), the export gate stays closed */
-  for (int i = 0; i < 100; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(0, 0x3001, C, NR_LAYOUT_FIXED, false, S + i, false, 200)) << i;
+  for (int i = 0; i < 100; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(0, 0x3001, C, NR_LAYOUT_FIXED, false, S + i, false, 200, true)) << i;
   EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x3001, 200));
   nr_sense_unit_cell_stats_t cs;
   nr_sense_unit_cell_stats(0, &cs);
   EXPECT_EQ(cs.skips, 1u);
   /* UL too */
-  for (int i = 0; i < 40; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(1, 0x3001, C, NR_LAYOUT_SOLVED, true, S + i, false, 200)) << i;
+  for (int i = 0; i < 40; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(1, 0x3001, C, NR_LAYOUT_SOLVED, true, S + i, false, 200, true)) << i;
   /* narrow grants of the same disabled unit follow the traffic policy + the 1-in-32 sample */
   int n = 0;
-  for (int i = 0; i < 64; i++) n += nr_traffic_decode_wanted_prbs(0, 0x3002, C, NR_LAYOUT_FIXED, false, S + i, false, 50);
+  for (int i = 0; i < 64; i++) n += nr_traffic_decode_wanted_prbs(0, 0x3002, C, NR_LAYOUT_FIXED, false, S + i, false, 50, true);
   EXPECT_EQ(n, 2);
   /* an enabled unit decodes narrow grants too and exports */
   nr_sense_unit_set_enabled(0, 0x3002, NR_UNIT_PDSCH_DATA, true);
-  for (int i = 0; i < 40; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(0, 0x3002, C, NR_LAYOUT_FIXED, false, S + i, false, 50));
+  for (int i = 0; i < 40; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(0, 0x3002, C, NR_LAYOUT_FIXED, false, S + i, false, 50, true));
   EXPECT_TRUE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x3002, 50));
   nr_sense_unit_reset(0);
   nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}
+TEST(TrafficDecode, UnprovenLayoutNotForceDecoded)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_isac_sense_min_prb_set(128);
+  nr_sense_cell_floor_reset();
+  nr_sense_unit_reset(0);
+  nr_cell_bind(0);
+  /* wide grants of an unproven RNTI follow the normal policy (DL: CANDIDATE is not decoded; 1 in 32 sampled), proven ones are always decoded */
+  int n = 0;
+  for (int i = 0; i < 64; i++) n += nr_traffic_decode_wanted_prbs(0, 0x3101, C, NR_LAYOUT_CANDIDATE, false, S + i, false, 200, false);
+  EXPECT_EQ(n, 2);
+  for (int i = 0; i < 64; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(0, 0x3102, C, NR_LAYOUT_SOLVED, false, S + i, false, 200, true));
+  nr_sense_unit_reset(0);
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}
+TEST(TrafficDecode, FloorOfTheCellSetsTheWideRule)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_isac_sense_min_prb_set(128);
+  nr_sense_cell_floor_reset();
+  nr_sense_unit_reset(0);
+  nr_cell_bind(0);
+  EXPECT_EQ(nr_sense_cell_floor(0), 128);
+  int n = 0;
+  for (int i = 0; i < 64; i++) n += nr_traffic_decode_wanted_prbs(0, 0x3103, C, NR_LAYOUT_FIXED, false, S + i, false, 70, true); /* 70 < 128: narrow, 1 in 32 */
+  EXPECT_EQ(n, 2);
+  nr_sense_cell_floor_publish(0, 64);
+  for (int i = 0; i < 64; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(0, 0x3104, C, NR_LAYOUT_FIXED, false, S + i, false, 70, true)); /* 70 >= T_cell = 64 */
+  nr_sense_cell_floor_publish(0, 96);
+  n = 0;
+  for (int i = 0; i < 64; i++) n += nr_traffic_decode_wanted_prbs(0, 0x3105, C, NR_LAYOUT_FIXED, false, S + i, false, 70, true);
+  EXPECT_EQ(n, 2);
+  nr_sense_cell_floor_reset();
+  nr_sense_unit_reset(0);
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}
+TEST(TrafficDecode, LegacyAndTrafficIgnoreTheFloor)
+{
+  nr_sense_cell_floor_publish(0, 32);
+  for (nr_isac_mode_t m : {NR_ISAC_MODE_LEGACY, NR_ISAC_MODE_TRAFFIC}) {
+    nr_isac_mode_set(m);
+    nr_traffic_decode_reset();
+    int a = 0, b = 0;
+    for (int i = 0; i < 64; i++) { a += nr_traffic_decode_wanted_prbs(0, 0x3106, C, NR_LAYOUT_FIXED, false, S + i, false, 200, true); b += nr_traffic_decode_wanted(0, 0x3107, C, NR_LAYOUT_FIXED, false, S + i, false); }
+    EXPECT_EQ(a, b) << m; /* same policy with or without the PRB count */
+    EXPECT_LE(a, 2) << m; /* FIXED layout: only the periodic check */
+  }
+  nr_sense_cell_floor_reset();
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}
+TEST(TrafficDecode, LargestFirstOrder)
+{
+  const uint16_t prb[6] = {40, 200, 40, 128, 200, 10};
+  int ord[6];
+  ASSERT_EQ(nr_sense_order_largest_first(prb, 6, ord), 6);
+  const int want[6] = {1, 4, 3, 0, 2, 5}; /* descending, ties keep the original order */
+  for (int i = 0; i < 6; i++) EXPECT_EQ(ord[i], want[i]) << i;
+  int one[1];
+  ASSERT_EQ(nr_sense_order_largest_first(prb, 1, one), 1);
+  EXPECT_EQ(one[0], 0);
 }
 TEST(TrafficDecode, DecodeStageIsBaselineNotUnitCost)
 {
@@ -307,10 +369,10 @@ TEST(TrafficDecode, SensingSolvedRntiDecodeFeedbackKeepsTheOneIn32Rate)
   nr_cell_bind(0);
   int n = 0, nw = 0;
   for (int i = 0; i < 64; i++) {
-    const bool w = nr_traffic_decode_wanted_prbs(0, 0x2101, C, NR_LAYOUT_SOLVED, false, S + i, false, 20); /* narrow grant, disabled unit */
+    const bool w = nr_traffic_decode_wanted_prbs(0, 0x2101, C, NR_LAYOUT_SOLVED, false, S + i, false, 20, true); /* narrow grant, disabled unit */
     n += w;
     if (w) nr_traffic_decode_feedback(0x2101, 0, false, 0, 1, NAN); /* the decode's CRC verdict (I1) */
-    nw += nr_traffic_decode_wanted_prbs(0, 0x2102, C, NR_LAYOUT_SOLVED, false, S + i, false, 200); /* wideband rule unaffected */
+    nw += nr_traffic_decode_wanted_prbs(0, 0x2102, C, NR_LAYOUT_SOLVED, false, S + i, false, 200, true); /* wideband rule unaffected */
   }
   EXPECT_LE(n, 3);
   EXPECT_GE(n, 2);
@@ -323,10 +385,10 @@ TEST(TrafficDecode, DecodeResetRestartsTheGrantCounter)
   nr_isac_mode_set(NR_ISAC_MODE_SENSING);
   nr_sense_unit_reset(0);
   nr_cell_bind(0);
-  for (int i = 0; i < 31; i++) EXPECT_FALSE(nr_traffic_decode_wanted_prbs(0, 0x2103, C, NR_LAYOUT_SOLVED, false, S, false, 20)) << i;
+  for (int i = 0; i < 31; i++) EXPECT_FALSE(nr_traffic_decode_wanted_prbs(0, 0x2103, C, NR_LAYOUT_SOLVED, false, S, false, 20, true)) << i;
   nr_traffic_decode_reset(); /* new cell identity (I2): RNTI reuse starts from zero */
   int n = 0;
-  for (int i = 0; i < 31; i++) n += nr_traffic_decode_wanted_prbs(0, 0x2103, C, NR_LAYOUT_SOLVED, false, S, false, 20);
+  for (int i = 0; i < 31; i++) n += nr_traffic_decode_wanted_prbs(0, 0x2103, C, NR_LAYOUT_SOLVED, false, S, false, 20, true);
   EXPECT_EQ(n, 0);
   nr_sense_unit_reset(0);
   nr_isac_mode_set(NR_ISAC_MODE_LEGACY);

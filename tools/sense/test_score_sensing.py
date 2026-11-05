@@ -65,6 +65,8 @@ class Availability(Base):
         a = r["cells"][0]["availability"]
         self.assertEqual((a["w100ms"]["windows"], a["w100ms"]["covered"]), (26, 3))  # idx 0, 9, 25 of 0..25
         self.assertAlmostEqual(a["w100ms"]["fraction"], 3 / 26)
+        self.assertEqual((a["w25ms"]["windows"], a["w25ms"]["covered"]), (101, 4))   # idx 0, 2, 38, 100 of 0..100
+        self.assertAlmostEqual(a["w25ms"]["fraction"], 4 / 101)
         self.assertEqual((a["w1s"]["windows"], a["w1s"]["covered"]), (3, 2))         # idx 0 and 2 of 0..2
         self.assertAlmostEqual(a["w1s"]["fraction"], 2 / 3)
         self.assertEqual(r["aggregate"]["availability"]["w1s"]["covered"], 2)

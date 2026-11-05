@@ -1,7 +1,9 @@
 /* Sensing-mode unit scheduler decision (spec 2026-11-03-two-modes-design.md section 5, plan Task S6). Pure: no threads, no I/O, no allocation.
  * The caller (S7) snapshots the units, calls nr_sense_sched_decide() every SENSE_DECIDE_NS and applies st->enabled with nr_sense_unit_set_enabled(). */
 #include "nr_sense_sched.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include <math.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,6 +16,53 @@ typedef struct {
   double val, rank, snr, dem[NR_RES_N];
   bool elig, cold, enabled, want, removed, viol, holdoff;
 } cand_t;
+
+static _Atomic int g_cell_floor[NR_SENSE_CELLS];
+int nr_sense_cell_floor(int cell)
+{
+  const int v = (unsigned)cell < NR_SENSE_CELLS ? atomic_load_explicit(&g_cell_floor[cell], memory_order_relaxed) : 0;
+  return v > 0 ? v : nr_isac_sense_min_prb();
+}
+void nr_sense_cell_floor_publish(int cell, int prbs) { if ((unsigned)cell < NR_SENSE_CELLS) atomic_store_explicit(&g_cell_floor[cell], prbs, memory_order_relaxed); }
+void nr_sense_cell_floor_reset(void) { for (int c = 0; c < NR_SENSE_CELLS; c++) atomic_store_explicit(&g_cell_floor[c], 0, memory_order_relaxed); }
+
+int nr_sense_floor_steps(int min_prb, int floor_prb, int *steps)
+{
+  static const int mid[] = {96, 64, 48};
+  int n = 0;
+  steps[n++] = min_prb;
+  for (unsigned i = 0; i < sizeof mid / sizeof mid[0]; i++)
+    if (mid[i] < steps[n - 1] && mid[i] > floor_prb) steps[n++] = mid[i];
+  if (floor_prb < steps[n - 1]) steps[n++] = floor_prb;
+  return n;
+}
+
+/* One decision of the floor of cell c (state in st, data in in). Down: p95 gap at T_cell above the target, SENSE_CONFIRM decisions in a row. Up: the stream at the next higher step
+ * has SENSE_FLOOR_UP_MARGIN x the rate its p95 needs, the cell is not in a gap, SENSE_CONFIRM in a row, and SENSE_FLOOR_UP_HOLD decisions passed since a step down. */
+static void floor_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *st, nr_sense_sched_out_t *out, int c)
+{
+  int steps[SENSE_FLOOR_MAX_STEPS];
+  const int n = nr_sense_floor_steps(in->min_prb, in->floor_prb, steps);
+  if (st->fl_idx[c] >= n) st->fl_idx[c] = (uint8_t)(n - 1);
+  if (st->fl_hold[c]) st->fl_hold[c]--;
+  int idx = st->fl_idx[c];
+  if (in->cont_target_ns && in->gap_valid[c]) {
+    const double tgt_s = (double)in->cont_target_ns * 1e-9;
+    const bool gap = in->gap[c][idx].p95_gap_ns > in->cont_target_ns;
+    const bool dn = gap && idx + 1 < n;
+    const bool up = !gap && idx > 0 && !st->fl_hold[c] && (double)in->gap[c][idx - 1].rate_hz * tgt_s >= SENSE_FLOOR_UP_MARGIN * SENSE_FLOOR_P95_K;
+    st->fl_dn[c] = dn ? (uint8_t)(st->fl_dn[c] < 255 ? st->fl_dn[c] + 1 : 255) : 0;
+    st->fl_up[c] = up ? (uint8_t)(st->fl_up[c] < 255 ? st->fl_up[c] + 1 : 255) : 0;
+    if (st->fl_dn[c] >= SENSE_CONFIRM) { idx++; st->fl_hold[c] = SENSE_FLOOR_UP_HOLD; st->fl_dn[c] = st->fl_up[c] = 0; }
+    else if (st->fl_up[c] >= SENSE_CONFIRM) { idx--; st->fl_dn[c] = st->fl_up[c] = 0; }
+    st->fl_idx[c] = (uint8_t)idx;
+    out->in_gap[c] = gap;
+    out->gap_p95_ns[c] = in->gap[c][idx].p95_gap_ns;
+  } else {
+    st->fl_dn[c] = st->fl_up[c] = 0;
+  }
+  out->floor_prb[c] = steps[idx];
+}
 
 static bool uses(nr_unit_src_t s, int r)
 {
@@ -120,6 +169,8 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       else budget[c][r] = av > 0 ? av * (1.0 - SENSE_HEADROOM) : 0.0;
     }
 
+  for (int c = 0; c < nc; c++) floor_decide(in, st, out, c);
+
   for (int c = 0; c < nc; c++) {
     /* PCI level: last valid wideband CFR of any unit of the cell, kept in the state because units come and go */
     uint64_t mx = 0, first = 0;
@@ -164,7 +215,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       }
       if (st->holdoff[c][sl][v->src]) { k->holdoff = true; st->holdoff[c][sl][v->src]--; }
       k->snr = v->snr_db;
-      k->rank = k->val * (k->enabled ? INCUMBENT : 1.0);
+      k->rank = k->val * (k->enabled ? INCUMBENT : 1.0) * (out->in_gap[c] ? SENSE_GAP_PREC : 1.0);
       /* violations since the last decision; the counters restart from 0 when the row was re-created */
       uint32_t dv = v->violations;
       if (st->known[c][sl][v->src] && st->gen[c][sl][v->src] == v->gen && v->violations >= st->viol[c][sl][v->src]) dv = v->violations - st->viol[c][sl][v->src];

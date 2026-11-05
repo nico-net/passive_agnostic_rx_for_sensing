@@ -5,7 +5,7 @@ One records file per cell. Reads the `type":"rs"` lines of sensing mode (nr_sens
 scored only when it carries the quality block (valid_cfr_prbs). A CFR is wideband when valid_cfr_prbs >= --min-prb
 (the record's own `wideband` flag is ignored so the threshold can be re-cut offline). Metrics are per cell (PCI) and per
 link = (dir, tx, layer/n_layers, prg_size); links are never pooled, cells are never merged. The aggregate is its own
-line. Windows are 100 ms and 1 s on a grid starting at the earliest scored record of the whole run (one process, one
+line. Windows are 25 ms (the continuity target, plan S9), 100 ms and 1 s on a grid starting at the earliest scored record of the whole run (one process, one
 monotonic clock; files whose time ranges neither chain-overlap nor fit in 2x the longest file are refused unless
 --allow-mixed-clocks; a combined span over 24 h is always refused). Availability and PRBs/s of every link use this
 run-wide grid/span, not the link's own span. A link is keyed by (dir, tx, layer, n_layers, prg_size, ssb_beam,
@@ -14,7 +14,7 @@ known ones. The occupancy map rows are absolute-second aligned (floor(t_mono_ns/
 import argparse, json, math, os, re, sys
 from array import array
 
-W100, W1S = 100_000_000, 1_000_000_000
+W25, W100, W1S = 25_000_000, 100_000_000, 1_000_000_000
 HIST_BIN = 32
 
 def pct(v, p):
@@ -100,7 +100,7 @@ def cover(times, t0, n, w):
 
 def avail(times, t0, tmax):
     out = {}
-    for name, w in (("w100ms", W100), ("w1s", W1S)):
+    for name, w in (("w25ms", W25), ("w100ms", W100), ("w1s", W1S)):
         n = (tmax - t0) // w + 1 if tmax is not None else 0
         c = len(cover(times, t0, n, w)) if n else 0
         out[name] = {"windows": n, "covered": c, "fraction": c / n if n else None}
@@ -216,17 +216,17 @@ def report(res):
     for c in res["cells"]:
         a = c["availability"]
         p(f"pci {c['label']}: produced={c['n_produced']} wideband={c['n_wideband']} gap p50/p95/max={f3(c['gap_s']['p50'])}/"
-          f"{f3(c['gap_s']['p95'])}/{f3(c['gap_s']['max'])} s avail100ms={f3(a['w100ms']['fraction'])} avail1s={f3(a['w1s']['fraction'])}")
+          f"{f3(c['gap_s']['p95'])}/{f3(c['gap_s']['max'])} s avail25ms={f3(a['w25ms']['fraction'])} avail100ms={f3(a['w100ms']['fraction'])} avail1s={f3(a['w1s']['fraction'])}")
         for l in c["links"]:
             g = l["gap_s"]
             p(f"  link {l['dir']} tx={l['tx']} layer={l['layer']}/{l['n_layers']} prg={l['prg_size']}: produced={l['n_produced']} "
-              f"wb={l['n_wideband']} gap={f3(g['p50'])}/{f3(g['p95'])}/{f3(g['max'])} avail100ms={f3(l['availability']['w100ms']['fraction'])} "
+              f"wb={l['n_wideband']} gap={f3(g['p50'])}/{f3(g['p95'])}/{f3(g['max'])} avail25ms={f3(l['availability']['w25ms']['fraction'])} avail100ms={f3(l['availability']['w100ms']['fraction'])} "
               f"avail1s={f3(l['availability']['w1s']['fraction'])} PRB/s wb={f3(l['valid_prbs_per_s_wideband'])} "
               f"snr_p50={f3(l['snr_db_p50']['p50'])} resid_p50={f3(l['resid_db']['p50'])} recon_p50={f3(l['recon_conf']['p50'])} "
               f"valid_rate={f3(l['valid_cfr_rate'])} hist={l['valid_cfr_prbs_hist']}")
     a = res["aggregate"]
     p(f"AGGREGATE (union of cells): wb={a['n_wideband']} gap p50/p95/max={f3(a['gap_s']['p50'])}/{f3(a['gap_s']['p95'])}/"
-      f"{f3(a['gap_s']['max'])} s avail100ms={f3(a['availability']['w100ms']['fraction'])} avail1s={f3(a['availability']['w1s']['fraction'])} "
+      f"{f3(a['gap_s']['max'])} s avail25ms={f3(a['availability']['w25ms']['fraction'])} avail100ms={f3(a['availability']['w100ms']['fraction'])} avail1s={f3(a['availability']['w1s']['fraction'])} "
       f"rescue_fraction={f3(a['rescue_fraction'])} rescue_split={a['rescue_split']}")
 
 def main(argv=None):

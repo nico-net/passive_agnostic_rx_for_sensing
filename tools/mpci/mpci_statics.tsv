@@ -746,6 +746,8 @@ openair1/PHY/NR_UE_ISAC/nr_isac.cc	87	legacy_keys	global	const struct {}[]	CONST
 openair1/PHY/NR_UE_ISAC/nr_isac.cc	244	source_map	global	constexpr nr_sense_src_t[]	CONST	CELLFEAT	auto
 openair1/PHY/NR_UE_ISAC/nr_isac_mode.c	4	g_mode	file_static	nr_isac_mode_t	PROCESS	CELLFEAT	twomodes: process-wide ISAC mode, written once by nr_isac_init before any reader thread
 openair1/PHY/NR_UE_ISAC/nr_isac_mode.c	10	g_min_prb	file_static	int	PROCESS	CELLFEAT	twomodes: process-wide ISAC mode, written once by nr_isac_init before any reader thread
+openair1/PHY/NR_UE_ISAC/nr_isac_mode.c	20	g_min_prb_floor	file_static	int	PROCESS	CELLFEAT	twomodes S9: process-wide sensing key, written once by nr_isac_init before any reader thread
+openair1/PHY/NR_UE_ISAC/nr_isac_mode.c	20	g_cont_target_ms	file_static	int	PROCESS	CELLFEAT	twomodes S9: process-wide sensing key, written once by nr_isac_init before any reader thread
 openair1/PHY/NR_UE_TRANSPORT/csi_rx.c	39	csirs_scratch::buf	tls	struct {}[4]	TLS	AUDIT	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/csi_rx.c	58	csirs_ports_fit::warned	tls	int	TLS	AUDIT	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/csi_rx.c	667	nr_csi_rs_pmi_estimation::phase8	func_static	const c16_t[8]	CONST	AUDIT	auto
@@ -3333,6 +3335,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	31	g_binding	file_static	_Atomi
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	33	g_thread	file_static	pthread_t	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): process-wide counter / lifecycle flag, atomics, read by the metrics of any cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	34	g_running	file_static	_Atomic int	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): process-wide counter / lifecycle flag, atomics, read by the metrics of any cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	35	g_stop	file_static	_Atomic int	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): process-wide counter / lifecycle flag, atomics, read by the metrics of any cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched.c	20	g_cell_floor	file_static	_Atomic int[NR_SENSE_CELLS]	PROCESS	CELLFEAT	twomodes S9: T_cell per cell, indexed by cell, written by the one scheduler thread, read lock-free by any thread
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched.c	31	nr_sense_floor_steps::mid	func_static	const int[]	CONST	CELLFEAT	twomodes S9: constant step table
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	45	g_floor_log	file_static	struct {}[NR_SENSE_CELLS]	PROCESS	CELLFEAT	twomodes S9: last decision per cell for ISAC_METRICS, written by the one scheduler thread (display only)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	38	g_prev	file_static	struct {}	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): process-wide state, touched by that thread only (tests call step() alone)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	51	protected_total::ps	func_static	nr_pool_stats_t	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): scratch copy of the pool statistics, scheduler thread only
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	175	nr_sense_sched_step::in	func_static	nr_sense_sched_in_t	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): process-wide state, touched by that thread only (tests call step() alone)

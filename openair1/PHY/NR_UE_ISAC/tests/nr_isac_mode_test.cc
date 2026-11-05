@@ -117,6 +117,20 @@ TEST(IsacMode, MinPrbKey)
   EXPECT_EQ(nr_isac_sense_min_prb(), 128);
 }
 
+TEST(IsacMode, ContinuityKeys)
+{
+  EXPECT_EQ(nr_isac_sense_min_prb_floor(), 32);
+  EXPECT_EQ(nr_isac_sense_cont_target_ms(), 25);
+  EXPECT_TRUE(nr_isac_sense_min_prb_floor_set(16));
+  EXPECT_EQ(nr_isac_sense_min_prb_floor(), 16);
+  EXPECT_FALSE(nr_isac_sense_min_prb_floor_set(0));
+  EXPECT_EQ(nr_isac_sense_min_prb_floor(), 32);
+  EXPECT_TRUE(nr_isac_sense_cont_target_ms_set(50));
+  EXPECT_EQ(nr_isac_sense_cont_target_ms(), 50);
+  EXPECT_FALSE(nr_isac_sense_cont_target_ms_set(-1));
+  EXPECT_EQ(nr_isac_sense_cont_target_ms(), 25);
+}
+
 TEST(IsacMode, TrafficOnlySolverHooks)
 {
   for (nr_isac_mode_t m : {NR_ISAC_MODE_LEGACY, NR_ISAC_MODE_SENSING}) {

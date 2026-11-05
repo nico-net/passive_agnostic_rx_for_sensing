@@ -33,6 +33,13 @@ static inline bool nr_traffic_hooks_on(void) { return nr_isac_mode() == NR_ISAC_
 int nr_isac_sense_min_prb(void);
 bool nr_isac_sense_min_prb_set(int v);
 
+/* [sensing] sense_min_prb_floor (default 32): the lowest value of the per-cell continuity floor T_cell (plan S9). sense_cont_target_ms (default 25): the continuity target,
+ * a valid CFR in every such window per PCI. _set returns false (and restores the default) for a value < 1. */
+int nr_isac_sense_min_prb_floor(void);
+bool nr_isac_sense_min_prb_floor_set(int v);
+int nr_isac_sense_cont_target_ms(void);
+bool nr_isac_sense_cont_target_ms_set(int v);
+
 #ifdef __cplusplus
 }
 #endif

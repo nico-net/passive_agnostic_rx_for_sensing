@@ -5339,7 +5339,7 @@ static bool traffic_ul_skip_note(void) { nr_traffic_count(NR_TRAFFIC_CNT_UL_SKIP
 static bool traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_learned, uint16_t est_prbs)
 {
   const bool hv = dir == 0 && rnti_class == NR_BLIND_RNTI_CLASS_C && nr_pdsch_solver_take_hrv_alert(rnti);
-  return nr_traffic_decode_wanted_prbs(dir, rnti, rnti_class, ls, ul_learned, btim_now_ns(), hv, est_prbs);
+  return nr_traffic_decode_wanted_prbs(dir, rnti, rnti_class, ls, ul_learned, btim_now_ns(), hv, est_prbs, ls == NR_LAYOUT_SOLVED || ls == NR_LAYOUT_FIXED); /* S9: proven = CRC-solved, fixed (1_0 / 0_0) or trusted */
 }
 
 /* The banked CORESET passes of ONE dedicated-only slot (T26d): each pass is ~250 us FEP+LLR + decode, and Phase 1 of different
@@ -8905,6 +8905,26 @@ constdiag_done:;
     phase2.held = true;
   }
   if (nr_a2e_trace()) nr_a2e_ts[3] = btim_now_ns();
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING) {
+    /* S9 largest-first: when more dedicated DL grants of this round compete than the occasion may decode (pdsch_max_per_slot), the larger ones are submitted first. Only the tasks whose grant
+     * size is already known after Phase 1 take part (1_0 and exact-layout 1_1; a dl_auto 1_1 is resolved in Phase 2) and only their own positions in fl_ord are permuted (stable); every other task keeps its place. */
+    int pos[64], ord[64];
+    uint16_t prb[64];
+    int np = 0;
+    for (int k = fl_r0; k < fl_r1 && np < 64; k++) {
+      const nr_pdcch_blind_cand_task_t *c = &cand_task[fl_ord[k]];
+      if (c->ok && !c->ul_scan && !c->is_lookahead && !c->bwp_probe && !(c->dl_auto && c->format == NR_BLIND_DCI_FORMAT_1_1)
+          && (c->format == NR_BLIND_DCI_FORMAT_1_0 || c->format == NR_BLIND_DCI_FORMAT_1_1) && c->out.rnti_class == NR_BLIND_RNTI_CLASS_C && c->out.num_rb > 0) {
+        pos[np] = k; prb[np] = (uint16_t)c->out.num_rb; np++;
+      }
+    }
+    if (np > cfg->pdsch_max_per_slot && np > 1) {
+      int src[64];
+      for (int i = 0; i < np; i++) src[i] = fl_ord[pos[i]];
+      nr_sense_order_largest_first(prb, np, ord);
+      for (int i = 0; i < np; i++) fl_ord[pos[i]] = src[ord[i]];
+    }
+  }
   for (int fl_k = fl_r0; fl_k < fl_r1; fl_k++) {
     const int ti = fl_ord[fl_k];
     if (!nr_cfg_epoch_work_current()) break;

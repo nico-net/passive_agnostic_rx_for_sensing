@@ -161,6 +161,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     m->has_sense_sched = 1;
     m->su_units_enabled = us.units_enabled; m->su_violations = us.violations; m->su_disabled_skips = us.skips;
     m->su_wb_valid = us.wb_valid; m->su_wb_valid_prbs = us.wb_valid_prbs; m->su_gap_max_ms = us.gap_max_ns / 1000000ull;
+    { bool ig = false; uint64_t g = 0; m->su_floor_prb = (uint64_t)nr_sense_sched_floor_info(nr_cell_idx(), &g, &ig); m->su_cont_gap_p95_ms = g; m->su_in_gap = ig; }
     m->ss_decisions = ss.decisions; m->ss_enables = ss.enables; m->ss_disables = ss.disables; m->ss_bad_cap = ss.bad_cap; m->ss_deferrals = ss.deferrals;
     m->ss_binding = ss.decisions ? ss.binding : -1;
   }

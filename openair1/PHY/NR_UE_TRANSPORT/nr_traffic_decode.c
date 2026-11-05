@@ -3,6 +3,7 @@
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_sense_unit.h"
+#include "nr_sense_sched.h"
 #include "common/utils/nr_cell.h"
 #include "nr_snr_gate.h"
 #include <pthread.h>
@@ -70,22 +71,24 @@ static bool policy_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_stat
 }
 
 
-/* SENSING mode (plan S7, rulings I1 + round 3): every WIDEBAND grant (est_prbs >= sense_min_prb) is decoded; the grants of an ENABLED unit (DL: PDSCH_DATA, UL: PUSCH_DMRS of the RNTI) are all decoded to the end. A disabled unit follows the traffic
+/* SENSING mode (plan S7, rulings I1 + round 3, S9): every grant of >= T_cell PRBs with a proven layout is decoded; the grants of an ENABLED unit (DL: PDSCH_DATA, UL: PUSCH_DMRS of the RNTI) are all decoded to the end. A disabled unit follows the traffic
  * policy above plus a sampled check decode (1 in NR_TRAFFIC_CHECK_EVERY_GRANTS grants per RNTI and direction, whatever the layout state), so that a TB still reaches the unit gate
  * now and then, the skip is counted and the scheduler keeps a (weighted, nr_sense_unit.c) rate for it. Non-C RNTIs are always decoded. */
 bool nr_traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
                               uint64_t t_ns, bool hrv_alert)
 {
-  return nr_traffic_decode_wanted_prbs(dir, rnti, rnti_class, ls, ul_table_learned, t_ns, hrv_alert, 0);
+  return nr_traffic_decode_wanted_prbs(dir, rnti, rnti_class, ls, ul_table_learned, t_ns, hrv_alert, 0, false);
 }
 
 bool nr_traffic_decode_wanted_prbs(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
-                                   uint64_t t_ns, bool hrv_alert, uint16_t est_prbs)
+                                   uint64_t t_ns, bool hrv_alert, uint16_t est_prbs, bool layout_proven)
 {
   if (nr_isac_mode() != NR_ISAC_MODE_SENSING)
     return policy_wanted(dir, rnti, rnti_class, ls, ul_table_learned, t_ns, hrv_alert);
   if (rnti_class != NR_BLIND_RNTI_CLASS_C) return true;
-  if (est_prbs >= (unsigned)nr_isac_sense_min_prb()) return true; /* a wideband grant is always decoded: the unit state gates the export, not the decode */
+  /* S9: a grant of >= T_cell PRBs (the cell's adaptive continuity floor, sense_min_prb at the start) is decoded when its RNTI's layout is proven (CRC-solved, fixed 1_0, or trusted); an unproven layout is
+   * never force-decoded wide (wide probes almost never pass [MEASURED OTA 2026-11-05]): it follows the unit state / traffic policy / sample below, and the solver learns it from its own probes */
+  if (layout_proven && est_prbs >= (unsigned)nr_sense_cell_floor(nr_cell_idx())) return true;
   if (nr_sense_unit_enabled(dir == 0 ? NR_UNIT_PDSCH_DATA : NR_UNIT_PUSCH_DMRS, rnti)) return true;
   const bool pol = policy_wanted(dir, rnti, rnti_class, ls, ul_table_learned, t_ns, hrv_alert);
   td_tab_t *t = &g_td;
@@ -166,4 +169,16 @@ void nr_traffic_decode_feedback(uint16_t rnti, int dir, bool probe, int rv, int 
   if (crc < 0) return;
   if (dir == 1 && (!probe || crc == 1)) nr_traffic_probe_result(dir, rnti, crc == 1);
   if (!probe) (void)nr_traffic_decode_result(dir, rnti, rv, snr_db, crc == 1);
+}
+
+/* S9: largest-first order of the n grants competing in one occasion: ord[] = indices by descending prbs[], ties by original index (stable). Bounded: n <= 64 (insertion sort). */
+int nr_sense_order_largest_first(const uint16_t *prbs, int n, int *ord)
+{
+  if (n > 64) n = 64;
+  for (int i = 0; i < n; i++) {
+    int j = i;
+    while (j > 0 && prbs[ord[j - 1]] < prbs[i]) { ord[j] = ord[j - 1]; j--; }
+    ord[j] = i;
+  }
+  return n;
 }

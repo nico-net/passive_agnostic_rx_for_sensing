@@ -25,9 +25,12 @@ int nr_traffic_note_dci(int dir, uint16_t rnti, bool count);
 bool nr_traffic_probe_wanted(int cell, uint16_t rnti, int dir, int n_dci_seen, int n_alive, bool family_match, float snr_db, int mcs, int mcs_table);
 /* Outcome of a UL decode with a CRC verdict (dir 1): a pass resets the backoff, a fail counts once per wanted grant. */
 void nr_traffic_probe_result(int dir, uint16_t rnti, bool crc_ok);
-/* As above with the grant's PRB count: in SENSING mode a wideband grant (>= sense_min_prb) is always decoded, narrower ones follow the unit state / traffic policy / sample. */
+/* As above with the grant's PRB count: in SENSING mode a grant of >= T_cell PRBs (nr_sense_cell_floor of the calling cell) whose RNTI layout is proven (layout_proven) is always decoded;
+ * every other grant follows the unit state / traffic policy / sample. Other modes ignore both arguments. */
 bool nr_traffic_decode_wanted_prbs(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
-                                   uint64_t t_ns, bool hrv_alert, uint16_t est_prbs);
+                                   uint64_t t_ns, bool hrv_alert, uint16_t est_prbs, bool layout_proven);
+/* S9 (sensing): the order in which n (<= 64) competing grants are submitted for decode: largest first, stable. Returns the number ordered. */
+int nr_sense_order_largest_first(const uint16_t *prbs, int n, int *ord);
 /* Returns true when the RNTI must be reopened (K_REOPEN consecutive counted failures: rv 0 and snr >= 10 dB). */
 /* Sensing mode: feeds a decode verdict (crc < 0 = none) to the decode policy only, so its 1-in-32 check counter and UL backoff work; nothing is recorded or counted, no reopen. */
 void nr_traffic_decode_feedback(uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db);

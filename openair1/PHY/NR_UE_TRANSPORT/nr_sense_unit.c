@@ -26,6 +26,7 @@
 typedef struct {
   _Atomic uint64_t a, b;
 } ubucket_t;
+#define CFR_EV_N 4096
 typedef struct {
   ubucket_t bk[NBS];
   _Atomic uint64_t rg[NBS], dq[NBS]; /* writer (ring) cost and daBg cost per bucket: tag(24) | ns(40), as word A of bk */
@@ -39,6 +40,8 @@ typedef struct {
   _Atomic uint64_t unattributed_ns;    /* cost-only calls of an RNTI without a row (I-1) and the PDSCH decode stage (protected baseline) */
   _Atomic uint64_t dec_wait_max;       /* longest decode-queue wait since the last take (ns) */
   _Atomic uint64_t viol_total, skip_total, wb_valid, wb_valid_prbs, last_wb_ns, gap_max_ns; /* cell totals for the metrics (S7) */
+  _Atomic uint64_t ev[CFR_EV_N];       /* S9: the cell's latest valid CFR records, (t_ns / 1000) << 16 | valid_prbs; 0 = empty */
+  _Atomic uint64_t ev_head;            /* records written so far (the next slot is ev_head % CFR_EV_N) */
   atomic_flag create_lock;
   unit_t u[NR_UNIT_ROWS][NR_UNIT_SRC_N];
 } unit_tab_t;
@@ -250,6 +253,10 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
   unit_tab_t *T = tab_of(nr_cell_idx());
   rnti = unit_rnti(s, rnti);
   int r;
+  if (valid_prbs > 0 && t_ns >= 1000) { /* S9 continuity feed: any valid record of any unit, with its valid PRBs, before the row lookup (a narrow record opens no row) */
+    const uint64_t i = atomic_fetch_add_explicit(&T->ev_head, 1, memory_order_relaxed);
+    atomic_store_explicit(&T->ev[i % CFR_EV_N], ((t_ns / 1000) << 16) | valid_prbs, memory_order_relaxed);
+  }
   unit_t *u = unit_get(T, s, rnti, wideband_capable(valid_prbs), t_ns, &r);
   if (!u)
     return;
@@ -426,6 +433,44 @@ bool nr_sense_unit_gate_deferred(nr_unit_src_t s, uint16_t rnti, uint16_t est_us
   return false;
 }
 
+static int cmp_u64(const void *a, const void *b);
+
+void nr_sense_unit_cfr_gaps(int cell, uint64_t now_ns, uint64_t window_ns, const int *thr, int n_thr, nr_sense_gapstat_t *out)
+{
+  for (int i = 0; i < n_thr; i++) out[i] = (nr_sense_gapstat_t){0};
+  if (cell < 0 || cell >= NR_CELL_MAX || !window_ns || now_ns < window_ns) return;
+  unit_tab_t *T = tab_of(cell);
+  const uint64_t head = atomic_load_explicit(&T->ev_head, memory_order_acquire);
+  const uint64_t cnt = head < CFR_EV_N ? head : CFR_EV_N, t0 = now_ns - window_ns;
+  uint64_t ts[CFR_EV_N + 1], tt[CFR_EV_N]; /* ~64 KB on the stack of the scheduler thread (2 MB): times of the events passing one threshold / all events */
+  uint32_t pr[CFR_EV_N];
+  uint64_t start = t0;
+  for (uint64_t k = 0; k < cnt; k++) {
+    const uint64_t e = atomic_load_explicit(&T->ev[(head - 1 - k) % CFR_EV_N], memory_order_relaxed);
+    tt[k] = (e >> 16) * 1000; pr[k] = (uint32_t)(e & 0xFFFF);
+  }
+  if (cnt == CFR_EV_N) { /* the ring wrapped: it only covers the time back to its oldest record (unsorted by a few writers, so take the minimum) */
+    uint64_t mn = tt[0];
+    for (uint64_t k = 1; k < cnt; k++) if (tt[k] < mn) mn = tt[k];
+    if (mn > start) start = mn;
+  }
+  for (int i = 0; i < n_thr; i++) {
+    uint64_t n = 0;
+    for (uint64_t k = 0; k < cnt; k++)
+      if (tt[k] > start && tt[k] <= now_ns && pr[k] >= (uint32_t)thr[i]) ts[n++] = tt[k];
+    qsort(ts, n, sizeof ts[0], cmp_u64);
+    uint64_t *g = ts; /* gaps in place: ts[j] becomes the gap that ends at event j; the last gap runs to now */
+    uint64_t prev = start;
+    for (uint64_t j = 0; j < n; j++) { const uint64_t t = ts[j]; g[j] = t - prev; prev = t; }
+    g[n] = now_ns - prev;
+    qsort(g, n + 1, sizeof g[0], cmp_u64);
+    const uint64_t rank = ((n + 1) * 95 + 99) / 100; /* nearest rank, 1-based */
+    out[i].p95_gap_ns = g[rank - 1];
+    out[i].n = (uint32_t)n;
+    out[i].rate_hz = now_ns > start ? (float)((double)n * 1e9 / (double)(now_ns - start)) : 0.f;
+  }
+}
+
 void nr_sense_unit_cell_stats(int cell, nr_sense_unit_cell_stats_t *out)
 {
   memset(out, 0, sizeof *out);
@@ -588,4 +633,5 @@ void nr_sense_unit_reset(int cell)
   atomic_store_explicit(&T->wb_valid_prbs, 0, memory_order_relaxed);
   atomic_store_explicit(&T->last_wb_ns, 0, memory_order_relaxed);
   atomic_store_explicit(&T->gap_max_ns, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->ev_head, 0, memory_order_relaxed);
 }

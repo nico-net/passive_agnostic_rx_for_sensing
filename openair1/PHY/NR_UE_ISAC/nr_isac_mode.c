@@ -15,6 +15,22 @@ bool nr_isac_sense_min_prb_set(int v)
   return v >= 1;
 }
 
+#define SENSE_MIN_PRB_FLOOR_DEFAULT 32
+#define SENSE_CONT_TARGET_MS_DEFAULT 25
+static int g_min_prb_floor = SENSE_MIN_PRB_FLOOR_DEFAULT, g_cont_target_ms = SENSE_CONT_TARGET_MS_DEFAULT; /* written once at init */
+int nr_isac_sense_min_prb_floor(void) { return g_min_prb_floor; }
+bool nr_isac_sense_min_prb_floor_set(int v)
+{
+  g_min_prb_floor = v >= 1 ? v : SENSE_MIN_PRB_FLOOR_DEFAULT;
+  return v >= 1;
+}
+int nr_isac_sense_cont_target_ms(void) { return g_cont_target_ms; }
+bool nr_isac_sense_cont_target_ms_set(int v)
+{
+  g_cont_target_ms = v >= 1 ? v : SENSE_CONT_TARGET_MS_DEFAULT;
+  return v >= 1;
+}
+
 /* source bit positions = enum nr_isac_source in nr_isac.h (checked by nr_isac_mode_test) */
 #define B(n) (1u << (n))
 #define SENSING_SET (B(6) /*ssb*/ | B(0) /*csi_rs*/ | B(1) /*pdsch_dmrs*/ | B(2) /*pdsch_data*/ | B(4) /*pusch_dmrs*/ | B(8) /*srs*/)

@@ -18,6 +18,8 @@ typedef struct {
 } nr_sense_sched_stats_t;
 void nr_sense_sched_stats(nr_sense_sched_stats_t *out);
 const char *nr_sense_res_name(int res);
+/* S9: T_cell of a cell after the last decision (0 before the first), its p95 continuity gap (ms) and whether it was in a gap; for ISAC_METRICS. */
+int nr_sense_sched_floor_info(int cell, uint64_t *gap_p95_ms, bool *in_gap);
 
 /* One decision at time now_ns (the thread calls it every SENSE_DECIDE_NS; tests call it directly). */
 void nr_sense_sched_step(uint64_t now_ns);

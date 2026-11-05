@@ -1,4 +1,5 @@
 #include "nr_sense_sched.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include <gtest/gtest.h>
 #include <cstring>
 #include <vector>
@@ -437,4 +438,160 @@ TEST(Sched, DemandGoesToTheResourceTheUnitConsumes)
   k.steps(4);
   EXPECT_EQ(k.nen(0), 1); /* 2 x 200 > 240 in cell 0 */
   EXPECT_EQ(k.nen(1), 1);
+}
+
+/* ---- S9: adaptive continuity floor T_cell ---- */
+static const uint64_t MS_ = 1000000ull;
+struct F : H {
+  explicit F(int n = 1, float pool = 100) : H(n, pool)
+  {
+    in.cont_target_ns = 25 * MS_;
+    in.floor_prb = 32;
+  }
+  /* the continuity feed of cell c: p95 gap (ms) and rate (Hz) at each of the 5 steps 128, 96, 64, 48, 32 */
+  void feed(int c, const double *gap_ms, const double *rate)
+  {
+    for (int i = 0; i < SENSE_FLOOR_MAX_STEPS; i++) {
+      in.gap[c][i].p95_gap_ns = (uint64_t)(gap_ms[i] * 1e6);
+      in.gap[c][i].rate_hz = (float)rate[i];
+    }
+    in.gap_valid[c] = true;
+  }
+  int floor(int c = 0) { return out.floor_prb[c]; }
+};
+
+TEST(Floor, Steps)
+{
+  int st[SENSE_FLOOR_MAX_STEPS];
+  ASSERT_EQ(nr_sense_floor_steps(128, 32, st), 5);
+  const int w[5] = {128, 96, 64, 48, 32};
+  for (int i = 0; i < 5; i++) EXPECT_EQ(st[i], w[i]);
+  ASSERT_EQ(nr_sense_floor_steps(128, 48, st), 4);
+  EXPECT_EQ(st[3], 48);
+  ASSERT_EQ(nr_sense_floor_steps(128, 100, st), 2);
+  EXPECT_EQ(st[1], 100);
+  ASSERT_EQ(nr_sense_floor_steps(20, 32, st), 1); /* a lab min_prb below the floor: nothing to step to */
+  EXPECT_EQ(st[0], 20);
+  ASSERT_EQ(nr_sense_floor_steps(100, 32, st), 5); /* 100, 96, 64, 48, 32: 96 < 100 */
+}
+
+TEST(Floor, StartsAtMinPrbAndNoDataDoesNotMoveIt)
+{
+  F h;
+  h.steps(10); /* gap_valid false */
+  EXPECT_EQ(h.floor(), 128);
+}
+
+TEST(Floor, FloorStepsDownOnGaps)
+{
+  F h;
+  const double gap[5] = {900, 500, 200, 60, 10}, rate[5] = {1, 2, 5, 20, 90};
+  h.feed(0, gap, rate);
+  h.step(); EXPECT_EQ(h.floor(), 128);  /* streak 1 of 2 */
+  h.step(); EXPECT_EQ(h.floor(), 96);
+  h.step(); EXPECT_EQ(h.floor(), 96);
+  h.step(); EXPECT_EQ(h.floor(), 64);
+  h.steps(2); EXPECT_EQ(h.floor(), 48);
+  h.steps(2); EXPECT_EQ(h.floor(), 32);  /* p95 gap 10 ms at 32: the target is met, so it stays */
+  h.steps(20); EXPECT_EQ(h.floor(), 32);
+  EXPECT_FALSE(h.out.in_gap[0]);
+}
+
+TEST(Floor, NeverBelowTheFloorKey)
+{
+  F h;
+  h.in.floor_prb = 48;
+  const double gap[5] = {900, 900, 900, 900, 900}, rate[5] = {0, 0, 0, 0, 0};
+  h.feed(0, gap, rate);
+  h.steps(40);
+  EXPECT_EQ(h.floor(), 48);
+  EXPECT_TRUE(h.out.in_gap[0]); /* still in a gap at the floor */
+}
+
+TEST(Floor, FloorStepsUpWithMargin)
+{
+  F h;
+  const double bad[5] = {900, 500, 10, 10, 10}, r0[5] = {1, 2, 50, 50, 50};
+  h.feed(0, bad, r0);
+  h.steps(4); EXPECT_EQ(h.floor(), 64);
+  /* the target is met at 64; 96 would arrive at 200 Hz, the need is 3 / 25 ms = 120 Hz, with the 2x margin 240 Hz: not enough */
+  const double ok[5] = {900, 10, 10, 10, 10}, r1[5] = {1, 200, 50, 50, 50};
+  h.feed(0, ok, r1);
+  h.steps(30); EXPECT_EQ(h.floor(), 64);
+  const double r2[5] = {1, 250, 50, 50, 50};
+  h.feed(0, ok, r2);
+  h.steps(1); EXPECT_EQ(h.floor(), 64);  /* streak 1 */
+  h.steps(1); EXPECT_EQ(h.floor(), 96);
+  /* an up step needs the hold since a step down: after the down steps above it has long passed; one more step up needs the margin at 128 too */
+  const double r3[5] = {250, 250, 50, 50, 50};
+  const double ok2[5] = {10, 10, 10, 10, 10};
+  h.feed(0, ok2, r3);
+  h.steps(2); EXPECT_EQ(h.floor(), 128);
+  h.steps(10); EXPECT_EQ(h.floor(), 128);
+}
+
+TEST(Floor, UpStepWaitsForTheHoldAfterADownStep)
+{
+  F h;
+  const double bad[5] = {900, 10, 10, 10, 10}, r[5] = {1000, 1000, 1000, 1000, 1000};
+  h.feed(0, bad, r);
+  h.steps(2); EXPECT_EQ(h.floor(), 96);  /* down; the stream at 128 is rich from now on but 128's own gap is not the issue */
+  const double ok[5] = {10, 10, 10, 10, 10};
+  h.feed(0, ok, r);
+  for (int i = 0; i < SENSE_FLOOR_UP_HOLD - 1; i++) { h.step(); EXPECT_EQ(h.floor(), 96) << i; }
+  h.steps(SENSE_CONFIRM); EXPECT_EQ(h.floor(), 128);
+}
+
+TEST(Floor, NoFlap)
+{
+  /* a gap in every other decision: the streak of 2 never completes */
+  F h;
+  const double bad[5] = {900, 900, 900, 900, 900}, good[5] = {10, 10, 10, 10, 10}, rate[5] = {500, 500, 500, 500, 500};
+  for (int i = 0; i < 40; i++) { h.feed(0, i % 2 ? good : bad, rate); h.step(); EXPECT_EQ(h.floor(), 128) << i; }
+  /* in the dead band (target met, the next step up lacks the margin) nothing moves either */
+  F g;
+  const double bad2[5] = {900, 10, 10, 10, 10}, r2[5] = {1, 1, 1, 1, 1};
+  g.feed(0, bad2, r2);
+  g.steps(2);
+  ASSERT_EQ(g.floor(), 96);
+  const double r3[5] = {230, 230, 230, 230, 230}; /* 230 Hz < 240 Hz */
+  g.feed(0, bad2, r3);
+  for (int i = 0; i < 60; i++) { g.step(); EXPECT_EQ(g.floor(), 96) << i; }
+}
+
+TEST(Floor, GapCellGetsPrecedence)
+{
+  /* two equal cells, one unit each, the pool admits one: the cell in a continuity gap wins (rank only) */
+  F h(2, 100);
+  h.add(0, 1, 40); h.add(1, 2, 40);
+  const double bad[5] = {900, 900, 900, 900, 900}, good[5] = {10, 10, 10, 10, 10}, rate[5] = {0, 0, 0, 0, 0};
+  h.feed(0, good, rate);
+  h.feed(1, bad, rate);
+  h.steps(3);
+  EXPECT_TRUE(h.en(1, 2));
+  EXPECT_FALSE(h.en(0, 1));
+  F k(2, 100);
+  k.add(0, 1, 40); k.add(1, 2, 40);
+  k.feed(0, bad, rate);
+  k.feed(1, good, rate);
+  k.steps(3);
+  EXPECT_TRUE(k.en(0, 1));
+  EXPECT_FALSE(k.en(1, 2));
+}
+
+TEST(Floor, PerCellIndependentAndPublished)
+{
+  F h(2);
+  const double bad[5] = {900, 900, 900, 900, 10}, good[5] = {10, 10, 10, 10, 10}, rate[5] = {0, 0, 0, 0, 0};
+  h.feed(0, bad, rate);
+  h.feed(1, good, rate);
+  h.steps(8);
+  EXPECT_EQ(h.out.floor_prb[0], 32);
+  EXPECT_EQ(h.out.floor_prb[1], 128);
+  nr_sense_cell_floor_reset();
+  EXPECT_EQ(nr_sense_cell_floor(0), nr_isac_sense_min_prb());
+  nr_sense_cell_floor_publish(1, 48);
+  EXPECT_EQ(nr_sense_cell_floor(1), 48);
+  EXPECT_EQ(nr_sense_cell_floor(0), nr_isac_sense_min_prb());
+  nr_sense_cell_floor_reset();
 }

@@ -2,6 +2,7 @@
 /* Sensing-mode scheduler thread (plan Task S7). See nr_sense_sched_rt.h. */
 #include "nr_sense_sched_rt.h"
 #include "nr_sense_api.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "common/utils/nr_cell.h"
 #include "common/utils/nr_core_pool.h"
 #include "common/utils/LOG/log.h"
@@ -40,6 +41,14 @@ static struct {
   uint64_t sub_t_ns, sub_hold, sub_unattr; double sub_max; bool sub_have; /* 500 ms sub-windows within the decision period */
   int no_sample;                                           /* consecutive periods without a pool sample (M3) */
 } g_prev;
+
+static struct { int prb; uint64_t gap_ms; bool in_gap; } g_floor_log[NR_SENSE_CELLS]; /* last decision, for ISAC_METRICS */
+int nr_sense_sched_floor_info(int cell, uint64_t *gap_p95_ms, bool *in_gap)
+{
+  if ((unsigned)cell >= NR_SENSE_CELLS) return 0;
+  *gap_p95_ms = g_floor_log[cell].gap_ms; *in_gap = g_floor_log[cell].in_gap;
+  return g_floor_log[cell].prb;
+}
 
 static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample_t *sm, const nr_sense_sched_out_t *out);
 
@@ -138,6 +147,8 @@ void nr_sense_sched_reset(void)
 {
   memset(&g_st, 0, sizeof g_st);
   memset(&g_prev, 0, sizeof g_prev);
+  nr_sense_cell_floor_reset();
+  memset(g_floor_log, 0, sizeof g_floor_log);
   atomic_store(&g_decisions, 0); atomic_store(&g_enables, 0); atomic_store(&g_disables, 0); atomic_store(&g_bad_cap, 0); atomic_store(&g_deferrals, 0);
   atomic_store(&g_binding, 0);
   atomic_store(&g_sampler, NULL);
@@ -184,10 +195,24 @@ void nr_sense_sched_step(uint64_t now_ns)
   memcpy(in.cell_res, sm.cell_res, sizeof in.cell_res);
   memcpy(in.cell_res_set, sm.cell_res_set, sizeof in.cell_res_set);
   in.min_prb = nr_isac_sense_min_prb();
+  in.floor_prb = nr_isac_sense_min_prb_floor();
+  in.cont_target_ns = (uint64_t)nr_isac_sense_cont_target_ms() * 1000000ull;
+  {
+    int steps[SENSE_FLOOR_MAX_STEPS];
+    const int ns = nr_sense_floor_steps(in.min_prb, in.floor_prb, steps);
+    for (int c = 0; c < in.n_cells; c++) { /* the continuity feed over the last decision period, per step */
+      nr_sense_unit_cfr_gaps(c, now_ns, SENSE_DECIDE_NS, steps, ns, in.gap[c]);
+      in.gap_valid[c] = true;
+    }
+  }
   in.now_ns = now_ns;
   static nr_sense_sched_out_t out;
   nr_sense_sched_decide(&in, &g_st, &out);
   apply(&in);
+  for (int c = 0; c < in.n_cells; c++) {
+    nr_sense_cell_floor_publish(c, out.floor_prb[c]);
+    g_floor_log[c].prb = out.floor_prb[c]; g_floor_log[c].gap_ms = out.gap_p95_ns[c] / 1000000ull; g_floor_log[c].in_gap = out.in_gap[c];
+  }
   atomic_fetch_add(&g_decisions, 1);
   atomic_fetch_add(&g_enables, (uint64_t)out.enables);
   atomic_fetch_add(&g_disables, (uint64_t)out.disables);
@@ -204,6 +229,10 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
   set[0] = 0;
   for (int i = 0; i < out->n_admitted && i < NR_SENSE_ADMIT_LOG && w < (int)sizeof set - 64; i++)
     w += snprintf(set + w, sizeof set - (size_t)w, "%sc%d/%u/%s=%.3f", i ? "," : "", out->admitted[i].cell, (unsigned)out->admitted[i].rnti, sn[out->admitted[i].src], out->admitted[i].val);
+  char tc[64];
+  int tw = 0;
+  tc[0] = 0;
+  for (int c = 0; c < in->n_cells && tw < (int)sizeof tc - 12; c++) tw += snprintf(tc + tw, sizeof tc - (size_t)tw, "%s%d", c ? "," : "", out->floor_prb[c]);
   uint64_t viol = 0, skips = 0, drops = 0;
   uint32_t en = 0;
   for (int c = 0; c < sm->n_cells; c++) {
@@ -211,9 +240,12 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
     nr_sense_unit_cell_stats(c, &cs);
     viol += cs.violations; skips += cs.skips; en += cs.units_enabled; drops += sm->ring_drops[c];
   }
-  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s admitted=%d [%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_ul_base=unmeasured gpu_base=unmeasured\n",
-        (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), out->n_admitted, set, en,
+  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s admitted=%d [%s] t_cell=[%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_ul_base=unmeasured gpu_base=unmeasured\n",
+        (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), out->n_admitted, set, tc, en,
         (unsigned long)viol, (unsigned long)skips, (unsigned long)drops, sm->res[NR_RES_POOL].cap_ns * 1e-6, sm->res[NR_RES_POOL].base_p99_ns * 1e-6); /* per 50 ms bucket */
+  for (int c = 0; c < in->n_cells; c++)
+    LOG_A(PHY, "SENSING: SENSE_FLOOR cell=%d pci=%d t_cell=%d gap_p95_ms=%.1f in_gap=%d target_ms=%.0f n_cfr=%u rate_hz=%.1f\n", c, sm->pci[c], out->floor_prb[c], (double)out->gap_p95_ns[c] * 1e-6, (int)out->in_gap[c],
+          (double)in->cont_target_ns * 1e-6, (unsigned)in->gap[c][0].n, (double)in->gap[c][0].rate_hz);
   /* the units behind the decision (the first 8 per cell): enabled flag, wideband rate, valid ratio, p99 CPU per bucket (ms), skips and violations since the row was created */
   for (int c = 0; c < in->n_cells; c++) {
     char u[640];
