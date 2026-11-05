@@ -28,11 +28,10 @@ extern "C" {
 #define SENSE_REPROBE_OK 8
 #define SENSE_VIOL_HOLDOFF 2 /* decisions a unit removed for a violation stays off after the removal decision */
 #define NR_SENSE_CELLS 8
-/* S9 adaptive continuity floor T_cell (spec addendum 2026-11-05). Steps: sense_min_prb, 96, 64, 48 (those below sense_min_prb and above the floor), then sense_min_prb_floor. */
+/* S9 adaptive continuity floor T_cell (spec addendum 2026-11-05, coordinator ruling fix round 1). Levels: sense_min_prb, 96, 64, 48 (those below sense_min_prb and above the floor), then sense_min_prb_floor.
+ * T_cell = the highest level whose p95 gap between DCI arrivals of grants of >= that many PRBs is within the continuity target; none meets it: the floor; no arrival of the cell at all: sense_min_prb.
+ * A move needs SENSE_CONFIRM agreeing decisions; a move to a higher level also needs that level to beat the target by SENSE_HYST. */
 #define SENSE_FLOOR_MAX_STEPS 5
-#define SENSE_FLOOR_UP_MARGIN 2.0 /* a step up needs 2x the arrival rate at which a Poisson stream of that rate meets the target at its p95 (p95 gap = ln 20 / rate ~ 3 / rate) */
-#define SENSE_FLOOR_P95_K 3.0
-#define SENSE_FLOOR_UP_HOLD 4     /* decisions after a step down before the next step up (16 s): with the margin and the streak it stops the floor from flapping on bursty arrivals */
 #define SENSE_GAP_PREC 2.0        /* a cell in a continuity gap ranks x2 in the shared-pool admission (rank only; the unit values stay true) */
 int nr_sense_floor_steps(int min_prb, int floor_prb, int *steps); /* fills steps[] (descending), returns their number (1..5) */
 #define NR_SENSE_SLOTS 64 /* RNTI slots per cell in the state: slot 0 is the per-cell SRS unit (rnti 0), 1..63 hold the other RNTIs */
@@ -55,16 +54,16 @@ typedef struct {
    * POOL and GPU are shared by all cells and always come from res[]. */
   nr_sense_res_t cell_res[NR_SENSE_CELLS][NR_RES_N]; bool cell_res_set[NR_SENSE_CELLS];
   int min_prb; uint64_t now_ns;
-  /* S9: per cell, per step of nr_sense_floor_steps(min_prb, floor_prb): the p95 gap and the rate of the cell's valid CFR records of >= that many PRBs over the decision window
-   * (nr_sense_unit_cfr_gaps). gap_valid[c] false (or cont_target_ns 0): no data, the cell's floor does not move. */
-  nr_sense_gapstat_t gap[NR_SENSE_CELLS][SENSE_FLOOR_MAX_STEPS]; bool gap_valid[NR_SENSE_CELLS];
+  /* S9: per cell, per level of nr_sense_floor_steps(min_prb, floor_prb): the p95 gap and the rate of the cell's DCI arrivals of >= that many PRBs over the decision window
+   * (nr_sense_unit_arrival_gaps); arrivals[c] = the cell's arrivals of any size in the window (0 = no evidence: T_cell = sense_min_prb). gap_valid[c] false (or cont_target_ns 0): the cell's floor does not move. */
+  nr_sense_gapstat_t gap[NR_SENSE_CELLS][SENSE_FLOOR_MAX_STEPS]; uint32_t arrivals[NR_SENSE_CELLS]; bool gap_valid[NR_SENSE_CELLS];
   uint64_t cont_target_ns; int floor_prb;
 } nr_sense_sched_in_t;
 
 /* Kept between decisions by the caller (zero-initialised at start). st->enabled is the decision: the caller applies it with nr_sense_unit_set_enabled
  * (cell, st->rnti[cell][slot], src) where it differs from the unit's view. */
 typedef struct {
-  uint8_t fl_idx[NR_SENSE_CELLS], fl_dn[NR_SENSE_CELLS], fl_up[NR_SENSE_CELLS], fl_hold[NR_SENSE_CELLS]; /* S9: step index of T_cell, agreeing-decision counts, up-step hold */
+  uint8_t fl_idx[NR_SENSE_CELLS], fl_pend[NR_SENSE_CELLS], fl_cnt[NR_SENSE_CELLS]; /* S9: level index of T_cell, the level the last decisions asked for, how many decisions in a row asked for it */
   uint8_t streak[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
   bool enabled[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
   uint16_t rnti[NR_SENSE_CELLS][NR_SENSE_SLOTS];

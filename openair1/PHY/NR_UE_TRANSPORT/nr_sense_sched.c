@@ -37,29 +37,37 @@ int nr_sense_floor_steps(int min_prb, int floor_prb, int *steps)
   return n;
 }
 
-/* One decision of the floor of cell c (state in st, data in in). Down: p95 gap at T_cell above the target, SENSE_CONFIRM decisions in a row. Up: the stream at the next higher step
- * has SENSE_FLOOR_UP_MARGIN x the rate its p95 needs, the cell is not in a gap, SENSE_CONFIRM in a row, and SENSE_FLOOR_UP_HOLD decisions passed since a step down. */
+/* One decision of the floor of cell c (state in st, data in in). */
 static void floor_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *st, nr_sense_sched_out_t *out, int c)
 {
   int steps[SENSE_FLOOR_MAX_STEPS];
   const int n = nr_sense_floor_steps(in->min_prb, in->floor_prb, steps);
   if (st->fl_idx[c] >= n) st->fl_idx[c] = (uint8_t)(n - 1);
-  if (st->fl_hold[c]) st->fl_hold[c]--;
   int idx = st->fl_idx[c];
   if (in->cont_target_ns && in->gap_valid[c]) {
-    const double tgt_s = (double)in->cont_target_ns * 1e-9;
-    const bool gap = in->gap[c][idx].p95_gap_ns > in->cont_target_ns;
-    const bool dn = gap && idx + 1 < n;
-    const bool up = !gap && idx > 0 && !st->fl_hold[c] && (double)in->gap[c][idx - 1].rate_hz * tgt_s >= SENSE_FLOOR_UP_MARGIN * SENSE_FLOOR_P95_K;
-    st->fl_dn[c] = dn ? (uint8_t)(st->fl_dn[c] < 255 ? st->fl_dn[c] + 1 : 255) : 0;
-    st->fl_up[c] = up ? (uint8_t)(st->fl_up[c] < 255 ? st->fl_up[c] + 1 : 255) : 0;
-    if (st->fl_dn[c] >= SENSE_CONFIRM) { idx++; st->fl_hold[c] = SENSE_FLOOR_UP_HOLD; st->fl_dn[c] = st->fl_up[c] = 0; }
-    else if (st->fl_up[c] >= SENSE_CONFIRM) { idx--; st->fl_dn[c] = st->fl_up[c] = 0; }
+    const uint64_t tgt = in->cont_target_ns, tgt_up = (uint64_t)((double)tgt * (1.0 - SENSE_HYST));
+    int want;
+    if (!in->arrivals[c]) want = 0; /* no evidence: no step down */
+    else {
+      int j = 0;
+      while (j < n - 1 && in->gap[c][j].p95_gap_ns > tgt) j++; /* highest level that meets the target, else the floor */
+      want = j;
+      if (j < idx) { /* up: the level has to beat the target by the margin */
+        want = idx;
+        for (int k = 0; k < idx; k++) if (in->gap[c][k].p95_gap_ns <= tgt_up) { want = k; break; }
+      }
+    }
+    if (want == idx) st->fl_cnt[c] = 0;
+    else {
+      if (st->fl_cnt[c] && st->fl_pend[c] == (uint8_t)want) { if (st->fl_cnt[c] < 255) st->fl_cnt[c]++; }
+      else { st->fl_pend[c] = (uint8_t)want; st->fl_cnt[c] = 1; }
+      if (st->fl_cnt[c] >= SENSE_CONFIRM) { idx = want; st->fl_cnt[c] = 0; }
+    }
     st->fl_idx[c] = (uint8_t)idx;
-    out->in_gap[c] = gap;
+    out->in_gap[c] = in->arrivals[c] && idx == n - 1 && in->gap[c][idx].p95_gap_ns > tgt; /* at the floor and still above the target */
     out->gap_p95_ns[c] = in->gap[c][idx].p95_gap_ns;
   } else {
-    st->fl_dn[c] = st->fl_up[c] = 0;
+    st->fl_cnt[c] = 0;
   }
   out->floor_prb[c] = steps[idx];
 }

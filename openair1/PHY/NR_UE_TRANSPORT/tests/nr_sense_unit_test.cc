@@ -394,19 +394,19 @@ TEST_F(Unit, RingAndDaCostStreamsAreSeparatePerUnit)
   EXPECT_FLOAT_EQ(v[0].ring_p99_ns, 0.5f * MS);
 }
 
-TEST_F(Unit, CfrGapsPerThreshold)
+TEST_F(Unit, ArrivalGapsPerThreshold)
 {
   const uint64_t base = 500ull * 1000000000ull, win = 4000 * MS, now = base + win;
-  const int thr[3] = {128, 64, 32};
+  const int thr[3] = {128, 64, 1};
   nr_sense_gapstat_t g[3];
-  nr_sense_unit_cfr_gaps(0, now, win, thr, 3, g); /* nothing yet: one gap = the whole window */
-  for (int i = 0; i < 3; i++) { EXPECT_EQ(g[i].n, 0u); EXPECT_EQ(g[i].p95_gap_ns, win); EXPECT_FLOAT_EQ(g[i].rate_hz, 0.f); }
-  /* a 200 PRB record every 100 ms and a 70 PRB one halfway between: 40 + 40 records */
+  nr_sense_unit_arrival_gaps(0, now, win, thr, 3, g); /* nothing yet: one gap = the whole window, no arrivals */
+  for (int i = 0; i < 3; i++) { EXPECT_EQ(g[i].n, 0u); EXPECT_EQ(g[i].p95_gap_ns, win); }
+  /* a 200 PRB grant every 100 ms and a 70 PRB one halfway between: 40 + 40 arrivals */
   for (int i = 0; i < 40; i++) {
-    nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 4, 200, 10.f, base + (uint64_t)i * 100 * MS + MS);
-    nr_sense_unit_cfr(NR_UNIT_PDSCH_DMRS, 5, 70, 10.f, base + (uint64_t)i * 100 * MS + 50 * MS);
+    nr_sense_dci_arrival(200, base + (uint64_t)i * 100 * MS + MS);
+    nr_sense_dci_arrival(70, base + (uint64_t)i * 100 * MS + 50 * MS);
   }
-  nr_sense_unit_cfr_gaps(0, now, win, thr, 3, g);
+  nr_sense_unit_arrival_gaps(0, now, win, thr, 3, g);
   EXPECT_EQ(g[0].n, 40u);
   EXPECT_EQ(g[1].n, 80u);
   EXPECT_EQ(g[2].n, 80u);
@@ -414,20 +414,31 @@ TEST_F(Unit, CfrGapsPerThreshold)
   EXPECT_NEAR((double)g[1].p95_gap_ns, 50.0 * MS, 1.0 * MS);
   EXPECT_NEAR(g[0].rate_hz, 10.f, 0.5f);
   EXPECT_NEAR(g[1].rate_hz, 20.f, 0.5f);
-  /* one long hole is the p95 only when it is more than 5 % of the gaps: here 1 gap of 41 */
-  nr_sense_unit_cfr_gaps(0, now + 2000 * MS, win, thr, 1, g); /* the window now ends 2 s after the last record: a trailing gap of ~2.05 s */
+  /* the window now ends 2 s after the last arrival: a trailing gap of ~2 s is the p95 of the few gaps left */
+  nr_sense_unit_arrival_gaps(0, now + 2000 * MS, win, thr, 1, g);
   EXPECT_LT(g[0].n, 40u);
   EXPECT_GE(g[0].p95_gap_ns, 100 * MS);
 }
 
-TEST_F(Unit, CfrGapsWindowAndWrap)
+TEST_F(Unit, ArrivalGapsIgnoreExportedCfrs)
+{
+  const uint64_t base = 500ull * 1000000000ull, win = 4000 * MS, now = base + win;
+  const int thr[1] = {128};
+  nr_sense_gapstat_t g[1];
+  for (int i = 0; i < 40; i++) nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 4, 200, 10.f, base + (uint64_t)i * 100 * MS + MS); /* exported CFRs are not arrivals */
+  nr_sense_unit_arrival_gaps(0, now, win, thr, 1, g);
+  EXPECT_EQ(g[0].n, 0u);
+  EXPECT_EQ(g[0].p95_gap_ns, win);
+}
+
+TEST_F(Unit, ArrivalGapsWindowAndWrap)
 {
   const uint64_t base = 900ull * 1000000000ull;
   const int thr[1] = {128};
   nr_sense_gapstat_t g[1];
-  for (int i = 0; i < 5000; i++) nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 4, 200, 10.f, base + (uint64_t)i * MS); /* more than the 4096-record ring, 1 kHz */
-  nr_sense_unit_cfr_gaps(0, base + 5000 * MS, 5000 * MS, thr, 1, g);
-  EXPECT_EQ(g[0].n, 4095u);                                    /* the oldest record only marks where the shortened window starts */
+  for (int i = 0; i < 5000; i++) nr_sense_dci_arrival(200, base + (uint64_t)i * MS); /* more than the 4096-arrival ring, 1 kHz */
+  nr_sense_unit_arrival_gaps(0, base + 5000 * MS, 5000 * MS, thr, 1, g);
+  EXPECT_EQ(g[0].n, 4095u);                                    /* the oldest arrival only marks where the shortened window starts */
   EXPECT_NEAR((double)g[0].p95_gap_ns, 1.0 * MS, 0.1 * MS);   /* no 5 s hole although the window asked for 5 s */
   EXPECT_NEAR(g[0].rate_hz, 1000.f, 5.f);
 }

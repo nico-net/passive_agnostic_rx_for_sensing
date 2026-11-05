@@ -9123,6 +9123,7 @@ constdiag_done:;
         if (nr_isac_mode() == NR_ISAC_MODE_SENSING) { /* sensing: all grants of an enabled PUSCH_DMRS unit, the traffic policy + a sampled check otherwise */
           const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
           ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti), u->num_rb);
+          nr_sense_dci_arrival(u->num_rb, nr_sense_now_ns());
         }
         if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
           const uint64_t tt0 = btim_now_ns();
@@ -9272,8 +9273,10 @@ constdiag_done:;
                   (unsigned)ul00.start_symbol, (unsigned)ul00.num_symbols,
                   (unsigned)ul00.k2, (unsigned)ul00.mcs);
           bool ul00_dec = true;
-          if (nr_isac_mode() == NR_ISAC_MODE_SENSING)
+          if (nr_isac_mode() == NR_ISAC_MODE_SENSING) {
             ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti), ul00.num_rb);
+            if (!dedupe_hit(abs_slot, source_absolute_slot, ul00.rnti, 1)) nr_sense_dci_arrival(ul00.num_rb, nr_sense_now_ns()); /* once per distinct DCI */
+          }
           if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
             const uint64_t tt0 = btim_now_ns();
             ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti), ul00.num_rb);
@@ -9465,6 +9468,9 @@ constdiag_done:;
       const bool slv = !is10t && nr_pdsch_solver_enabled() && cand_task[ti].dl_auto && g_dci11_state == 1 && g_dci11_resolver != NULL;
       const nr_layout_state_t lst = is10t ? NR_LAYOUT_FIXED : slv ? nr_pdsch_solver_layout_state(out.rnti, NULL, NULL) : NR_LAYOUT_SOLVED;
       tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false, out.num_rb) ? 1 : 0;
+      /* S9: the continuity feed counts DISTINCT DCI arrivals, whatever is decoded (dl_auto 1_1 outside a discovered pass already went through the dir-0 dedupe; dir 2 is unused in sensing) */
+      if (out.rnti_class == NR_BLIND_RNTI_CLASS_C && ((cand_task[ti].dl_auto && !t_discovered_token && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) || !dedupe_hit(abs_slot, source_absolute_slot, out.rnti, 2)))
+        nr_sense_dci_arrival(out.num_rb, nr_sense_now_ns());
     }
     if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
       const uint64_t tt0 = btim_now_ns();

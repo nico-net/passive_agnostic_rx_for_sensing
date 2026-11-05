@@ -59,11 +59,13 @@ typedef struct {
   uint32_t units_enabled;                     /* units enabled now */
 } nr_sense_unit_cell_stats_t;
 void nr_sense_unit_cell_stats(int cell, nr_sense_unit_cell_stats_t *out);
-/* S9 continuity feed: the cell's valid CFR records (any unit, any PRB count) of the last window_ns before now_ns, for each threshold thr[i] (PRBs): the records with valid PRBs >= thr[i]. Gaps are the
- * times between consecutive such records, the window start and now included as ends (a silent window is one long gap); p95 = nearest rank. The ring keeps the last 4096 records; when it has wrapped the
- * window shortens to its oldest record. rate_hz = n / window. Scheduler thread (~80 KB of stack). */
+/* S9 continuity feed: the DCI arrivals of a cell (accepted DL and UL grants with their PRB count; independent of what is decoded or exported). nr_sense_dci_arrival records one for the calling
+ * thread's cell (sensing mode only). nr_sense_unit_arrival_gaps: for each threshold thr[i] (PRBs), the arrivals of the last window_ns before now_ns with >= thr[i] PRBs: gaps are the times between
+ * consecutive such arrivals, the window start and now included as ends (a silent window is one long gap); p95 = nearest rank. The ring keeps the last 4096 arrivals; when it has wrapped the window
+ * shortens to its oldest arrival. n = arrivals counted, rate_hz = n / window. Scheduler thread (~80 KB of stack). */
+void nr_sense_dci_arrival(uint16_t prbs, uint64_t t_ns);
 typedef struct { uint64_t p95_gap_ns; float rate_hz; uint32_t n; } nr_sense_gapstat_t;
-void nr_sense_unit_cfr_gaps(int cell, uint64_t now_ns, uint64_t window_ns, const int *thr, int n_thr, nr_sense_gapstat_t *out);
+void nr_sense_unit_arrival_gaps(int cell, uint64_t now_ns, uint64_t window_ns, const int *thr, int n_thr, nr_sense_gapstat_t *out);
 /* The PDSCH decode stage (LDPC of a grant) in SENSING mode: every wideband grant is decoded whatever its unit says, so this is a protected baseline, not a unit cost. Its CPU joins the
  * cell's unattributed (baseline) cost; its queue wait feeds the baseline of the decode queue (nr_sense_unit_take_decode_wait_max: longest wait since the previous take). */
 void nr_sense_unit_decode_job(uint64_t cpu_ns, uint64_t wait_ns, uint64_t t_ns);

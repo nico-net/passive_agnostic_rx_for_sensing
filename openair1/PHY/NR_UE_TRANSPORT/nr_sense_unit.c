@@ -40,7 +40,7 @@ typedef struct {
   _Atomic uint64_t unattributed_ns;    /* cost-only calls of an RNTI without a row (I-1) and the PDSCH decode stage (protected baseline) */
   _Atomic uint64_t dec_wait_max;       /* longest decode-queue wait since the last take (ns) */
   _Atomic uint64_t viol_total, skip_total, wb_valid, wb_valid_prbs, last_wb_ns, gap_max_ns; /* cell totals for the metrics (S7) */
-  _Atomic uint64_t ev[CFR_EV_N];       /* S9: the cell's latest valid CFR records, (t_ns / 1000) << 16 | valid_prbs; 0 = empty */
+  _Atomic uint64_t ev[CFR_EV_N];       /* S9: the cell's latest DCI arrivals, (t_ns / 1000) << 16 | grant PRBs; 0 = empty */
   _Atomic uint64_t ev_head;            /* records written so far (the next slot is ev_head % CFR_EV_N) */
   atomic_flag create_lock;
   unit_t u[NR_UNIT_ROWS][NR_UNIT_SRC_N];
@@ -253,10 +253,6 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
   unit_tab_t *T = tab_of(nr_cell_idx());
   rnti = unit_rnti(s, rnti);
   int r;
-  if (valid_prbs > 0 && t_ns >= 1000) { /* S9 continuity feed: any valid record of any unit, with its valid PRBs, before the row lookup (a narrow record opens no row) */
-    const uint64_t i = atomic_fetch_add_explicit(&T->ev_head, 1, memory_order_relaxed);
-    atomic_store_explicit(&T->ev[i % CFR_EV_N], ((t_ns / 1000) << 16) | valid_prbs, memory_order_relaxed);
-  }
   unit_t *u = unit_get(T, s, rnti, wideband_capable(valid_prbs), t_ns, &r);
   if (!u)
     return;
@@ -435,7 +431,15 @@ bool nr_sense_unit_gate_deferred(nr_unit_src_t s, uint16_t rnti, uint16_t est_us
 
 static int cmp_u64(const void *a, const void *b);
 
-void nr_sense_unit_cfr_gaps(int cell, uint64_t now_ns, uint64_t window_ns, const int *thr, int n_thr, nr_sense_gapstat_t *out)
+void nr_sense_dci_arrival(uint16_t prbs, uint64_t t_ns)
+{
+  if (!prbs || t_ns < 1000 || nr_isac_mode() != NR_ISAC_MODE_SENSING) return;
+  unit_tab_t *T = tab_of(nr_cell_idx());
+  const uint64_t i = atomic_fetch_add_explicit(&T->ev_head, 1, memory_order_relaxed);
+  atomic_store_explicit(&T->ev[i % CFR_EV_N], ((t_ns / 1000) << 16) | prbs, memory_order_relaxed);
+}
+
+void nr_sense_unit_arrival_gaps(int cell, uint64_t now_ns, uint64_t window_ns, const int *thr, int n_thr, nr_sense_gapstat_t *out)
 {
   for (int i = 0; i < n_thr; i++) out[i] = (nr_sense_gapstat_t){0};
   if (cell < 0 || cell >= NR_CELL_MAX || !window_ns || now_ns < window_ns) return;

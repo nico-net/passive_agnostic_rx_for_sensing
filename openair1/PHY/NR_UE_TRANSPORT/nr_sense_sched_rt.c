@@ -198,10 +198,14 @@ void nr_sense_sched_step(uint64_t now_ns)
   in.floor_prb = nr_isac_sense_min_prb_floor();
   in.cont_target_ns = (uint64_t)nr_isac_sense_cont_target_ms() * 1000000ull;
   {
-    int steps[SENSE_FLOOR_MAX_STEPS];
+    int steps[SENSE_FLOOR_MAX_STEPS + 1];
     const int ns = nr_sense_floor_steps(in.min_prb, in.floor_prb, steps);
-    for (int c = 0; c < in.n_cells; c++) { /* the continuity feed over the last decision period, per step */
-      nr_sense_unit_cfr_gaps(c, now_ns, SENSE_DECIDE_NS, steps, ns, in.gap[c]);
+    steps[ns] = 1; /* one more threshold: arrivals of any size = the evidence that the cell has grants at all */
+    for (int c = 0; c < in.n_cells; c++) { /* the continuity feed (DCI arrivals) over the last decision period, per level */
+      nr_sense_gapstat_t g[SENSE_FLOOR_MAX_STEPS + 1];
+      nr_sense_unit_arrival_gaps(c, now_ns, SENSE_DECIDE_NS, steps, ns + 1, g);
+      memcpy(in.gap[c], g, (size_t)ns * sizeof g[0]);
+      in.arrivals[c] = g[ns].n;
       in.gap_valid[c] = true;
     }
   }
@@ -243,9 +247,18 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
   LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s admitted=%d [%s] t_cell=[%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_ul_base=unmeasured gpu_base=unmeasured\n",
         (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), out->n_admitted, set, tc, en,
         (unsigned long)viol, (unsigned long)skips, (unsigned long)drops, sm->res[NR_RES_POOL].cap_ns * 1e-6, sm->res[NR_RES_POOL].base_p99_ns * 1e-6); /* per 50 ms bucket */
-  for (int c = 0; c < in->n_cells; c++)
-    LOG_A(PHY, "SENSING: SENSE_FLOOR cell=%d pci=%d t_cell=%d gap_p95_ms=%.1f in_gap=%d target_ms=%.0f n_cfr=%u rate_hz=%.1f\n", c, sm->pci[c], out->floor_prb[c], (double)out->gap_p95_ns[c] * 1e-6, (int)out->in_gap[c],
-          (double)in->cont_target_ns * 1e-6, (unsigned)in->gap[c][0].n, (double)in->gap[c][0].rate_hz);
+  {
+    int steps[SENSE_FLOOR_MAX_STEPS];
+    const int ns = nr_sense_floor_steps(in->min_prb, in->floor_prb, steps);
+    for (int c = 0; c < in->n_cells; c++) {
+      char lv[160];
+      int w = 0;
+      lv[0] = 0;
+      for (int i = 0; i < ns; i++) w += snprintf(lv + w, sizeof lv - (size_t)w, "%s%d:%.1f/%u", i ? "," : "", steps[i], (double)in->gap[c][i].p95_gap_ns * 1e-6, (unsigned)in->gap[c][i].n);
+      LOG_A(PHY, "SENSING: SENSE_FLOOR cell=%d pci=%d t_cell=%d gap_p95_ms=%.1f in_gap=%d target_ms=%.0f arrivals=%u levels(prb:p95_ms/n)=[%s]\n", c, sm->pci[c], out->floor_prb[c], (double)out->gap_p95_ns[c] * 1e-6, (int)out->in_gap[c],
+            (double)in->cont_target_ns * 1e-6, (unsigned)in->arrivals[c], lv);
+    }
+  }
   /* the units behind the decision (the first 8 per cell): enabled flag, wideband rate, valid ratio, p99 CPU per bucket (ms), skips and violations since the row was created */
   for (int c = 0; c < in->n_cells; c++) {
     char u[640];
