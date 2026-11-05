@@ -72,3 +72,14 @@ Rulings implemented: C1+I2 verified absolute per-cell prior; I1 symmetric decisi
 - Verification [DGX aarch64]: build 24 .so; ctest -j4 17 failed, all in the known set (test_nr_gpu_pass also fails on the parent build, shown last round); static audit rc 0 (5 PER_CELL rows added); frozen OK;
   legacy 4-RX rfsim gate 2 x 420 s PASS (ttc 4.49/4.62 s, postsolve CRC 100.00 over 51803/50302 grants, crc_floor 96.12/95.94, drop_full 0.012/0.028 %).
 - Open: margin unmeasured on OTA; prior_total is the lock-time value (tracker not folded in; fine below half a period); a cell with no verified TB before its first RX_RECOVER has no prior.
+
+## Fix round 3 (commit f65724703e)
+- N1: the first lock of a cell has producer slot -1; nr_cfo_crc_counts no longer requires lock_slot >= 0, so every TB (slot >= 0) after the first lock verifies it. Test: crc_counts(0,-1) and (5000,-1) true.
+- N2: strict `job_slot > lock_slot` (the slot at the lock is the last one produced before the loss). Test: 1000 vs lock 1000 and 999 do not count.
+- N3: slot and count are changed together under one mutex (lock and CRC-OK TB only); no consumer holding the old slot can add to the new epoch. Statics row added.
+- N5: a lock of another PCI resets the unverified streak (test A,A,B,A keeps the prior). The 3-idle-re-syncs-without-TB case still drops a correct prior (back to pre-patch behaviour; accepted, noted).
+- N4: pbch_dmrs_scan is the single computation (shared by nr_pbch_detection and nr_pbch_dmrs_metrics), the start symbol is a parameter; the PBCH DM-RS is in SSB symbols 1..3 (TS 38.211 7.4.3.1).
+- N7 note: with cont_fo_comp a first-pass CRC proves the tracker converged from the lock, not that the lock CFO was the true one; a wrong lock the tracker repairs is harmless.
+- N6: metrics keys added without a schema bump (parsers key by name).
+- Verification: test_nr_sync_pin passes; full build 24 .so; ctest -j4 17 failed = known set plus test_nr_spin_handoff (load-flaky, passes alone); static audit --check rc 0, rows renumbered by hand (nr_initial_sync.c 314/592/790/864); frozen OK;
+  legacy 4-RX rfsim gate 1 x 420 s PASS (ttc 4.56 s, postsolve CRC 100.00 over 52079 grants, crc_floor 96.05, drop_full 0.012 %).
