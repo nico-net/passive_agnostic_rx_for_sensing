@@ -34,8 +34,20 @@ static inline int nr_sss_cfo_period_hz(int scs_hz)
 {
   return (int)(2.0 * scs_hz / 4.3 + 0.5);
 }
-/* k such that est_hz + k * period_hz lies nearest to prior_hz (0 when the estimate is already within period/2 of the prior). */
+/* k such that est_hz + k * period_hz lies nearest to prior_hz (0 when the estimate is already within period/2 of the prior). est_hz and prior_hz are in the SAME units: the
+ * re-sync estimate is relative to the radio's current tuning, so the prior is the last VERIFIED total lock CFO minus that tuning (nr-ue.c). A real step of the tuning (a radio
+ * left mistuned by an earlier wrong lock) therefore does not look like an alias: OTA tmA1B_1_160108 epoch 3 measured +14161 on a radio at -13977, prior +237 - (-13977) = 14214 -> k 0. */
 int nr_cfo_alias_k(int est_hz, int prior_hz, int period_hz);
+/* One alias hypothesis of a re-sync: PBCH CRC, and the best-SSB PBCH DM-RS correlation energy m (coherent over the 3 PBCH symbols, so a residual CFO costs it) with mu0 = mean
+ * correlation energy of the wrong SSB indices decoded from the same samples (the noise-only distribution of m). */
+typedef struct {
+  int crc;
+  double m, mu0;
+} nr_resync_hyp_t;
+/* Decision between the measured estimate (h0) and the alias nearest the verified prior (h1), both decoded at their full compensation. 1: take the alias, 0: keep the measurement.
+ * *neither = 1 when neither passes CRC (measurement kept, the caller counts it). Exactly one CRC pass decides. Both pass: a noise-only correlation energy is exponential with mean mu0, so
+ * the energy of a signal-plus-noise bin has variance 2 m mu0 + mu0^2; the winner needs a lead of 3 sigma of the difference, else the hypothesis nearer the prior (the alias, by its choice). */
+int nr_resync_cfo_decide(const nr_resync_hyp_t *h0, const nr_resync_hyp_t *h1, int *neither);
 /* A2: true when gate_slot (frame * slots_per_frame + slot) lies in the search-space window [offset, offset + dur) of a period (slots). A period <= 0 is never. */
 static inline int nr_acq_slot_in_window(unsigned gate_slot, int period, int offset, int dur)
 {

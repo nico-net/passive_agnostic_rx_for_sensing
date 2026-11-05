@@ -13,6 +13,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h"
 #include "PHY/NR_REFSIG/sss_nr.h"
+#include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "executables/nr-uesoftmodem.h"
 #include "common/config/config_load_configmodule.h"
 #include "PHY/TOOLS/tools_defs.h"
@@ -176,6 +177,7 @@ typedef struct {
   bool sel_ok;
 } lock_t;
 
+static nr_ssb_search_params_t g_last_p; /* the parameters (with the PSS/SSS results) of the last search(), for the re-evaluation seam test */
 static bool g_fo; /* A1 test: the estimators run (fo_flag) and the PSS estimate is compensated in place, as in nr_scan_ssb() */
 static bool g_decim; /* the decimated float PSS path of the passive full search (production) or the stock int16 search */
 static lock_t search(const c16_t *cap, int target)
@@ -186,7 +188,8 @@ static lock_t search(const c16_t *cap, int target)
   static c16_t pssTime[NUMBER_PSS_SEQUENCE][FFT] __attribute__((aligned(32)));
   for (int n2 = 0; n2 < NUMBER_PSS_SEQUENCE; n2++)
     generate_pss_nr_time(FFT, fp.first_carrier_offset, n2, SSB_SC, pssTime[n2]);
-  c16_t *rx[1] = {(c16_t *)cap};
+  static c16_t *rx[1];
+  rx[0] = (c16_t *)cap;
   nr_ssb_search_params_t p = {
       .dl_CarrierFreq = fp.dl_CarrierFreq,
       .sampling_rate = fp.samples_per_subframe * 1000,
@@ -216,6 +219,7 @@ static lock_t search(const c16_t *cap, int target)
       .pss_decim = g_decim,
   };
   lock_t l = {.found = nr_search_ssb_common(&p)};
+  g_last_p = p;
   if (l.found) {
     l.pci = p.sss_res.nid_cell;
     l.pos = p.pss_res.pos;
@@ -331,44 +335,146 @@ static void cfo_escalation(int pci, int cfo_hz)
  * wraps at +-scs/4.3); a PSS error beyond that wrap returns the truth minus one period (13953 Hz). The capture here is already at the radio's tuning (true residual `cfo_hz`, prior 0).
  * Checks, on the production estimators at several PSS strengths: whenever the raw estimate is a period off, nr_cfo_alias_k with the prior 0 returns it to the truth (+-400 Hz);
  * the alias occurs at least once (the test is sensitive); an estimate already near the prior gets k = 0; no prior leaves nothing to resolve (the caller only runs it with one). */
+/* residual CFO of the SSB window in p->rxdata, from the cyclic prefix of its 4 symbols (the CP repeats the symbol tail: phase of sum conj(x[n]) x[n+FFT] = 2 pi f FFT / fs) */
+static double window_cfo_hz(const nr_ssb_search_params_t *p)
+{
+  const int off = p->pss_res.pos - CP;
+  double re = 0, im = 0;
+  for (int sym = 1; sym < 4; sym++) { /* not the PSS symbol: the test's PSS-error emulation rotates it alone */
+    const c16_t *x = p->rxdata[0] + off + sym * (CP + FFT);
+    for (int n = 0; n < CP; n++) {
+      re += (double)x[n].r * x[n + FFT].r + (double)x[n].i * x[n + FFT].i;
+      im += (double)x[n].r * x[n + FFT].i - (double)x[n].i * x[n + FFT].r;
+    }
+  }
+  return atan2(im, re) / (2.0 * M_PI) * 30000.0;
+}
+typedef struct {
+  double tol_hz;
+  int calls;
+  double res_hz[2];
+} fake_ctx_t;
+/* fake PBCH: the CRC passes within tol_hz of residual CFO (the real one passes up to ~0.46 SCS), the DM-RS energy falls with the residual */
+static bool fake_decode(void *vc, int hyp, double *m, double *mu0)
+{
+  fake_ctx_t *c = vc;
+  c->calls++;
+  c->res_hz[hyp] = window_cfo_hz(&g_last_p);
+  *m = 1e6 / (1.0 + c->res_hz[hyp] * c->res_hz[hyp] / 1e6);
+  *mu0 = 100;
+  return fabs(c->res_hz[hyp]) <= c->tol_hz;
+}
+
+/* a capture of cell `pci` at +true_hz, the PSS stage forced pss_err_hz off (rotation of the PSS symbol only: a crude emulation, hence the residual of ~600 Hz) */
+static c16_t *rotated_capture(int pci, int true_hz, int pss_err_hz)
+{
+  NR_DL_FRAME_PARMS fp;
+  make_fp(&fp);
+  const double fs = fp.samples_per_subframe * 1000.0;
+  const int s0 = 60000;
+  grng = 0x9e3779b97f4a7c15ull; /* the same noise every call */
+  c16_t *cap = make_capture(pci, -1, 4.0, 0, s0, 0);
+  for (int i = 0; i < fp.samples_per_frame; i++) {
+    const double a = 2.0 * M_PI * (true_hz + (i >= s0 && i < s0 + CP + FFT ? pss_err_hz : 0)) * (double)i / fs;
+    const c16_t c = cap[i];
+    cap[i].r = (int16_t)lrint(c.r * cos(a) - c.i * sin(a));
+    cap[i].i = (int16_t)lrint(c.r * sin(a) + c.i * cos(a));
+  }
+  return cap;
+}
+
+/* RX_RECOVER re-sync CFO alias (2026-11-05 OTA, cell 923: -13802 / -14282 Hz for a true ~+200 Hz). The estimate is PSS (half-symbol phase) + SSS residual (phase over the PSS-SSS spacing,
+ * wraps at +-scs/4.3); a PSS error beyond that wrap returns the truth minus one period (13953 Hz). Prior and estimate are in the same units: the VERIFIED total lock CFO minus the radio tuning.
+ * Pure helpers on the OTA values, the decision rule, then the production re-evaluation (nr_resync_cfo_reeval) through a fake PBCH decoder on synthetic captures. */
 static void resync_alias(int pci)
 {
   const int period = nr_sss_cfo_period_hz(30000);
   CHECK(period > 13900 && period < 14000, "period %d", period);
-  NR_DL_FRAME_PARMS fp;
-  make_fp(&fp);
-  const double fs = fp.samples_per_subframe * 1000.0;
-  const int s0 = 60000, true_hz = 200;
-  int n_total = 0, n_wrapped = 0;
-  /* pss_err_hz: extra rotation of the PSS symbol only = the PSS stage reads true + pss_err_hz; a PSS error beyond +-scs/4.3 leaves the SSS stage a residual past its wrap */
-  for (int pss_err_hz = -11000; pss_err_hz <= 11000; pss_err_hz += 2200) {
-    c16_t *cap = make_capture(pci, -1, 4.0, 0, s0, 0);
-    for (int i = 0; i < fp.samples_per_frame; i++) {
-      const double a = 2.0 * M_PI * (true_hz + (i >= s0 && i < s0 + CP + FFT ? pss_err_hz : 0)) * (double)i / fs;
-      const c16_t c = cap[i];
-      cap[i].r = (int16_t)lrint(c.r * cos(a) - c.i * sin(a));
-      cap[i].i = (int16_t)lrint(c.r * sin(a) + c.i * cos(a));
-    }
-    const lock_t l = search(cap, pci);
-    free(cap);
-    if (!l.found)
-      continue;
-    n_total++;
-    const int est = l.fo_pss + l.fo_sss, k = nr_cfo_alias_k(est, 0, period), res = est + k * period;
-    printf("  PSS stage error %6d Hz: pss %6d sss %6d est %6d -> k %d -> %d\n", pss_err_hz, l.fo_pss, l.fo_sss, est, k, res);
-    CHECK(abs(res) <= period / 2, "resolved %d is not within half a period of the prior", res);
-    /* the PSS-symbol-only rotation is a crude emulation (other errors are not clean aliases); where the raw estimate IS one period off the truth, the resolution must restore it */
-    if (abs(est - (true_hz - period)) <= 900 || abs(est - (true_hz + period)) <= 900) {
-      n_wrapped++;
-      CHECK(k != 0 && abs(res - true_hz) <= 900, "pss_err %d: est %d (pss %d sss %d) k %d -> %d, truth %d", pss_err_hz, est, l.fo_pss, l.fo_sss, k, res, true_hz);
-    }
-  }
-  CHECK(n_total >= 8, "locks %d", n_total);
-  CHECK(n_wrapped >= 2, "no PSS error reproduced the alias (the test would not detect a missing resolution)");
+  /* E1B: verified total 248, radio at 248 -> prior in estimate units 0; the re-sync measured -13802 */
+  CHECK(nr_cfo_alias_k(-13802, 248 - 248, period) == 1, "E1B: alias must be resolved");
+  /* A1B epoch 2: verified 237, radio 237: -14282 -> alias */
+  CHECK(nr_cfo_alias_k(-14282, 237 - 237, period) == 1, "A1B epoch 2: alias");
+  /* A1B epoch 3: radio left at -13977 by the wrong lock, verified total 237 -> prior 237 + 13977; measured +14161 is the CORRECT residual: no alias, and the total 14161 - 13977 = 184 */
+  CHECK(nr_cfo_alias_k(14161, 237 + 13977, period) == 0, "A1B epoch 3: a real tuning step must not be flipped");
+  CHECK(nr_cfo_alias_k(14161, 0, period) == -1, "(documents the rejected prior-0 behaviour)");
   CHECK(nr_cfo_alias_k(151, 0, period) == 0 && nr_cfo_alias_k(-6900, 0, period) == 0, "near the prior: k must be 0");
-  CHECK(nr_cfo_alias_k(-13802, 0, period) == 1 && nr_cfo_alias_k(-14282, 0, period) == 1 && nr_cfo_alias_k(14161, 0, period) == -1, "E1B/A1B OTA values");
   CHECK(nr_cfo_alias_k(-13802, 248, period) == 1 && nr_cfo_alias_k(-13802 + period, 248, period) == 0, "prior 248 picks +151");
   CHECK(nr_cfo_alias_k(5000, 0, 0) == 0, "degenerate period");
+
+  /* decision rule */
+  int ne;
+  nr_resync_hyp_t a = {1, 1e6, 100}, b = {0, 1e6, 100}, c = {1, 1e4, 100}, d = {1, 1.001e6, 100};
+  CHECK(nr_resync_cfo_decide(&a, &b, &ne) == 0 && !ne, "only h0 passes CRC -> keep");
+  CHECK(nr_resync_cfo_decide(&b, &a, &ne) == 1 && !ne, "only h1 passes CRC -> alias");
+  CHECK(nr_resync_cfo_decide(&b, &b, &ne) == 0 && ne == 1, "neither -> keep, counted");
+  CHECK(nr_resync_cfo_decide(&a, &c, &ne) == 0 && !ne, "both pass, h0 energy decisively higher -> keep");
+  CHECK(nr_resync_cfo_decide(&c, &a, &ne) == 1 && !ne, "both pass, h1 decisively higher -> alias");
+  CHECK(nr_resync_cfo_decide(&a, &d, &ne) == 1, "both pass, within 3 sigma -> the hypothesis nearer the prior (the alias)");
+
+  /* the production re-evaluation: truth +200 Hz, PSS stage -11000 Hz off, radio correctly tuned (prior 0) */
+  NR_DL_FRAME_PARMS fp;
+  make_fp(&fp);
+  int n_flipped = 0;
+  for (int mode = 0; mode < 4; mode++) {
+    c16_t *cap = rotated_capture(pci, 200, -11000);
+    const lock_t l = search(cap, pci);
+    CHECK(l.found, "mode %d: no lock", mode);
+    if (!l.found) {
+      free(cap);
+      continue;
+    }
+    const int est = l.fo_pss + l.fo_sss;
+    CHECK(abs(est - (200 - period)) <= 900, "mode %d: est %d is not the E1B-like alias", mode, est);
+    /* snapshot of the state a rejected alias must leave untouched */
+    const int off = g_last_p.pss_res.pos - CP, win = 4 * (FFT + CP);
+    c16_t *before = malloc(win * sizeof(c16_t));
+    memcpy(before, cap + off, win * sizeof(c16_t));
+    static c16_t F0[NR_N_SYMBOLS_SSB][1][FFT];
+    memcpy(F0, g_last_p.rxdataF, sizeof(F0));
+    const double rsrp0 = nr_ue_calculate_ssb_rsrp(&fp, F0[2], SSB_SC);
+    uint64_t unresolved = 0;
+    fake_ctx_t fc = {.tol_hz = mode == 0 ? 15000 : mode == 1 ? 3000 : mode == 2 ? 100 : 15000};
+    const int prior_e = mode == 3 ? est : 0; /* mode 3: a prior consistent with the measurement */
+    const int k = nr_resync_cfo_reeval(&g_last_p, est, prior_e, l.fo_sss, &unresolved, fake_decode, &fc);
+    printf("  reeval mode %d: est %d prior %d -> k %d, residual h0 %.0f h1 %.0f, unresolved %lu\n", mode, est, prior_e, k, fc.res_hz[0], fc.res_hz[1], (unsigned long)unresolved);
+    if (mode == 0 || mode == 1) { /* both CRCs pass (energy decides) / only the alias passes */
+      CHECK(k == 1 && fc.calls == 2, "mode %d: alias must be taken (k %d calls %d)", mode, k, fc.calls);
+      CHECK(fabs(window_cfo_hz(&g_last_p)) <= 1500 && fabs(window_cfo_hz(&g_last_p)) < fabs(fc.res_hz[0]) / 8,  "mode %d: recompensation sign/size: residual %.0f Hz", mode, window_cfo_hz(&g_last_p));
+      { /* exact sign and size: the window is the entry window rotated by -(sss + k*period) from phase 0 (the CP estimator above wraps at 2 periods and cannot see a sign flip) */
+        const double w = -2.0 * M_PI * (double)(l.fo_sss + k * nr_sss_cfo_period_hz(30000)) / (fp.samples_per_subframe * 1000.0);
+        int worst = 0;
+        for (int n = 0; n < win; n++) {
+          const int er = (int)lrint(before[n].r * cos(w * n) - before[n].i * sin(w * n)), ei = (int)lrint(before[n].r * sin(w * n) + before[n].i * cos(w * n));
+          worst = max(worst, max(abs(er - cap[off + n].r), abs(ei - cap[off + n].i)));
+        }
+        CHECK(worst <= 3, "mode %d: window is not the entry window rotated by the alias compensation (worst diff %d)", mode, worst);
+      }
+      n_flipped++;
+    } else if (mode == 2) { /* neither passes: measurement kept, state restored bit-exactly, counted */
+      CHECK(k == 0 && unresolved == 1, "neither: k %d unresolved %lu", k, (unsigned long)unresolved);
+      CHECK(memcmp(before, cap + off, win * sizeof(c16_t)) == 0, "rejected alias must restore the SSB window");
+      CHECK(memcmp(F0, g_last_p.rxdataF, sizeof(F0)) == 0, "rejected alias must restore rxdataF");
+      CHECK(nr_ue_calculate_ssb_rsrp(&fp, ((c16_t(*)[1][FFT])g_last_p.rxdataF)[2], SSB_SC) == rsrp0, "rsrp (rx gain) must not change after a rejected alias");
+    } else { /* prior equal to the measurement: no re-evaluation at all */
+      CHECK(k == 0 && fc.calls == 0 && memcmp(before, cap + off, win * sizeof(c16_t)) == 0, "estimate at the prior: nothing may run (calls %d)", fc.calls);
+    }
+    free(before);
+    free(cap);
+  }
+  CHECK(n_flipped == 2, "flipped %d", n_flipped);
+
+  /* A1B epoch 3: the radio is mistuned by -13977, the capture holds the cell at +14161; estimate +14161, verified prior 237 -> 14214 in estimate units: no alias, nothing runs */
+  c16_t *cap = rotated_capture(pci, 14161, 0);
+  const lock_t l = search(cap, pci);
+  CHECK(l.found, "A1B epoch 3 lock");
+  if (l.found) {
+    const int est = l.fo_pss + l.fo_sss;
+    fake_ctx_t fc = {.tol_hz = 15000};
+    uint64_t un = 0;
+    CHECK(abs(est - 14161) <= 900, "A1B epoch 3: est %d", est);
+    CHECK(nr_resync_cfo_reeval(&g_last_p, est, 237 + 13977, l.fo_sss, &un, fake_decode, &fc) == 0 && fc.calls == 0, "A1B epoch 3: must not be flipped (calls %d)", fc.calls);
+  }
+  free(cap);
 }
 
 /* A3: two cells both accepted by the blind pass (weaker one 4 dB down): the pass keeps both, strongest SSS metric first, both PCIs reported, and the second can be selected */

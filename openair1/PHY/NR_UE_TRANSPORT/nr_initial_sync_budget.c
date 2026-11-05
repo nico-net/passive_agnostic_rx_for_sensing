@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
+#include <math.h>
 #include "nr_initial_sync_budget.h"
 #include <stdlib.h>
 
@@ -23,6 +24,22 @@ int nr_cfo_alias_k(int est_hz, int prior_hz, int period_hz)
     return 0;
   const double q = (double)(prior_hz - est_hz) / period_hz;
   return (int)(q < 0 ? q - 0.5 : q + 0.5);
+}
+
+int nr_resync_cfo_decide(const nr_resync_hyp_t *h0, const nr_resync_hyp_t *h1, int *neither)
+{
+  *neither = 0;
+  if (h0->crc != h1->crc)
+    return h1->crc ? 1 : 0;
+  if (!h0->crc) {
+    *neither = 1;
+    return 0;
+  }
+  const double s0 = 2 * h0->m * h0->mu0 + h0->mu0 * h0->mu0, s1 = 2 * h1->m * h1->mu0 + h1->mu0 * h1->mu0;
+  const double lead = 3.0 * sqrt(s0 + s1);
+  if (h0->m > h1->m + lead)
+    return 0;
+  return 1; /* decisive for the alias, or a tie: the alias is the hypothesis nearer the prior */
 }
 
 int nr_acq_cfo_ladder(int centre_hz, int scs_hz, int limit_hz, int *out, int max)

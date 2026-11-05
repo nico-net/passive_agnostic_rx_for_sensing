@@ -1209,8 +1209,6 @@ openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	32	s_ssb_reject	file_static	nr_ss
 openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	260	do_time_to_freq::s_fepdiag_acq_left	func_static	int	PROCESS	AUDIT	one-shot diagnostic budgets of the initial sync (log only)
 openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	478	nr_scan_ssb::s_rms_done	func_static	volatile int	PROCESS	AUDIT	one-shot diagnostic budgets of the initial sync (log only)
 openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	663	nr_initial_sync_capture_start	tls	int64_t	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	694	nr_initial_sync_prior_valid	tls	int	TLS	AUDIT	RX_RECOVER re-sync prior (set/cleared by the cell sync actor in UE_synch)
-openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	695	nr_initial_sync_prior_hz	tls	int	TLS	AUDIT	RX_RECOVER re-sync prior CFO (same thread)
 openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	737	nr_initial_sync_impl::s_pinned_fail	func_static	int [converted]	PER_CELL	AUDIT	converted (fix1031)
 openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.c	5	nr_auto_acquire_on	global	int	PROCESS	AUDIT	automatic-acquisition mode flag set once by main from the command line, identical for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_llr_norm.h	99	nr_llr_norm_shift_nl::dk	func_static	int	PROCESS	AUDIT	mpci audit: LLR normalisation policy read once (A/B seam of the existing NR_TEST_L2NORM_*), identical for every cell

@@ -244,6 +244,21 @@ typedef struct {
   uint64_t recover_epoch;
 } syncData_t;
 
+/* Evidence that a lock of this cell was right: TB CRC passes (PDSCH, CRC24: a false pass is 6e-8 per TB, so one is conclusive) plus SIB1 decodes, from the cell's own counters. */
+static uint64_t cfo_lock_evidence(PHY_VARS_NR_UE *UE)
+{
+  nr_passive_metrics_t *m = calloc(1, sizeof(*m));
+  if (!m)
+    return 0;
+  const int prev = nr_cell_idx();
+  nr_cell_bind(UE->Mod_id);
+  nr_passive_metrics_collect(m);
+  nr_cell_bind(prev);
+  const uint64_t e = m->pdschq_crc_ok + m->acq_sib1_decodes;
+  free(m);
+  return e;
+}
+
 /* UE_synch: initial synchronisation job (run on the sync actor): searches the SSB raster for the cell (full search, or the fast PSS search around the predicted position with radius and coarse fallbacks under ISAC_RX_RECOVER), then retunes the radio when not on continuous FO compensation and applies the post-sync gain.
  *   On success it sets pss_tick, rx_offset, UE->is_synchronized and nr_ue_rx_synced_g. On failure it raises the RX gain (AGC) and reports the failure. Sidelink mode uses the SLSS search. Caller: UE_thread() as the job of the sync notified FIFO.
  */
@@ -267,6 +282,16 @@ static void UE_synch(void *arg) {
 
   LOG_I(PHY, "[UE thread Synch] Running Initial Synch \n");
 
+  /* CFO prior for every search of this job (fast tries, full-capture fallback, retry, plain sync-loss re-sync): the total CFO of the last lock of this cell that is VERIFIED, i.e. TB CRCs or
+   * a SIB1 decoded after it. A lock nobody verified (a wrong re-sync, a lock that decoded nothing) never replaces an older verified one. The re-sync estimate is relative to the radio's
+   * current tuning (cont_fo_comp: already the total), so the prior is expressed in those units; a radio left mistuned by an earlier wrong lock is then corrected, not locked in. */
+  if (UE->cfo_verify.last_valid && cfo_lock_evidence(UE) > UE->cfo_verify.last_evidence) {
+    UE->cfo_verify.prior_valid = true;
+    UE->cfo_verify.prior_total = UE->cfo_verify.last_total;
+    UE->cfo_verify.prior_pci = UE->cfo_verify.last_pci;
+  }
+  UE->cfo_verify.prior_est_hz = UE->cfo_verify.prior_total - (get_nrUE_params()->cont_fo_comp ? 0 : nrue_ru_radio_fo());
+
   uint64_t dl_carrier, ul_carrier;
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
   nr_initial_sync_t ret = {false, 0, 0};
@@ -277,11 +302,7 @@ static void UE_synch(void *arg) {
     ret = sl_nr_slss_search(UE, &syncD->proc, SL_NR_SSB_REPETITION_IN_FRAMES);
   } else {
     nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
-    extern __thread int nr_initial_sync_prior_valid, nr_initial_sync_prior_hz;
     if (syncD->fast_pss_position >= 0) {
-      /* a lock existed: the estimate is relative to the radio's current tuning (cont_fo_comp: the tracked total), so the tracked CFO is 0 (resp. that total) in its units */
-      nr_initial_sync_prior_valid = 1;
-      nr_initial_sync_prior_hz = get_nrUE_params()->cont_fo_comp ? (int)(UE->dl_Doppler_shift + UE->freq_offset) : 0;
       LOG_I(PHY, "SENSING: RX_RECOVER fast PSS/SSS pci=%d ssb_sc=%d frame=%d expected_pos=%d radius=%d\n",
             UE->target_Nid_cell, syncD->gscnInfo[0].ssbFirstSC, syncD->fast_pss_frame, syncD->fast_pss_position,
             syncD->fast_pss_radius);
@@ -323,7 +344,6 @@ static void UE_synch(void *arg) {
       ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
       nr_initial_sync_capture_start = -1;
     }
-    nr_initial_sync_prior_valid = 0;
   }
 
   if (want_pci >= 0 && ret.cell_detected && fp->Nid_cell != want_pci) {
@@ -388,6 +408,10 @@ static void UE_synch(void *arg) {
      * noted while is_synchronized, so nothing races this reset) */
     nr_sfo_resync_cell(UE->Mod_id, "initial sync");
     nr_sense_unit_cell_resync(UE->Mod_id); /* S9: a new timing epoch: unit table, DCI-arrival ring and T_cell of this cell start over (sensing only) */
+    UE->cfo_verify.last_valid = true;
+    UE->cfo_verify.last_total = freq_offset;
+    UE->cfo_verify.last_pci = fp->Nid_cell;
+    UE->cfo_verify.last_evidence = cfo_lock_evidence(UE);
     UE->is_synchronized = 1;
     __atomic_store_n(&nr_ue_rx_synced_g, 1, __ATOMIC_RELEASE);
   } else {
@@ -640,6 +664,7 @@ static void apply_live_tune(PHY_VARS_NR_UE *UE, const ru_tune_t *t)
   fp->ul_CarrierFreq = (uint64_t)((int64_t)dl + ul_off);
   fp->ssb_start_subcarrier = (uint16_t)t->ssb;
   UE->initial_fo = t->cfo_hz;
+  memset(&UE->cfo_verify, 0, sizeof(UE->cfo_verify)); /* another cell may be served now: no verified CFO */
   init_symbol_rotation(fp);
   clean_UE_harq(UE);
   UE->is_synchronized = 0;

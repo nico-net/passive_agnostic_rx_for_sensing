@@ -208,6 +208,9 @@ nr_initial_sync_t nr_initial_sync_fast(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *
 bool nr_search_ssb_common(nr_ssb_search_params_t *params);
 /* A3: make candidate idx (< params->n_alt) of a finished blind nr_search_ssb_common() the current one: redoes its CFO compensation and SSB symbols (params->rxdataF), sets pss_res/sss_res. */
 bool nr_search_ssb_select(nr_ssb_search_params_t *params, int idx);
+/* decode the PBCH of hypothesis hyp (0 measured, 1 alias) from params->rxdataF; returns the CRC and the DM-RS correlation energies (nr_resync_hyp_t) */
+typedef bool (*nr_resync_decode_fn)(void *ctx, int hyp, double *m, double *mu0);
+int nr_resync_cfo_reeval(nr_ssb_search_params_t *p, int est_hz, int prior_hz, int sss_hz, uint64_t *unresolved, nr_resync_decode_fn decode, void *ctx);
 
 /*!
   \brief This function gets the carrier frequencies either from FP or command-line-set global variables, depending on the
