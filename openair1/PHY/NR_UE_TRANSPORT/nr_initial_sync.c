@@ -40,6 +40,21 @@ void nr_initial_sync_ssb_verified(void)
   nr_ssb_reject_init(&s_ssb_reject);
 }
 
+/* Re-sync CFO alias census of this cell (ISAC_METRICS cfo_*): alias taken, measurement kept after a decision, neither hypothesis passed CRC (kept). Bumped by the scan worker bound to the cell. */
+NR_CELL_STATIC(_Atomic uint64_t, g_cfo_taken);
+#define g_cfo_taken NR_CELL_REF(g_cfo_taken)
+NR_CELL_STATIC(_Atomic uint64_t, g_cfo_kept);
+#define g_cfo_kept NR_CELL_REF(g_cfo_kept)
+NR_CELL_STATIC(_Atomic uint64_t, g_cfo_unresolved);
+#define g_cfo_unresolved NR_CELL_REF(g_cfo_unresolved)
+void nr_resync_cfo_stats(uint64_t *taken, uint64_t *kept, uint64_t *unresolved)
+{
+  *taken = atomic_load_explicit(&g_cfo_taken, memory_order_relaxed);
+  *kept = atomic_load_explicit(&g_cfo_kept, memory_order_relaxed);
+  *unresolved = atomic_load_explicit(&g_cfo_unresolved, memory_order_relaxed);
+}
+extern void nr_pbch_diag_snapshot_reference(void);
+
 //#define DEBUG_INITIAL_SYNCH
 #define DUMP_PBCH_CH_ESTIMATES 0
 
@@ -57,6 +72,40 @@ typedef struct NR_UE_SSB {
 static int ssb_sort(const void *a, const void *b)
 {
   return ((NR_UE_SSB *)b)->metric - ((NR_UE_SSB *)a)->metric;
+}
+
+/* nr_pbch_dmrs_metrics: PBCH DM-RS correlation energy (coherent over the 3 PBCH symbols, so a residual CFO costs it) of every SSB-index hypothesis; *best = the largest,
+ * *mu0 = mean of the others (wrong indices: the noise-only distribution of the energy, independent of the CFO), *best_idx = the winner's index (n_hf * N_L + i_ssb). */
+void nr_pbch_dmrs_metrics(const NR_DL_FRAME_PARMS *frame_parms,
+                          int Nid_cell,
+                          int ssb_start_subcarrier,
+                          const c16_t rxdataF[NR_N_SYMBOLS_SSB][frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size],
+                          double *best,
+                          double *mu0,
+                          int *best_idx)
+{
+  const int N_L = (frame_parms->Lmax == 4) ? 4 : 8;
+  const int N_hf = (frame_parms->Lmax == 4) ? 2 : 1;
+  double sum = 0, mx = -1;
+  int mi = 0;
+  for (int hf = 0; hf < N_hf; hf++)
+    for (int l = 0; l < N_L; l++) {
+      cd_t cumul = {0};
+      for (int i = 1; i < 4; i++) {
+        c32_t meas = nr_pbch_dmrs_correlation(frame_parms, i, i - 1, Nid_cell, ssb_start_subcarrier, nr_gold_pbch(frame_parms->Lmax, Nid_cell, hf, l), rxdataF[i]);
+        csum(cumul, cumul, meas);
+      }
+      const double m = squaredMod(cumul);
+      sum += m;
+      if (m > mx) {
+        mx = m;
+        mi = hf * N_L + l;
+      }
+    }
+  *best = mx;
+  *mu0 = N_L * N_hf > 1 ? (sum - mx) / (N_L * N_hf - 1) : 0;
+  if (best_idx)
+    *best_idx = mi;
 }
 
 static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
@@ -95,13 +144,8 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
     }
   }
   qsort(best_ssb, N_L * N_hf, sizeof(NR_UE_SSB), ssb_sort);
-  if (dmrs_m && dmrs_mu0) {
-    double rest = 0;
-    for (int i = 1; i < N_L * N_hf; i++)
-      rest += best_ssb[i].metric;
-    *dmrs_m = best_ssb[0].metric;
-    *dmrs_mu0 = N_L * N_hf > 1 ? rest / (N_L * N_hf - 1) : 0;
-  }
+  if (dmrs_m && dmrs_mu0)
+    nr_pbch_dmrs_metrics(frame_parms, Nid_cell, ssb_start_subcarrier, rxdataF, dmrs_m, dmrs_mu0, NULL);
 
   const int nb_ant = frame_parms->nb_antennas_rx;
   const int estimateSz = frame_parms->ofdm_symbol_size;
@@ -198,8 +242,8 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
       // cross-thread reference for the failure dump. Tracking never succeeds in a failing run, so
       // acquisition -- same signal, same cell, seconds earlier -- is the only available "working"
       // decode to diff a failing tracking decode against.
-      extern void nr_pbch_diag_snapshot_reference(void);
-      nr_pbch_diag_snapshot_reference();
+      if (!dmrs_m) /* a re-sync hypothesis trial leaves the diagnostic reference to the hypothesis that is kept */
+        nr_pbch_diag_snapshot_reference();
       return true;
     }
   }
@@ -460,7 +504,7 @@ bool nr_search_ssb_select(nr_ssb_search_params_t *params, int idx)
  * H0 = est (the SSS residual sss_hz applied, which the first PBCH decode did not have), H1 = est + k*period nearest the prior; nr_resync_cfo_decide() picks (CRC, then DM-RS energy).
  * decode(ctx, hyp, ...) decodes the PBCH from p->rxdataF at the current compensation. Returns k when H1 is taken (the window then holds H1), else 0 with the SSB window and
  * p->rxdataF restored to the state on entry (so the caller's rsrp / rx-gain are those of the measurement). Without a prior nothing here runs. */
-int nr_resync_cfo_reeval(nr_ssb_search_params_t *p, int est_hz, int prior_hz, int sss_hz, uint64_t *unresolved, nr_resync_decode_fn decode, void *ctx)
+int nr_resync_cfo_reeval(nr_ssb_search_params_t *p, int est_hz, int prior_hz, int sss_hz, nr_resync_decode_fn decode, void *ctx)
 {
   const int period = nr_sss_cfo_period_hz((int)p->subcarrier_spacing);
   const int k = nr_cfo_alias_k(est_hz, prior_hz, period);
@@ -487,8 +531,7 @@ int nr_resync_cfo_reeval(nr_ssb_search_params_t *p, int est_hz, int prior_hz, in
   const int take = nr_resync_cfo_decide(&h0, &h1, &neither);
   LOG_W(NR_PHY, "SENSING: RESYNC_CFO_ALIAS est=%d prior=%d k=%d (%d Hz) h0[crc=%d m=%.3g mu0=%.3g] h1[crc=%d m=%.3g mu0=%.3g] -> %s\n", est_hz, prior_hz, k, est_hz + k * period,
         h0.crc, h0.m, h0.mu0, h1.crc, h1.m, h1.mu0, take ? "alias taken" : neither ? "neither passes CRC, measurement kept" : "measurement kept");
-  if (neither && unresolved)
-    __atomic_add_fetch(unresolved, 1, __ATOMIC_RELAXED);
+  atomic_fetch_add_explicit(take ? &g_cfo_taken : neither ? &g_cfo_unresolved : &g_cfo_kept, 1, memory_order_relaxed);
   if (!take) {
     for (int i = 0; i < nant; i++)
       memcpy(wx[i], save + (size_t)i * win, win * sizeof(c16_t));
@@ -697,14 +740,14 @@ static void nr_scan_ssb(void *arg)
         if (ssbInfo->syncRes.cell_detected && ssbInfo->priorValid && ssbInfo->nidCell == ssbInfo->priorPci) {
           /* a verified lock of this cell existed: its CFO (prior, same units as freqOffset) disambiguates the SSS phase wrap, see nr_resync_cfo_reeval() */
           resync_ctx_t rc = {.s = ssbInfo, .rxdataF = rxdataF};
-          const int k = nr_resync_cfo_reeval(&search_params, ssbInfo->freqOffset, ssbInfo->priorHz, search_params.sss_res.freq_offset, ssbInfo->unresolved,
-                                             resync_decode, &rc);
+          const int k = nr_resync_cfo_reeval(&search_params, ssbInfo->freqOffset, ssbInfo->priorHz, search_params.sss_res.freq_offset, resync_decode, &rc);
           if (k != 0) {
             ssbInfo->freqOffset += k * nr_sss_cfo_period_hz((int)fp->subcarrier_spacing);
             ssbInfo->halfFrameBit = rc.hfb[1];
             ssbInfo->ssbIndex = rc.ssbi[1];
             ssbInfo->symbolOffset = rc.symo[1];
             ssbInfo->pbchResult = rc.pr[1];
+            nr_pbch_diag_snapshot_reference();
           }
         }
         if (!ssbInfo->syncRes.cell_detected)
@@ -953,8 +996,7 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
                                     .targetNidCell = ue->target_Nid_cell,
                                     .priorValid = ue->cfo_verify.prior_valid,
                                     .priorHz = ue->cfo_verify.prior_est_hz,
-                                    .priorPci = ue->cfo_verify.prior_pci,
-                                    .unresolved = &ue->cfo_verify.unresolved};
+                                    .priorPci = ue->cfo_verify.prior_pci};
       ssbInfo->pssWindowCenter = pss_window_center;
       ssbInfo->pssWindowRadius = pss_window_radius;
       ssbInfo->pssWindowFrame = one_frame ? 0 : pss_window_frame;

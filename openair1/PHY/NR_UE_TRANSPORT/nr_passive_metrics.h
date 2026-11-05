@@ -23,6 +23,7 @@ typedef struct {
   int pci;                  // -1 unknown
   const char *acq_state;    // nr_passive_acq_state_name(), never NULL ("UNKNOWN")
   uint64_t acq_transitions, acq_sync_losses, acq_pbch_locks, acq_sib1_decodes;
+  uint64_t cfo_alias_taken, cfo_alias_kept, cfo_unresolved; /* re-sync CFO alias census (nr_resync_cfo_reeval) */
   uint64_t pdcch_occasions, pdcch_candidates, pdcch_accepts, pdcch_accepts_c;
   uint64_t scanq_queued, scanq_processed, scanq_drop_full, scanq_drop_stale, scanq_drop_epoch, scanq_max_lag;
   int pdsch_schedule_enabled;

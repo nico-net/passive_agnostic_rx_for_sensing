@@ -48,6 +48,25 @@ typedef struct {
  * *neither = 1 when neither passes CRC (measurement kept, the caller counts it). Exactly one CRC pass decides. Both pass: a noise-only correlation energy is exponential with mean mu0, so
  * the energy of a signal-plus-noise bin has variance 2 m mu0 + mu0^2; the winner needs a lead of 3 sigma of the difference, else the hypothesis nearer the prior (the alias, by its choice). */
 int nr_resync_cfo_decide(const nr_resync_hyp_t *h0, const nr_resync_hyp_t *h1, int *neither);
+/* Verified-lock CFO of one cell (PHY_VARS_NR_UE.cfo_verify), pure so that the gate can be unit-tested (nr-ue.c UE_synch only calls these).
+ * last_*: the latest lock (total CFO Hz = estimate + radio tuning, PCI). prior_*: the last lock that was VERIFIED (a PDSCH TB CRC passed whose slot is after the lock's slot, first pass,
+ * not a rescue: nr_cfo_crc_counts). prior_est_hz: the prior in the units of the next re-sync estimate. After NR_CFO_UNVERIFIED_MAX consecutive unverified locks of the prior PCI the
+ * prior is dropped (behaviour = no prior): a true CFO that moved by more than half a wrap period (reference re-lock, device re-init) would otherwise be flipped for ever. */
+#define NR_CFO_UNVERIFIED_MAX 3
+typedef struct {
+  int last_valid, prior_valid;
+  int last_total, last_pci, prior_total, prior_pci, prior_est_hz;
+  int unverified_streak;
+  volatile int clear_req; /* set by the control thread (live tune), consumed by the cell's sync job: __atomic builtins only */
+} nr_cfo_verify_t;
+static inline int nr_cfo_crc_counts(long job_slot, long lock_slot, int rescued)
+{
+  return !rescued && lock_slot >= 0 && job_slot >= lock_slot; /* jobs enqueued before the lock, and rescues (decodable at SOME FO), prove nothing about it */
+}
+void nr_cfo_verify_record_lock(nr_cfo_verify_t *v, int total_hz, int pci);
+/* At a UE_synch entry: evaluates the previous lock once (lock_crc_ok = counted TBs since it), updates prior_est_hz for the radio tuning now in force. Returns 1 when the prior was dropped. */
+int nr_cfo_verify_select_prior(nr_cfo_verify_t *v, unsigned long long lock_crc_ok, int cont_fo_comp, int radio_fo_hz);
+void nr_cfo_verify_clear(nr_cfo_verify_t *v);
 /* A2: true when gate_slot (frame * slots_per_frame + slot) lies in the search-space window [offset, offset + dur) of a period (slots). A period <= 0 is never. */
 static inline int nr_acq_slot_in_window(unsigned gate_slot, int period, int offset, int dur)
 {

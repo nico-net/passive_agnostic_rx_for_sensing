@@ -436,6 +436,20 @@ NR_CELL_STATIC(_Atomic uint64_t, g_cb_total);
 #define g_cb_total NR_CELL_REF(g_cb_total) /* PDSCHQ cb_crc: per-code-block CRC over the decoded full TBs (not probes) */
 NR_CELL_STATIC(_Atomic uint64_t, g_crc_ok);
 #define g_crc_ok NR_CELL_REF(g_crc_ok)
+/* CFO lock verification (nr_cfo_verify_*): first-pass CRC-OK TBs whose job slot is at or after the slot of the cell's latest lock; reset at each lock. Rescues are not counted. */
+NR_CELL_STATIC(_Atomic long, g_lock_slot);
+#define g_lock_slot NR_CELL_REF(g_lock_slot)
+NR_CELL_STATIC(_Atomic uint64_t, g_lock_crc_ok);
+#define g_lock_crc_ok NR_CELL_REF(g_lock_crc_ok)
+void nr_pdsch_passive_note_lock(int cell, long slot)
+{
+  atomic_store_explicit(&g_lock_crc_ok_cells[cell], 0, memory_order_relaxed);
+  atomic_store_explicit(&g_lock_slot_cells[cell], slot, memory_order_release);
+}
+uint64_t nr_pdsch_passive_lock_crc_ok(int cell)
+{
+  return atomic_load_explicit(&g_lock_crc_ok_cells[cell], memory_order_relaxed);
+}
 /* DL DM-RS identity estimate: one process-wide accumulator shared by every consumer, so evidence
  * from all of them adds. The 1024-candidate sweep runs under this lock on the consumer that
  * happens to hold it -- off the RT thread by construction, since this file IS the consumer. */
@@ -2444,6 +2458,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF); /* SOLVED layout: the DM-RS CFR does not need a CRC pass */
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+        if (nr_cfo_crc_counts(job.absolute_slot, atomic_load_explicit(&g_lock_slot, memory_order_acquire), 0))
+          atomic_fetch_add_explicit(&g_lock_crc_ok, 1, memory_order_relaxed);
         if (job.dmrs_tap)
           consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF);
         if (job.want_data) {

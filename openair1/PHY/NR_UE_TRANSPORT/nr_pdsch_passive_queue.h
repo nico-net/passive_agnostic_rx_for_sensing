@@ -217,6 +217,9 @@ int nr_pdsch_passive_coreset_dmrs_id(int key);
 int nr_pdsch_passive_coreset_dmrs_top(int key, int *out3);
 
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
+/** CFO lock verification: note a new lock of `cell` at producer slot `slot` (resets the count); the count of first-pass CRC-OK TBs since (job slot >= lock slot, nr_cfo_crc_counts). */
+void nr_pdsch_passive_note_lock(int cell, long slot);
+uint64_t nr_pdsch_passive_lock_crc_ok(int cell);
 /** P99: non-probe jobs waiting for a consumer (0 when not running); ISAC_PDSCH_RETRY_YIELD backlog test. */
 int nr_pdsch_passive_queue_backlog_real(void);
 /** MPCI-DASH P4: the largest lag (slots) a consumer saw since the previous call of this function, then reset (calling cell). */

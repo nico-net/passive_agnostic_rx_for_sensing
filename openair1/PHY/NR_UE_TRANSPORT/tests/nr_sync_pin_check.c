@@ -14,6 +14,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h"
 #include "PHY/NR_REFSIG/sss_nr.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
+#include "PHY/NR_REFSIG/nr_refsig.h"
 #include "executables/nr-uesoftmodem.h"
 #include "common/config/config_load_configmodule.h"
 #include "PHY/TOOLS/tools_defs.h"
@@ -432,11 +433,15 @@ static void resync_alias(int pci)
     static c16_t F0[NR_N_SYMBOLS_SSB][1][FFT];
     memcpy(F0, g_last_p.rxdataF, sizeof(F0));
     const double rsrp0 = nr_ue_calculate_ssb_rsrp(&fp, F0[2], SSB_SC);
-    uint64_t unresolved = 0;
+    uint64_t t0, k0, u0;
+    nr_resync_cfo_stats(&t0, &k0, &u0);
     fake_ctx_t fc = {.tol_hz = mode == 0 ? 15000 : mode == 1 ? 3000 : mode == 2 ? 100 : 15000};
     const int prior_e = mode == 3 ? est : 0; /* mode 3: a prior consistent with the measurement */
-    const int k = nr_resync_cfo_reeval(&g_last_p, est, prior_e, l.fo_sss, &unresolved, fake_decode, &fc);
-    printf("  reeval mode %d: est %d prior %d -> k %d, residual h0 %.0f h1 %.0f, unresolved %lu\n", mode, est, prior_e, k, fc.res_hz[0], fc.res_hz[1], (unsigned long)unresolved);
+    const int k = nr_resync_cfo_reeval(&g_last_p, est, prior_e, l.fo_sss, fake_decode, &fc);
+    uint64_t t1, k1, u1;
+    nr_resync_cfo_stats(&t1, &k1, &u1);
+    const uint64_t unresolved = u1 - u0;
+    printf("  reeval mode %d: est %d prior %d -> k %d, residual h0 %.0f h1 %.0f, unresolved %lu taken %lu\n", mode, est, prior_e, k, fc.res_hz[0], fc.res_hz[1], (unsigned long)unresolved, (unsigned long)(t1 - t0));
     if (mode == 0 || mode == 1) { /* both CRCs pass (energy decides) / only the alias passes */
       CHECK(k == 1 && fc.calls == 2, "mode %d: alias must be taken (k %d calls %d)", mode, k, fc.calls);
       CHECK(fabs(window_cfo_hz(&g_last_p)) <= 1500 && fabs(window_cfo_hz(&g_last_p)) < fabs(fc.res_hz[0]) / 8,  "mode %d: recompensation sign/size: residual %.0f Hz", mode, window_cfo_hz(&g_last_p));
@@ -470,11 +475,117 @@ static void resync_alias(int pci)
   if (l.found) {
     const int est = l.fo_pss + l.fo_sss;
     fake_ctx_t fc = {.tol_hz = 15000};
-    uint64_t un = 0;
     CHECK(abs(est - 14161) <= 900, "A1B epoch 3: est %d", est);
-    CHECK(nr_resync_cfo_reeval(&g_last_p, est, 237 + 13977, l.fo_sss, &un, fake_decode, &fc) == 0 && fc.calls == 0, "A1B epoch 3: must not be flipped (calls %d)", fc.calls);
+    CHECK(nr_resync_cfo_reeval(&g_last_p, est, 237 + 13977, l.fo_sss, fake_decode, &fc) == 0 && fc.calls == 0, "A1B epoch 3: must not be flipped (calls %d)", fc.calls);
   }
   free(cap);
+}
+
+/* The verification gate and its units (nr_cfo_verify_*, called by UE_synch), and the lock-evidence rule. */
+static void verify_gate(void)
+{
+  const int P = nr_sss_cfo_period_hz(30000);
+  /* only first-pass TBs whose slot is at/after the lock count; rescues and in-flight jobs from before the lock do not */
+  CHECK(nr_cfo_crc_counts(1000, 1000, 0) && nr_cfo_crc_counts(1001, 1000, 0), "job at or after the lock counts");
+  CHECK(!nr_cfo_crc_counts(999, 1000, 0), "in-flight job enqueued before the lock must not count");
+  CHECK(!nr_cfo_crc_counts(5000, 1000, 1), "a rescue (decodable at some FO) must not count");
+  CHECK(!nr_cfo_crc_counts(5000, -1, 0), "no lock slot yet");
+  nr_cfo_verify_t v = {0};
+  int dropped;
+  /* first lock at total 248 (radio then at 248), nothing verified yet: no prior */
+  nr_cfo_verify_record_lock(&v, 248, 923);
+  dropped = nr_cfo_verify_select_prior(&v, 0, 0, 248);
+  CHECK(!v.prior_valid && !dropped, "unverified first lock is not a prior");
+  /* verified lock: promoted; prior in estimate units = total - radio tuning */
+  nr_cfo_verify_record_lock(&v, 248, 923);
+  nr_cfo_verify_select_prior(&v, 7, 0, 248);
+  CHECK(v.prior_valid && v.prior_total == 248 && v.prior_pci == 923 && v.prior_est_hz == 0, "E1B: prior units (non-cont) %d", v.prior_est_hz);
+  /* a wrong re-sync lock (total -13554, radio moved there) is unverified: the old prior stays; with the radio mistuned the prior in estimate units is 248 + 13554 */
+  nr_cfo_verify_record_lock(&v, -13554, 923);
+  nr_cfo_verify_select_prior(&v, 0, 0, -13554);
+  CHECK(v.prior_valid && v.prior_total == 248 && v.prior_est_hz == 248 + 13554, "unverified lock replaced the prior (total %d est %d)", v.prior_total, v.prior_est_hz);
+  CHECK(nr_cfo_alias_k(14161, v.prior_est_hz, P) == 0, "A1B epoch 3 through the gate: no flip");
+  /* cont_fo_comp: the estimate is the total, the radio never moves: prior in estimate units = total */
+  nr_cfo_verify_t c = {0};
+  nr_cfo_verify_record_lock(&c, 4100, 415);
+  nr_cfo_verify_select_prior(&c, 3, 1, 999 /* ignored */);
+  CHECK(c.prior_est_hz == 4100, "cont_fo_comp units %d", c.prior_est_hz);
+  /* the seed (initial_fo) is inside the estimate and cancels: the same prior for any seed */
+  CHECK(nr_cfo_alias_k(-13802 + 5000, 5000, P) == nr_cfo_alias_k(-13802, 0, P), "seed cancels");
+  /* clear (live tune) */
+  nr_cfo_verify_clear(&c);
+  nr_cfo_verify_select_prior(&c, 9, 1, 0);
+  CHECK(!c.prior_valid, "cleared state must not promote a stale lock");
+  /* prior exit: the true CFO jumps by more than half a period (reference re-lock): at most NR_CFO_UNVERIFIED_MAX wrong flips, then behaviour = no prior */
+  nr_cfo_verify_t g = {0};
+  int radio = 200, flips = 0, total = 200;
+  nr_cfo_verify_record_lock(&g, 200, 923);
+  nr_cfo_verify_select_prior(&g, 5, 0, radio);
+  const int true_after = 200 + 9000;
+  for (int it = 0; it < 8; it++) {
+    nr_cfo_verify_select_prior(&g, 0, 0, radio); /* the previous lock decoded nothing */
+    const int est = true_after - radio;
+    const int k = g.prior_valid ? nr_cfo_alias_k(est, g.prior_est_hz, P) : 0;
+    flips += k != 0;
+    total = est + k * P + radio;
+    radio = total; /* the radio follows the lock */
+    nr_cfo_verify_record_lock(&g, total, 923);
+  }
+  CHECK(flips == NR_CFO_UNVERIFIED_MAX && !g.prior_valid && abs(total - true_after) <= 1, "GPSDO jump: flips %d prior_valid %d total %d (true %d)", flips, g.prior_valid, total, true_after);
+}
+
+/* nr_pbch_dmrs_metrics on a synthetic SSB: the PBCH DM-RS of cell 415, ssb index 3, amplitude A on its true RE positions, CFO f across the three PBCH symbols (symbol spacing N+CP samples) */
+static void dmrs_metric(void)
+{
+  NR_DL_FRAME_PARMS fp;
+  make_fp(&fp);
+  fp.Lmax = 8;
+  const int nid = 415, idx = 3;
+  static c16_t F[NR_N_SYMBOLS_SSB][1][FFT];
+  double e[2], mu[2];
+  const double fs = fp.samples_per_subframe * 1000.0;
+  for (int c = 0; c < 2; c++) {
+    const double f = c == 0 ? 0.0 : 13953.0; /* the alias error of the OTA bug: 0.465 SCS */
+    memset(F, 0, sizeof(F));
+    grng = 0x1234567ull;
+    for (int sym = 1; sym < 4; sym++) {
+      const int dmrss = sym - 1;
+      c16_t pilot[200];
+      nr_pbch_dmrs_rx(dmrss, nr_gold_pbch(fp.Lmax, nid, 0, idx), pilot, false);
+      unsigned off = fp.first_carrier_offset + SSB_SC;
+      if (off >= FFT)
+        off -= FFT;
+      const int k = nid % 4;
+      const double ph = 2.0 * M_PI * f * (double)(sym * (CP + FFT)) / fs;
+      int re = off, n = 0;
+      const int n_pil = dmrss == 1 ? 24 : 60;
+      for (int j = 0; j < n_pil; j++) {
+        if (dmrss == 1 && j == 12)
+          re = (re + 144) % FFT;
+        const double A = 1000.0; /* the correlation uses the conjugate pilot: transmit conj(conj(p)) */
+        const double pr = pilot[n].r, pi = -pilot[n].i;
+        F[sym][0][(re + k) % FFT].r = (int16_t)lrint((pr * cos(ph) - pi * sin(ph)) * A / 32768.0 * 1.0 + 30 * gauss());
+        F[sym][0][(re + k) % FFT].i = (int16_t)lrint((pr * sin(ph) + pi * cos(ph)) * A / 32768.0 * 1.0 + 30 * gauss());
+        re = (re + 4) % FFT;
+        n++;
+      }
+    }
+    int bi = -1;
+    nr_pbch_dmrs_metrics(&fp, nid, SSB_SC, F, &e[c], &mu[c], &bi);
+    printf("  dmrs metric f=%.0f: best %.3g mu0 %.3g idx %d\n", f, e[c], mu[c], bi);
+    if (c == 0)
+      CHECK(bi == idx, "best index %d, expected %d", bi, idx);
+  }
+  CHECK(e[0] > 100 * mu[0], "correct CFO: best %.3g must dominate the wrong indices %.3g", e[0], mu[0]);
+  /* measured: the coherent sum over the 3 PBCH symbols (60 + 24 + 60 DM-RS REs) flips the sign of the middle one at ~0.465 SCS: (60-24+60)^2 / 144^2 = -3.5 dB, not the ~30 dB of an exact cancellation */
+  CHECK(e[1] < 0.6 * e[0] && e[1] > 0.3 * e[0], "0.465 SCS error must cost about 3.5 dB of energy: %.3g vs %.3g", e[1], e[0]);
+  {
+    int ne;
+    const nr_resync_hyp_t aliased = {1, e[1], mu[1]}, tuned = {1, e[0], mu[0]};
+    CHECK(nr_resync_cfo_decide(&aliased, &tuned, &ne) == 1 && nr_resync_cfo_decide(&tuned, &aliased, &ne) == 0,
+          "decision on the measured energies: h0 %.3g vs h1 %.3g (3 sigma lead needed %.3g)", e[1], e[0], 3 * sqrt(2 * e[0] * mu[0] + 2 * e[1] * mu[1] + mu[0] * mu[0] + mu[1] * mu[1]));
+  }
+  CHECK(mu[1] < 3 * mu[0] && mu[0] < 3 * mu[1], "mu0 (wrong indices) must not depend on the CFO: %.3g vs %.3g", mu[0], mu[1]);
 }
 
 /* A3: two cells both accepted by the blind pass (weaker one 4 dB down): the pass keeps both, strongest SSS metric first, both PCIs reported, and the second can be selected */
@@ -541,6 +652,8 @@ int main(void)
   cfo_escalation(403, -47000);
   cfo_escalation(415, 9000);
   resync_alias(415);
+  verify_gate();
+  dmrs_metric();
   registry();
   if (failures) {
     printf("test_nr_sync_pin: %d FAILURES\n", failures);

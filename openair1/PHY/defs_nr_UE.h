@@ -20,6 +20,7 @@
 #include "CODING/nrPolar_tools/nr_polar_pbch_defs.h"
 #include "PHY/defs_nr_sl_UE.h"
 #include "openair1/PHY/nr_phy_common/inc/nr_ue_phy_meas.h"
+#include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h" /* nr_cfo_verify_t */
 #include "common/utils/threadPool/task_ans.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -465,13 +466,8 @@ typedef struct PHY_VARS_NR_UE_s {
     uint32_t llr_buf_max;
   } *pdsch_scratch;
   int pdsch_num_actors;
-  /// Verified-lock CFO of this cell (nr-ue.c UE_synch): `last_*` is the latest lock (total CFO Hz, PCI, and the TB-CRC evidence counter at that moment); it becomes the prior (`prior_*`)
-  /// once TB CRCs / SIB1 decodes accumulated after it. `prior_est_hz` = prior_total - radio tuning, set per search, in the units of the re-sync estimate.
-  struct {
-    bool last_valid, prior_valid;
-    int last_total, last_pci, prior_total, prior_pci, prior_est_hz;
-    uint64_t last_evidence, unresolved;
-  } cfo_verify;
+  /// Verified-lock CFO of this cell (nr_initial_sync_budget.h; nr-ue.c UE_synch)
+  nr_cfo_verify_t cfo_verify;
 } PHY_VARS_NR_UE;
 typedef struct pdsch_scratch_s pdsch_scratch_t;
 
@@ -524,7 +520,6 @@ typedef struct {
   int freqOffset;
   bool priorValid; /* a verified lock of this cell existed: priorHz (units of freqOffset) and priorPci disambiguate the SSS alias (nr_scan_ssb) */
   int priorHz, priorPci;
-  uint64_t *unresolved; /* counter of re-evaluations where neither hypothesis passed the PBCH CRC (cell's cfo_verify.unresolved) */
   nr_initial_sync_t syncRes;
   fapiPbch_t pbchResult;
   int pssCorrPeakPower;
