@@ -55,6 +55,7 @@ int nr_ue_rx_synced_g = 0;
 
 /// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage. Per cell (A8): nr_ue_cell_clock.h.
 #include "PHY/NR_UE_TRANSPORT/nr_ue_cell_clock.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h" // nr_pdsch_passive_note_lock / lock_crc_ok (CFO lock verification)
 #include "common/utils/nr_cell.h"
 #include "PHY/NR_UE_TRANSPORT/nr_lock_verify.h"
 #include "common/utils/nr_cell_dash.h" /* MPCI-DASH P6 CELL_TIMING / P8 SLOT_CELL formatters (lines only when nr_cell_count() > 1) */
@@ -267,6 +268,17 @@ static void UE_synch(void *arg) {
 
   LOG_I(PHY, "[UE thread Synch] Running Initial Synch \n");
 
+  /* CFO prior for every search of this job (fast tries, full-capture fallback, retry, sync-loss re-sync): the total CFO of the last lock of this cell that is VERIFIED (first-pass PDSCH TB CRC
+   * after the lock's slot; an unverified or wrong lock never replaces it, three in a row drop it), expressed in the units of the estimate (relative to the radio tuning; cont_fo_comp: the total).
+   * Rules and units: nr_cfo_verify_* (nr_initial_sync_budget.c, unit-tested). A live tune asks for the clear; it is applied here, by the cell's own sync job. */
+  if (__atomic_exchange_n(&UE->cfo_verify.clear_req, 0, __ATOMIC_ACQ_REL))
+    nr_cfo_verify_clear(&UE->cfo_verify);
+  const int cfo_had_prior = UE->cfo_verify.prior_valid;
+  const int cfo_prior_total = UE->cfo_verify.prior_total;
+  if (nr_cfo_verify_select_prior(&UE->cfo_verify, nr_pdsch_passive_lock_crc_ok(UE->Mod_id), get_nrUE_params()->cont_fo_comp, nrue_ru_radio_fo()) && cfo_had_prior)
+    LOG_W(NR_PHY, "SENSING: RESYNC_CFO_PRIOR dropped cell=%d pci=%d total=%d after %d consecutive unverified locks (the tracked CFO no longer agrees with it; behaviour = no prior)\n", UE->Mod_id,
+          UE->cfo_verify.prior_pci, cfo_prior_total, NR_CFO_UNVERIFIED_MAX);
+
   uint64_t dl_carrier, ul_carrier;
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
   nr_initial_sync_t ret = {false, 0, 0};
@@ -383,6 +395,12 @@ static void UE_synch(void *arg) {
      * noted while is_synchronized, so nothing races this reset) */
     nr_sfo_resync_cell(UE->Mod_id, "initial sync");
     nr_sense_unit_cell_resync(UE->Mod_id); /* S9: a new timing epoch: unit table, DCI-arrival ring and T_cell of this cell start over (sensing only) */
+    if (__atomic_exchange_n(&UE->cfo_verify.clear_req, 0, __ATOMIC_ACQ_REL)) {
+      nr_cfo_verify_clear(&UE->cfo_verify); /* the cell was retuned while this job ran: this lock is not the new cell's */
+    } else {
+      nr_cfo_verify_record_lock(&UE->cfo_verify, freq_offset, fp->Nid_cell);
+      nr_pdsch_passive_note_lock(UE->Mod_id, atomic_load_explicit(&nr_ue_diag_producer_absolute_slot_cells[UE->Mod_id], memory_order_relaxed));
+    }
     UE->is_synchronized = 1;
     __atomic_store_n(&nr_ue_rx_synced_g, 1, __ATOMIC_RELEASE);
   } else {
@@ -635,6 +653,7 @@ static void apply_live_tune(PHY_VARS_NR_UE *UE, const ru_tune_t *t)
   fp->ul_CarrierFreq = (uint64_t)((int64_t)dl + ul_off);
   fp->ssb_start_subcarrier = (uint16_t)t->ssb;
   UE->initial_fo = t->cfo_hz;
+  __atomic_store_n(&UE->cfo_verify.clear_req, 1, __ATOMIC_RELEASE); /* another cell may be served now: no verified CFO (cleared by the cell's sync job) */
   init_symbol_rotation(fp);
   clean_UE_harq(UE);
   UE->is_synchronized = 0;

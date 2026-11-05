@@ -20,6 +20,7 @@
 #include "CODING/nrPolar_tools/nr_polar_pbch_defs.h"
 #include "PHY/defs_nr_sl_UE.h"
 #include "openair1/PHY/nr_phy_common/inc/nr_ue_phy_meas.h"
+#include "PHY/NR_UE_TRANSPORT/nr_initial_sync_budget.h" /* nr_cfo_verify_t */
 #include "common/utils/threadPool/task_ans.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -465,6 +466,8 @@ typedef struct PHY_VARS_NR_UE_s {
     uint32_t llr_buf_max;
   } *pdsch_scratch;
   int pdsch_num_actors;
+  /// Verified-lock CFO of this cell (nr_initial_sync_budget.h; nr-ue.c UE_synch)
+  nr_cfo_verify_t cfo_verify;
 } PHY_VARS_NR_UE;
 typedef struct pdsch_scratch_s pdsch_scratch_t;
 
@@ -515,6 +518,8 @@ typedef struct {
   int ssbOffset;
   int nidCell;
   int freqOffset;
+  bool priorValid; /* a verified lock of this cell existed: priorHz (units of freqOffset) and priorPci disambiguate the SSS alias (nr_scan_ssb) */
+  int priorHz, priorPci;
   nr_initial_sync_t syncRes;
   fapiPbch_t pbchResult;
   int pssCorrPeakPower;

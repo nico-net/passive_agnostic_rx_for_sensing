@@ -436,6 +436,34 @@ NR_CELL_STATIC(_Atomic uint64_t, g_cb_total);
 #define g_cb_total NR_CELL_REF(g_cb_total) /* PDSCHQ cb_crc: per-code-block CRC over the decoded full TBs (not probes) */
 NR_CELL_STATIC(_Atomic uint64_t, g_crc_ok);
 #define g_crc_ok NR_CELL_REF(g_crc_ok)
+/* CFO lock verification (nr_cfo_verify_*): first-pass CRC-OK TBs whose job slot is strictly after the slot of the cell's latest lock; reset at each lock. Rescues are not counted. */
+NR_CELL_STATIC(long, g_lock_slot);
+#define g_lock_slot NR_CELL_REF(g_lock_slot)
+NR_CELL_STATIC(uint64_t, g_lock_crc_ok);
+#define g_lock_crc_ok NR_CELL_REF(g_lock_crc_ok)
+/* slot and count change together under this lock (a consumer that read the old slot can never add to the new epoch's count); taken only at a lock and at a CRC-OK TB */
+static pthread_mutex_t s_lock_verify_mutex = PTHREAD_MUTEX_INITIALIZER;
+void nr_pdsch_passive_note_lock(int cell, long slot)
+{
+  pthread_mutex_lock(&s_lock_verify_mutex);
+  g_lock_crc_ok_cells[cell] = 0;
+  g_lock_slot_cells[cell] = slot; /* -1 at the cell's first lock: the producer clock has not started, every produced slot is after it */
+  pthread_mutex_unlock(&s_lock_verify_mutex);
+}
+static void lock_verify_note_crc_ok(long job_slot)
+{
+  pthread_mutex_lock(&s_lock_verify_mutex);
+  if (nr_cfo_crc_counts(job_slot, g_lock_slot, 0))
+    ++g_lock_crc_ok;
+  pthread_mutex_unlock(&s_lock_verify_mutex);
+}
+uint64_t nr_pdsch_passive_lock_crc_ok(int cell)
+{
+  pthread_mutex_lock(&s_lock_verify_mutex);
+  const uint64_t n = g_lock_crc_ok_cells[cell];
+  pthread_mutex_unlock(&s_lock_verify_mutex);
+  return n;
+}
 /* DL DM-RS identity estimate: one process-wide accumulator shared by every consumer, so evidence
  * from all of them adds. The 1024-candidate sweep runs under this lock on the consumer that
  * happens to hold it -- off the RT thread by construction, since this file IS the consumer. */
@@ -2444,6 +2472,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF); /* SOLVED layout: the DM-RS CFR does not need a CRC pass */
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+        lock_verify_note_crc_ok(job.absolute_slot);
         if (job.dmrs_tap)
           consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF);
         if (job.want_data) {

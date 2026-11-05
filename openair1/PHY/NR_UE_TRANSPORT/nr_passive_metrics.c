@@ -110,6 +110,7 @@ extern void nr_pdcch_nid_capture_metrics(uint64_t *, uint64_t *, uint64_t *, flo
 /* nr_passive_metrics_collect: gathers a snapshot of every passive-receiver counter into *m: the PDCCH/PDSCH/PUSCH queues, the CSI-RS and SRS discovery, the NID capture, the GPU budget, the CB0 path, the RX recovery and the configuration epochs.
  *   Summary-level header (the function is long: one block per subsystem). Reads the counters through their public getters only. Caller: nr_passive_metrics_emit() in this file.
  */
+extern void nr_resync_cfo_stats(uint64_t *taken, uint64_t *kept, uint64_t *unresolved) __attribute__((weak));
 void nr_passive_metrics_collect(nr_passive_metrics_t *m)
 {
   struct timespec ts;
@@ -180,6 +181,8 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
   m->acq_sync_losses = a.sync_losses;
   m->acq_pbch_locks = a.pbch_locks;
   m->acq_sib1_decodes = a.sib1_decodes;
+  if (nr_resync_cfo_stats) /* weak: absent in binaries without the initial sync */
+    nr_resync_cfo_stats(&m->cfo_alias_taken, &m->cfo_alias_kept, &m->cfo_unresolved);
   {
     nr_uss_prune_stats_t us;
     nr_uss_prune_stats(&us);
