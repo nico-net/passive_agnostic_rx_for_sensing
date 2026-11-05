@@ -202,6 +202,39 @@ int nr_traffic_retx(int dir, uint16_t rnti, int pid, int ndi)
   return r;
 }
 
+typedef struct { uint16_t dci_len; int8_t tda, k0; bool used, bad; } k0_ent_t;   /* k0 < 0 with bad: conflicting */
+typedef struct { k0_ent_t e[64]; uint64_t conflicts; } k0_tab_t;
+NR_CELL_STATIC(k0_tab_t, g_k0_tab)
+#define g_k0_tab NR_CELL_REF(g_k0_tab)
+
+void nr_traffic_k0_note(int dci_len, int tda, int k0, int tbs_bits, bool tb_crc_ok)
+{
+  if (!tb_crc_ok || tbs_bits <= 3824 || dci_len <= 0 || dci_len > 65535 || tda < 0 || tda > 15 || k0 < 0 || k0 > 32) return;   /* CRC24 TBs only */
+  pthread_mutex_lock(&g_retx_mu);
+  k0_ent_t *f = NULL, *m = NULL;
+  for (int i = 0; i < 64; i++) {
+    k0_ent_t *e = &g_k0_tab.e[i];
+    if (e->used && e->dci_len == dci_len && e->tda == tda) m = e;
+    else if (!e->used && !f) f = e;
+  }
+  if (m) { if (!m->bad && m->k0 != k0) { m->bad = true; m->k0 = -1; g_k0_tab.conflicts++; } }
+  else if (f) *f = (k0_ent_t){(uint16_t)dci_len, (int8_t)tda, (int8_t)k0, true, false};
+  pthread_mutex_unlock(&g_retx_mu);
+}
+int nr_traffic_k0_get(int dci_len, int tda)
+{
+  int r = -1;
+  pthread_mutex_lock(&g_retx_mu);
+  for (int i = 0; i < 64; i++) {
+    const k0_ent_t *e = &g_k0_tab.e[i];
+    if (e->used && e->dci_len == dci_len && e->tda == tda) { r = e->bad ? -1 : e->k0; break; }
+  }
+  pthread_mutex_unlock(&g_retx_mu);
+  return r;
+}
+uint64_t nr_traffic_k0_conflicts(void) { pthread_mutex_lock(&g_retx_mu); const uint64_t c = g_k0_tab.conflicts; pthread_mutex_unlock(&g_retx_mu); return c; }
+void nr_traffic_k0_reset(void) { pthread_mutex_lock(&g_retx_mu); memset(&g_k0_tab, 0, sizeof g_k0_tab); pthread_mutex_unlock(&g_retx_mu); }
+
 void nr_traffic_retx_reset(void)
 {
   pthread_mutex_lock(&g_retx_mu);

@@ -194,6 +194,36 @@ TEST(TrafficRecord, DerivedFieldsNullOnCandidateLayout)
   EXPECT_TRUE(has(d,"\"qm\":null")); EXPECT_TRUE(has(d,"\"nl\":null")); EXPECT_TRUE(has(d,"\"tbs\":null"));
 }
 
+TEST(TrafficRecord, K0ProvenByFullCrc24Only)
+{
+  nr_traffic_k0_reset();
+  EXPECT_EQ(nr_traffic_k0_get(45, 2), -1);
+  nr_traffic_k0_note(45, 2, 1, 5000, false);   /* failed decode */
+  nr_traffic_k0_note(45, 2, 1, 3824, true);    /* CRC16 transport block (TBS <= 3824) */
+  nr_traffic_k0_note(45, 2, 1, 0, true);       /* first-code-block probe: no TB size */
+  EXPECT_EQ(nr_traffic_k0_get(45, 2), -1);
+  nr_traffic_k0_note(45, 2, 1, 5000, true);    /* one full CRC24 pass proves it */
+  EXPECT_EQ(nr_traffic_k0_get(45, 2), 1);
+  EXPECT_EQ(nr_traffic_k0_get(45, 3), -1); EXPECT_EQ(nr_traffic_k0_get(46, 2), -1);   /* keyed by (length, TDA index) */
+  nr_traffic_k0_note(45, 2, 1, 6000, true);
+  EXPECT_EQ(nr_traffic_k0_get(45, 2), 1); EXPECT_EQ(nr_traffic_k0_conflicts(), 0u);
+}
+TEST(TrafficRecord, K0ConflictIsUnknownAndStays)
+{
+  nr_traffic_k0_reset();
+  nr_traffic_k0_note(45, 2, 0, 5000, true); nr_traffic_k0_note(45, 2, 1, 5000, true);
+  EXPECT_EQ(nr_traffic_k0_get(45, 2), -1); EXPECT_EQ(nr_traffic_k0_conflicts(), 1u);
+  nr_traffic_k0_note(45, 2, 0, 5000, true);   /* a later pass does not resurrect it */
+  EXPECT_EQ(nr_traffic_k0_get(45, 2), -1); EXPECT_EQ(nr_traffic_k0_conflicts(), 1u);
+}
+TEST(TrafficRecord, K0IdentityResetClears)
+{
+  nr_traffic_k0_reset();
+  nr_traffic_k0_note(45, 2, 1, 5000, true);
+  ASSERT_EQ(nr_traffic_k0_get(45, 2), 1);
+  nr_traffic_k0_reset();
+  EXPECT_EQ(nr_traffic_k0_get(45, 2), -1); EXPECT_EQ(nr_traffic_k0_conflicts(), 0u);
+}
 TEST(TrafficRecord, BitsUnavailablePrintsNull)
 {
   auto r=fixture(NR_LAYOUT_SOLVED); r.dci_len=0;

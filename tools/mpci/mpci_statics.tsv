@@ -4208,3 +4208,4 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4838	g_e3_mu	file_stati
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	4866	t_e3g	tls	e3_grid_t	TLS	TRAFFIC	E3: carrier grid and noise estimate of the slot being scored (scan consumer thread)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	154	t_slotbuf	tls	c16_t *	TLS	TRAFFIC	E3: per-thread slot FFT buffer shared by the DM-RS fit and the E3 scorer (scan consumer thread)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c	5139	e3_unsolved::s_e3d	func_static	_Atomic uint32_t [converted]	PER_CELL	TRAFFIC	E3 diagnostic counter of the scored grants of one cell
+openair1/PHY/NR_UE_TRANSPORT/nr_traffic_record.c	207	g_k0_tab	file_static	k0_tab_t [converted]	PER_CELL	TRAFFIC	converted: NR_CELL_STATIC, proven PDSCH k0 per (DCI length, TDA index) of this cell, guarded by g_retx_mu

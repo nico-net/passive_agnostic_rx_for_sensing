@@ -69,6 +69,12 @@ void nr_traffic_stats_get(nr_traffic_stats_t *s);
 bool nr_traffic_decode_outcome(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db);
 /* Per RNTI+HARQ pid last NDI (dir 0 DL, 1 UL): -1 first sighting (or ndi < 0), 0 new data (NDI toggled), 1 retransmission (same NDI). Updates the table. */
 int nr_traffic_retx(int dir, uint16_t rnti, int pid, int ndi);
+/* E7b: PDSCH slot offset k0 per (DCI length, TDA index) of this cell, proven by a decode whose FULL transport block passed CRC24 (TBS > 3824 bits; a CRC16 TB,
+ * a first-code-block probe or a failed decode proves nothing). Two different proven k0 for one key mark it unknown for good (until the reset), counted. */
+void nr_traffic_k0_note(int dci_len, int tda, int k0, int tbs_bits, bool tb_crc_ok);
+int nr_traffic_k0_get(int dci_len, int tda);   /* -1 unknown, absent or conflicting */
+uint64_t nr_traffic_k0_conflicts(void);
+void nr_traffic_k0_reset(void);   /* identity change: with nr_traffic_retx_reset */
 void nr_traffic_retx_reset(void);   /* HARD_RESET epochs: every RNTI is new again */
 /* 1 queued, 0 dropped (ring full / no sink: counted in dci_lost), -1 API not open. Never blocks beyond the per-cell mu. */
 int nr_sense_push_dci(const nr_sense_dci_rec_t *r);

@@ -2036,7 +2036,7 @@ static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
         nr_pdsch_solver_reset();
         nr_tda_field_forget();
         nr_slotphase_reset();
-        if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) { nr_traffic_cfg_reset(); nr_traffic_retx_reset(); nr_traffic_decode_reset(); nr_dci11_bank_reset(); }
+        if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) { nr_traffic_cfg_reset(); nr_traffic_retx_reset(); nr_traffic_k0_reset(); nr_traffic_decode_reset(); nr_dci11_bank_reset(); }
         LOG_A(PHY, "SENSING: PDSCH_SOLVER reset on new cell identity (identity_gen %u -> %u)\n", solver_id, s->identity_gen);
       }
       solver_id = s->identity_gen;
@@ -4776,10 +4776,15 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
                                .ap_field = ro->ant_ports_bits > 0 ? (int)nr_dci_bits_field(payload, ro->total, ro->ant_ports, ro->ant_ports_bits) : -1,
                                .rd_cdm = out->n_dmrs_cdm_groups, .rd_ports = out->dmrs_ports, .mcs = out->mcs, .mcs_table = out->mcs_table,
                                .table_evidence = r.table_evidence, .nb_rb = out->num_rb, .S = out->start_symbol, .L = out->num_symbols,
-                               .dmrs_mask = out->dl_dmrs_symb_pos, .k0 = -1, .slot_dl_syms = -1 /* no learnt k0 per TDA index exists: tbs stays null until one does */, .xoh = -1, .class_c = out->rnti_class == NR_BLIND_RNTI_CLASS_C, .sv_S = -1, .sv_L = -1};
+                               .dmrs_mask = out->dl_dmrs_symb_pos, .k0 = nr_traffic_k0_get(dci_len, out->tda_index), .slot_dl_syms = -1, .xoh = -1, .class_c = out->rnti_class == NR_BLIND_RNTI_CLASS_C, .sv_S = -1, .sv_L = -1};
       di.sv_ok = nr_pdsch_solver_derive_inputs(out->rnti, out->tda_index, &di.sv_crc, &di.sv_add_pos, &di.sv_table, &di.sv_S, &di.sv_L, &di.sv_ov);
       if (di.sv_ok && di.sv_S >= 0 && out->dl_dmrs_symb_pos != 0)
         di.expect_mask = nr_pdsch_solver_dmrs_mask(__builtin_ctz(out->dl_dmrs_symb_pos), di.sv_S, di.sv_L, di.sv_add_pos);
+      if (di.k0 >= 0 && abs_slot >= 0 && fp->slots_per_frame >= 10) {   /* PDSCH slot = DCI slot + k0: a full DL slot of the known TDD pattern? */
+        int8_t dls[40];
+        if (di.k0 < 40 && nr_passive_acq_tdd_pdsch_dl_symbols((uint32_t)abs_slot, __builtin_ctz((unsigned)fp->slots_per_frame / 10u), di.k0 + 1, dls))
+          di.slot_dl_syms = dls[di.k0];
+      }
       const nr_pdsch_xoverhead_state_t xo = nr_pdsch_xoverhead_snapshot();
       if (xo.confirmed) di.xoh = xo.assumed;   /* cell-wide RRC value: every other candidate refuted by a CRC-passing TB */
       nr_traffic_derived_t dv;
@@ -10997,6 +11002,9 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
             else
               NR_BLIND_CTR_INC(g_dec_k0_wait);
             btim_add(BTIM_PDSCH, btim_t_pds);
+            /* E7b: a full-TB CRC24 pass proves the k0 this decode used for this (DCI length, TDA index); the in-line path only (deferred jobs do not carry it) */
+            if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC && !is_dci10 && st == NR_PDSCH_PASSIVE_DECODE_CRC_OK)
+              nr_traffic_k0_note(cand_task[ti].dci_length, out.tda_index, hy_k0, (int)dec.cw.TBS, true);
             if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC && nr_sense_enabled()
                 && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
               const float tsnr = dec.dmrs_snr.comb_db > -90.f ? dec.dmrs_snr.comb_db : NAN;
