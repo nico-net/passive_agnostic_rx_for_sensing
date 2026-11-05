@@ -69,6 +69,7 @@ typedef struct {
   uint64_t srs_gate_open_unexplained, srs_gate_open_pusch; /* SRS time-domain comb gate opens: on symbols no known PUSCH DM-RS explains / only on symbols of known PUSCH grants */
   uint64_t srs_gate_hist[7], srs_gate_det[7]; /* nr_srs_passive_gate_hist (sensing mode only in the JSON) */
   uint64_t srs_snr_hist[2][7]; /* SRS records by confirmed (0/1) and measured snr_db_p50 bin: [no valid PRB] [3,6) [6,10) [10,15) [15,20) [20,30) >=30 dB (sensing mode only in the JSON) */
+  uint64_t sense_ul_delay_skip; /* UL-timing CFR frames whose TA phase step was not estimable (sensing mode only in the JSON) */
   uint64_t srs_audits; /* blind SRS audit scans run while resources were tracked */
   uint64_t obs_pushed, obs_written, obs_dropped; // filled by Task A3, 0 until then
   /* per source: CFR frames exported / dropped on a full ring (the all-source totals are sense_cfr_drop and the sum of the exported); sense_unexported_*:

@@ -588,6 +588,8 @@ if(ENABLE_TESTS)
     ${CF_TR}/nr_periodic_track.c
     ${CF_TR}/nr_srs_passive.c
     ${CF_TR}/tests/nr_srs_real_inject_test.cc
+    ${CF_TR}/tests/nr_ul_noise_only_test.cc
+    ${CF_TR}/tests/nr_ul_noise_only_fixture.c
     ${CF_TR}/tests/nr_srs_blind_fixture.c
     ${CMAKE_SOURCE_DIR}/openair1/PHY/NR_REFSIG/ul_ref_seq_nr.c)
   target_link_libraries(test_nr_srs_real_inject PRIVATE nr_sense_api nr_phy_common PHY_COMMON nr_common nr_fapi_p5 asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs UTIL CONFIG_LIB GTest::gtest)

@@ -30,7 +30,7 @@ bool nr_srs_passive_enabled(void);
 /* Periodic-resource tracker counters of the bound cell (SRS): predicted occasions, hits, misses, demotions, confirmations, audit hits, audits run. */
 void nr_srs_passive_gate_metrics(uint64_t *unexplained, uint64_t *pusch);
 /* Diagnostic (is SRS detection SNR dependent): histogram of the time-domain comb gate statistic (sigma units above the Gamma null, nr_srs_td_comb_gate; the gate opens above 9) of every
- * evaluated eligible slot, bins [0,3) [3,6) [6,9] (skipped) (9,12] (12,18] (18,30] >30 (opened); det[] = of the opened ones, the slots in which the scan exported at least one SRS record. */
+ * evaluated eligible slot, bins [0,3) [3,6) [6,9] (skipped) (9,12] (12,18] (18,30] >30 (opened); det[] = of the opened ones, the slots in which the scan exported at least one SRS record (a slot that ended on the CPU budget before exporting counts in bin only). Bin 0 also holds every statistic <= 0 (the gate clamps at 0). */
 #define NR_SRS_GATE_BINS 7
 void nr_srs_passive_gate_hist(uint64_t bin[NR_SRS_GATE_BINS], uint64_t det[NR_SRS_GATE_BINS]);
 static inline int nr_srs_gate_bin(double s) { return s < 3 ? 0 : s < 6 ? 1 : s <= 9 ? 2 : s <= 12 ? 3 : s <= 18 ? 4 : s <= 30 ? 5 : 6; }

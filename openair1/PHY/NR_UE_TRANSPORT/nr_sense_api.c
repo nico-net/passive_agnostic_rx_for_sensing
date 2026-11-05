@@ -344,7 +344,7 @@ static void *run_writer(void *arg)
 #ifdef NR_SENSE_HAVE_ZMQ
     if (zmq_failed) stats.zmq_drops++;
 #endif
-    for (uint32_t i=0;i<fn;i++) if (qring && qcap) { qslot_t *qs=&qring[fid[i]%qcap]; qs->id=fid[i]; qs->ok=fok[i]; qs->qwork_ns=fcost[i]; if (fok[i]) { qs->q=fq[i]; stats.q_computed++; } }
+    for (uint32_t i=0;i<fn;i++) if (qring && qcap) { qslot_t *qs=&qring[fid[i]%qcap]; qs->id=fid[i]; qs->ok=fok[i]; qs->qwork_ns=fcost[i]; if (fok[i]) { qs->q=fq[i]; stats.q_computed++; if (fq[i].delay_step==2) stats.ul_delay_skip++; } }
     last_frame=frame;
     atomic_fetch_add(&written_items,count);
     if (frame) { frame_head=(frame_head+count)%frame_cap; frame_count-=count; }

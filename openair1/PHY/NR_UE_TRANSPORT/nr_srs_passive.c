@@ -189,7 +189,7 @@ static void process_srs(srs_job_t *job)
    * period are all examined; noise and non-comb UL traffic stop here. The old 1-in-interval backoff aliased with the occasions (an SRS is up to 640 slots apart, the interval
    * decayed in tens of slots) and is no longer applied to the gate. */
   bool td_hit=false;
-  int gbin=-1;
+  int gbin=-1, nexported=0;
   if(blind && !ndue) {
     /* SRS sits in the last 6 symbols (TS 38.211 6.4.1.4.1: l0 in 8..13, already the mask); a comb-2 PUSCH DM-RS is the same signature, so symbols that a known PUSCH grant
      * explains (its DM-RS symbols) are kept out of the gate and a gate that opens only on them is counted apart and does not start a scan. */
@@ -304,6 +304,7 @@ static void process_srs(srs_job_t *job)
       job->meta.n_ant=sr.export_ant;
       nr_sense_prod_scope_stop(&prod);
       nr_srs_export(c,&job->meta,nre,sr.cfr,sr.k,sr.l);
+      nexported++;
       prod.start_ns=nr_sense_now_ns();
       if(nseen<NR_SRS_MAX_CANDIDATES) seen[nseen++]=*c;
     }
@@ -320,7 +321,7 @@ static void process_srs(srs_job_t *job)
     }
   }
   srs_budget_checkpoint(&cpu_begin);
-  if(td_hit && nseen) atomic_fetch_add_explicit(&sr.gate_det[gbin],1,memory_order_relaxed);
+  if(td_hit && nexported) atomic_fetch_add_explicit(&sr.gate_det[gbin],1,memory_order_relaxed);
   if(did_gate && !tracking && !any_comb && !budget_exhausted) {
     sr.idle.pregate_skip++;
     if(scanned && !budget_exhausted) nr_srs_idle_result(&sr.idle,false);

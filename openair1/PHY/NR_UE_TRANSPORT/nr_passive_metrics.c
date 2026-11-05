@@ -317,6 +317,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     nr_sense_stats(&sense);
     m->sense_recon_skip = sense.recon_skip;
     memcpy(m->srs_snr_hist, sense.srs_snr_hist, sizeof m->srs_snr_hist);
+    m->sense_ul_delay_skip = sense.ul_delay_skip;
     for (int source = 0; source < NR_SENSE_SRC_COUNT; ++source) {
       m->sense_cfr_drop += sense.cfr_dropped[source];
       m->sense_cfr_drop_src[source] = sense.cfr_dropped[source];

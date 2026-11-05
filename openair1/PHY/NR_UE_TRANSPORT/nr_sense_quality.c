@@ -135,7 +135,9 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
         ci += (double)h[2 * i + 3] * h[2 * i] - (double)h[2 * i + 2] * h[2 * i + 1];
       }
     }
+    q->delay_step = 2;
     if (cr != 0 || ci != 0) {
+      q->delay_step = 1;
       const double phi = atan2(ci, cr) / d;
       for (int x = 0; x < 12; x++)
         tw_r[x] = (float)cos(phi * (x - 5.5)), tw_i[x] = (float)-sin(phi * (x - 5.5));

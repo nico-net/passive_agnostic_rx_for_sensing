@@ -546,7 +546,8 @@ TEST_F(QRing, UlSourcesQualityWithTimingRamp)
     EXPECT_EQ(q.first_prb, first);
     if (snr >= 12) { EXPECT_EQ(q.valid_cfr_prbs, nprb); EXPECT_NEAR(q.snr_db_p50, snr, 2.5); }
     else if (snr >= 6) EXPECT_GE(q.valid_cfr_prbs, nprb / 2) << "6 dB is 3 dB above the threshold";
-    else if (snr <= 0) EXPECT_LE(q.valid_cfr_prbs, nprb / 6) << "at 0 dB (3 dB under the threshold) only fluctuations pass";
+    else if (snr <= 0) EXPECT_LE(q.valid_cfr_prbs, nprb / 8) << "at 0 dB (3 dB under the threshold) only fluctuations pass (noise-only: nr_ul_noise_only_test.cc, 0 of 1e5 PRBs)";
+    EXPECT_EQ(q.delay_step, 1) << "ramp estimated";
 
   }
 }
@@ -590,4 +591,25 @@ TEST_F(QRing, UlPhaseStepUnbiasedAtLowSnr)
     EXPECT_NEAR(q[1].valid_cfr_prbs, q[0].valid_cfr_prbs, 2);
     if (q[0].valid_cfr_prbs >= 8 && q[1].valid_cfr_prbs >= 8) EXPECT_NEAR(q[1].snr_db_p50, q[0].snr_db_p50, 1.5);
   }
+}
+
+/* M3: a UL record without adjacent REs (isolated REs 5 apart) has no estimable phase step: delay_step 2, counted, and judged by the plain rule */
+TEST_F(QRing, UlDelayStepSkipCounted)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  open(8);
+  nr_sense_stats_t s0, s1;
+  nr_sense_stats(&s0);
+  std::vector<uint16_t> kk; std::vector<uint8_t> ll; std::vector<float> v;
+  for (int i = 0; i < 40; i++) { kk.push_back(60 + 5 * i); ll.push_back(2); }
+  v.assign(2 * kk.size(), 1.f);
+  nr_sense_quality_t q;
+  uint64_t id = nr_sense_push_cfr(NR_SENSE_SRC_PUSCH_DMRS, 1, v.data(), (int)kk.size(), (int)kk.size(), kk.data(), ll.data(), 7, 0.f, 1.f, 0, 0, nullptr);
+  ASSERT_TRUE(wait_q(id, &q));
+  EXPECT_EQ(q.delay_step, 2);
+  id = nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DMRS, 1, v.data(), (int)kk.size(), (int)kk.size(), kk.data(), ll.data(), 8, 0.f, 1.f, 0, 0, nullptr);
+  ASSERT_TRUE(wait_q(id, &q));
+  EXPECT_EQ(q.delay_step, 0) << "not requested for a DL source";
+  nr_sense_stats(&s1);
+  EXPECT_EQ(s1.ul_delay_skip, s0.ul_delay_skip + 1);
 }

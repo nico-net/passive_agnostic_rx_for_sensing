@@ -241,7 +241,7 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
       if (t > 0 && (size_t)t < sizeof(tail)) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "],\"srs_snr_hist_%s\":[", c ? "confirmed" : "unconfirmed");
       for (int i = 0; i < 7 && t > 0 && (size_t)t < sizeof(tail); i++) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "%s%" PRIu64, i ? "," : "", m->srs_snr_hist[c][i]);
     }
-    if (t > 0 && (size_t)t < sizeof(tail)) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "]");
+    if (t > 0 && (size_t)t < sizeof(tail)) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "],\"sense_ul_delay_skip\":%" PRIu64, m->sense_ul_delay_skip);
   }
   if (m->has_sense_sched && t > 0 && (size_t)t < sizeof(tail))
     t += snprintf(tail + t, sizeof(tail) - (size_t)t,

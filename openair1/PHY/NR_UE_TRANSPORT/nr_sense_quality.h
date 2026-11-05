@@ -24,6 +24,7 @@ typedef struct {
   float resid_db;               /* median per-PRB local-fit residual / signal, dB; NAN when none */
   float sym_consist;            /* 0..1 correlation of per-symbol estimates on shared k; NAN with < 2 symbols */
   float recon_conf;             /* data-aided only, set by the producer; NAN otherwise */
+  uint8_t delay_step;           /* NR_SENSE_Q_UL_DELAY only: 0 = not requested, 1 = TA phase step estimated and removed, 2 = requested but not estimable (no adjacent REs): the fit saw H as is */
 } nr_sense_quality_t;
 /* noise_var: variance of the same quantity as H (post-estimation, per RE, same scaling); producers own that. <= 0 or NaN = the producer has none: the
  * PRB's own local-fit residual stands in. Either way the noise is floored at NR_SENSE_RECON_IMPL_LOSS x the PRB's mean power (30 dB SNR ceiling).
@@ -39,6 +40,8 @@ typedef struct {
  * must reach NR_SENSE_SPARSE_SYM_MIN, else the record has no valid PRB. */
 #define NR_SENSE_Q_SPARSE 1u
 /* UL source whose H is expressed in the DL frame (SRS, PUSCH DM-RS, PUSCH data): the common timing-advance phase ramp is removed before the per-PRB local fit (see nr_sense_quality.c). Dense sources only. */
+/* ORDER ASSUMPTION: the REs of a symbol are consecutive and k ascending (symbol-major, as the SRS, PUSCH DM-RS and PUSCH data producers write them); a record in another order
+ * gets no derotation (delay_step 2, counted in sense_ul_delay_skip) and is then judged by the plain rule: never more valid, only fewer. */
 #define NR_SENSE_Q_UL_DELAY 2u
 #define NR_SENSE_SPARSE_SYM_MIN 0.5f /* general bound (half the coherent amplitude), not tuned on any cell */
 void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
