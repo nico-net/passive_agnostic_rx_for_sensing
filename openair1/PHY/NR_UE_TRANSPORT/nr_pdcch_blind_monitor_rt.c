@@ -104,6 +104,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "nr_dl_layout_score.h"
 #include "nr_e3_noise.h"
 #include "nr_e3_excl.h"
+#include "nr_fep_cache.h" /* E5: one FEP per (slot, symbol) for the scorer, the fit and the CFR tap */
 #include "nr_dci11_prove.h"
 #include "nr_traffic_dci_fields.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
@@ -154,8 +155,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
  * cache shared by the reading filter and the DM-RS fit). Returns the antenna count, 0 when the symbol cannot be read. */
 /* E3: the per-thread slot buffer is shared by every symbol a scorer needs: one FEP per (antenna, symbol) and slot, whichever caller asks first. */
 static __thread c16_t *t_slotbuf;
-static __thread int64_t t_slotbuf_key = -1;
-static __thread uint16_t t_slotbuf_done;   /* bit l = symbol l of the keyed slot is in the buffer */
+static __thread nr_fep_cache_t t_slotbuf_c = NR_FEP_CACHE_INIT;
 static c16_t *slot_fep_sym(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, int nant, int sym)
 {
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -165,12 +165,12 @@ static c16_t *slot_fep_sym(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, in
     if (t_slotbuf == NULL) return NULL;
   }
   const int64_t key = (int64_t)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx;
-  if (t_slotbuf_key != key) { t_slotbuf_key = key; t_slotbuf_done = 0; }
-  if (!((t_slotbuf_done >> sym) & 1)) {
+  c16_t **iq = nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata);
+  /* the de-rotation nr_slot_fep_ant applies: a cached symbol is reused only for the same one */
+  const double fo = ue->cont_fo_comp ? (isnan(nr_slot_fep_fo_override_hz) ? ue->dl_Doppler_shift + ue->freq_offset : nr_slot_fep_fo_override_hz) : 0.0;
+  if (nr_fep_cache_claim(&t_slotbuf_c, key, iq, fo, sym)) {
     for (int a = 0; a < nant; a++)
-      nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, sym, a, (c16_t(*)[fp->samples_per_slot_wCP])t_slotbuf, link_type_dl, 0,
-                      nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
-    t_slotbuf_done |= (uint16_t)(1u << sym);
+      nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, sym, a, (c16_t(*)[fp->samples_per_slot_wCP])t_slotbuf, link_type_dl, 0, iq);
   }
   return t_slotbuf;
 }
@@ -10762,12 +10762,26 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
     const uint64_t uc_chest = t_sense_chest ? nr_sense_unit_cpu_ns() : 0; /* per-unit cost (sensing mode): the chest that only the DM-RS tap needs */
     const uint64_t btim_t_che = btim_on ? btim_now() : 0;
     __attribute__((aligned(32))) c16_t rxdataF_pdsch[fp->nb_antennas_rx][rxdataF_sz];
-    nr_slot_fep(ue, fp, proc->nr_slot_rx, dmrs_sym, rxdataF_pdsch, link_type_dl, 0, ue->common_vars.rxdata);
+    /* E5: the DM-RS symbol comes from the per-thread slot cache the layout scorer and the fit fill (same slot, same IQ, same de-rotation: one FEP per slot and symbol), unless the
+     * cache would not equal this FEP: another IQ buffer than the live ring or a per-branch FO (nr_slot_fep applies neither). Then, as before, a private FEP into rxdataF_pdsch. */
+    bool tap_shared = nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata) == ue->common_vars.rxdata && fp->nb_antennas_rx <= NR_MAX_BRANCH_FO;
+    for (int a = 0; tap_shared && a < fp->nb_antennas_rx; a++)
+      tap_shared = nr_ue_get_branch_fo_hz(a) == 0.0;
+    c16_t(*chest_rx)[rxdataF_sz] = rxdataF_pdsch;
+    if (tap_shared) {
+      c16_t *shared = slot_fep_sym(ue, proc, fp->nb_antennas_rx, dmrs_sym);
+      if (shared)
+        chest_rx = (c16_t(*)[rxdataF_sz])shared;
+      else
+        tap_shared = false;
+    }
+    if (!tap_shared)
+      nr_slot_fep(ue, fp, proc->nr_slot_rx, dmrs_sym, rxdataF_pdsch, link_type_dl, 0, ue->common_vars.rxdata);
 
     uint32_t nvar = 0;
     nr_pdsch_channel_estimation(ue, proc, &dlsch_pdu, &chest_alloc, 0, get_dmrs_port(0, out.dmrs_ports),
                                (unsigned char)dmrs_sym, pdsch_est_size, pdsch_dl_ch_estimates,
-                               fp->samples_per_slot_wCP, rxdataF_pdsch, &nvar);
+                               fp->samples_per_slot_wCP, chest_rx, &nvar);
     if (t_sense_chest)
       nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PDSCH_DMRS,nr_sense_now_ns()-t_sense_chest);
     btim_add(BTIM_CHEST, btim_t_che);

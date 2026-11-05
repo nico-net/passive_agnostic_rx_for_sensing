@@ -3031,6 +3031,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_dl_layout_score)
   add_test(NAME test_nr_dl_layout_score COMMAND ./test_nr_dl_layout_score)
 
+  add_executable(test_nr_fep_cache ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_fep_cache_test.cc)
+  target_include_directories(test_nr_fep_cache PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_fep_cache PRIVATE GTest::gtest GTest::gtest_main pthread m)
+  add_dependencies(tests test_nr_fep_cache)
+  add_test(NAME test_nr_fep_cache COMMAND ./test_nr_fep_cache)
+
   add_executable(test_nr_passive_ue_ctx ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_ue_ctx_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_reconf_rules.c
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_ue_ctx.c)
