@@ -229,6 +229,14 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
                   tr->e3_scored, tr->e3_hyps, tr->e3_ns, tr->e3_phys_solved, tr->e3_fam_accept, tr->e3_fam_tried, tr->e3_reopen_score, tr->e3_reopen_e1,
                   tr->e3_deferred, tr->e3_skip, tr->e3_qm_calls, tr->e3_qm_deferred, tr->e3_qm_ns, tr->e3_trunc);
   }
+  if (m->has_sense_sched && t > 0 && (size_t)t < sizeof(tail))
+    t += snprintf(tail + t, sizeof(tail) - (size_t)t,
+                  ",\"sense_units_enabled\":%" PRIu64 ",\"sense_violations\":%" PRIu64 ",\"sense_disabled_skips\":%" PRIu64
+                  ",\"sense_wb_valid\":%" PRIu64 ",\"sense_wb_valid_prbs\":%" PRIu64 ",\"sense_gap_max_ms\":%" PRIu64
+                  ",\"sched_binding\":\"%s\",\"sched_decisions\":%" PRIu64 ",\"sched_enables\":%" PRIu64 ",\"sched_disables\":%" PRIu64
+                  ",\"sched_bad_cap\":%" PRIu64 ",\"sched_deferrals\":%" PRIu64,
+                  m->su_units_enabled, m->su_violations, m->su_disabled_skips, m->su_wb_valid, m->su_wb_valid_prbs, m->su_gap_max_ms,
+                  (m->ss_binding >= 0 && m->ss_binding < 6) ? (const char *const[]){"pool", "queue_dl", "queue_ul", "gpu", "sense_ring", "da"}[m->ss_binding] : "none", m->ss_decisions, m->ss_enables, m->ss_disables, m->ss_bad_cap, m->ss_deferrals);
   for (int i = 0; i < 2 && t > 0 && (size_t)t < sizeof(tail); i++) {
     static const char *const an[2] = {"janon", "dmrs_id"};
     if (m->admit_cls[i][0])

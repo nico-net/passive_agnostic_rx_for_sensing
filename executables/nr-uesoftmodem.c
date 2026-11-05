@@ -114,6 +114,7 @@ unsigned short config_frames[4] = {2,9,11,13};
 #include "radio/COMMON/iq_live.h"
 #include "radio/COMMON/ru_park.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_api.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.h"
 #include <stdatomic.h>
 
 THREAD_STRUCT thread_struct;
@@ -933,6 +934,7 @@ static void mpci_cell_sensing_session(int k)
 static void mpci_stop_cell_sensing(int k)
 {
   (void)k;
+  nr_sense_sched_stop(); /* idempotent: normally already stopped right after the radio release */
   nr_prach_passive_flush();
   nr_srs_passive_stop();
   nr_isac_stop();
@@ -1659,6 +1661,7 @@ int main(int argc, char **argv)
     nr_shutdown_finish();
 
   // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
+  nr_sense_sched_start(); /* SENSING mode only, N >= 1: independent of the core split (which needs 2 cells) and of the mpci control thread */
   if (g_ncells == 1) { /* N > 1: every cell's session, PRACH and SRS were opened in its prealloc hook (before the fence) and its start hook emits the session record */
     nr_isac_start();
     mpci_cell_sensing_session(0);
@@ -1697,6 +1700,7 @@ int main(int argc, char **argv)
   nr_shutdown_request(0);
   nr_shutdown_wait_radio();
   nr_shutdown_step("radio_released_before_worker_joins");
+  nr_sense_sched_stop(); /* SENSING scheduler (S7): no more decisions once the radio is gone, before any consumer or the pool stops (idempotent; also called below) */
   if (g_feed_obj) { /* G6: the radio is released: the reader has left on its failed read; stop the channelizer, final counters */
     iq_feed_stop(g_feed_obj);
     mpci_feed_log();

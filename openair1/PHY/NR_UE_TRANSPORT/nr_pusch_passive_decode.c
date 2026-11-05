@@ -1965,6 +1965,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   uint16_t prb[NR_PRB_SET_MAX];
   bool gapped = false;
   const bool fdra_unresolved = g->fdra_candidate_count != 0;
+  int pusch_dmrs_en0 = -1; /* the unit state read once for want_est (-1: not read); the extraction below follows that read (spec: no estimate-less record, I3) */
   if (g->ra_type0) {
     const int n = nr_ra_type0_prbs(g->rbg_bitmap, g->rbg_bwp_start, g->bwp_size,
                                   g->rbg_size, prb, NR_PRB_SET_MAX);
@@ -2147,7 +2148,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           in.gate_on = !pg.transform_precoding && !nr_ul_layout_is_probe(g) && !nr_ul_layout_is_trial(g) && nr_snr_gate_applies(false, true, pg.rv, true) && isfinite(rq_);
           in.gate_thr_db = in.gate_on ? (float)(rq_ - nr_snr_gate_margin_db(1)) : 0.f;
         }
-        in.want_est = nr_srs_passive_enabled() || nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS);
+        in.want_est = nr_srs_passive_enabled() || (pusch_dmrs_en0 = (nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS) && nr_sense_unit_enabled(NR_UNIT_PUSCH_DMRS, g->rnti)) ? 1 : 0); /* latched: the extraction below uses this read, not a second one */
         int ul_go_ = in.tbs_bits && in.bg && in.keep != -2; /* -2: the per-branch measurement is not decided (too few grants, or a mixed set): the CPU path measures per grant */
         if (ul_go_ && !ul_shadow) { /* per-path choice (nr_gpu_path.h): SHARED -> the pass (no change); DISCRETE -> alternating trial, then GPU or CPU */
           int pst_ = nr_gpu_path_state(NR_GPU_PATH_PASS_UL);
@@ -2545,7 +2546,13 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * The antennas are kept SEPARATE (nof_ant > 1, ant_stride_re) rather than combined: the whole
    * point of a 4-element array is that the inter-element phase carries the bearing, and combining
    * before submission would destroy exactly that. */
-  if (!t_solver_probe && !gapped && !fdra_unresolved && (nr_srs_passive_enabled() || nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS))) {
+  /* SENSING mode unit gate (spec 5.6): a disabled (RNTI, PUSCH_DMRS) unit gets no DM-RS extraction and no hand-off, counted as a disabled skip once per grant. The PUSCH-attributed
+   * SRS events (nr_srs_passive_pusch) are not part of this unit: they keep running when only this unit is off. */
+  const bool pusch_dmrs_cand = !t_solver_probe && !gapped && !fdra_unresolved && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS);
+  /* pusch_dmrs_en0 == 1: estimated for this unit, extract; == 0: not estimated, so even if enabled meanwhile this grant is skipped (counted by the gate when still off) */
+  const bool pusch_dmrs_gate = pusch_dmrs_cand && (pusch_dmrs_en0 == 1 || nr_sense_unit_gate(NR_UNIT_PUSCH_DMRS, g->rnti, (uint16_t)g->num_rb));
+  const bool pusch_dmrs_on = pusch_dmrs_gate && pusch_dmrs_en0 != 0;
+  if (!t_solver_probe && !gapped && !fdra_unresolved && (nr_srs_passive_enabled() || pusch_dmrs_on)) {
     const uint32_t nof_ant_cfr = (uint32_t)nant;
     const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;
     /* First DM-RS symbol inside the allocation. TS 38.211 puts the front-loaded one at l0, and it
@@ -2600,7 +2607,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       uint32_t nof_re = 0;
       double   pw = 0.0;
       double   ant_pw[PASSIVE_UL_MAX_ANT] = {0};
-      const uint64_t t_sense_prod=nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS) ? nr_sense_now_ns() : 0;
+      const uint64_t t_sense_prod=pusch_dmrs_on ? nr_sense_now_ns() : 0;
       const uint64_t uc_pusch = t_sense_prod ? nr_sense_unit_cpu_ns() : 0; /* per-unit cost (sensing mode): extraction + hand-off of the DM-RS CFR */
       /* TWO DIFFERENT SUBCARRIER CONVENTIONS, and mixing them is what this loop got wrong.
        *
@@ -2677,6 +2684,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           .dmrs_type=g->dmrs_config_type+1, .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid};
         /* the receiver's own DM-RS quality for this grant (already computed by the estimator; the same value UL_PUSCH_CRC prints) */
         nr_sense_meta_set_snr(&rs_meta, pvp->ul_dmrs_snr_db);
+        if (pusch_dmrs_on) /* the block also runs for the PUSCH-attributed SRS events when only this unit is off */
         nr_isac_submit_cfr_multi_meta(ul_slot_idx, 0.0f,
                                       NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
                                       ul_k, ul_l, nof_re, pvp->ul_dmrs_noise_var, &rs_meta);

@@ -5900,6 +5900,7 @@ static void phase2_guard_release(phase2_guard_t *g)
 {
   if (g->held)
     nr_pdcch_blind_phase2_unlock();
+  nr_sense_unit_flush_pending(); /* the unit-gate skips queued under the lock (sensing mode) are booked here, outside it */
 }
 
 /* nr_pdcch_blind_monitor_run_occasion_one: runs one PDCCH scan pass (one CORESET geometry: CORESET#0, a bank entry, the discovered CORESET or the CSS0 pass) and returns when done.
@@ -6230,7 +6231,6 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   if (cfg_reconf_on) nr_cfg_epoch_tick(cfg_abs_slot);
 
   const int dmrs_source  = nr_sense_blind_dmrs_source();
-  const bool want_dmrs   = dmrs_source >= 0;
   const bool want_data   = cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
   const bool want_decode = cfg->pdsch_decode >= 1;
   const bool defer       = nr_pdsch_passive_queue_running();
@@ -9093,6 +9093,10 @@ constdiag_done:;
       if (cand_task[ti].ok) {
         NR_BLIND_CTR_INC(g_ul_accepts);
         bool ul_dec = true; /* traffic mode: a non-probe PUSCH decode of this grant is wanted */
+        if (nr_isac_mode() == NR_ISAC_MODE_SENSING) { /* sensing: all grants of an enabled PUSCH_DMRS unit, the traffic policy + a sampled check otherwise */
+          const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
+          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti));
+        }
         if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
           const uint64_t tt0 = btim_now_ns();
           const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
@@ -9241,6 +9245,8 @@ constdiag_done:;
                   (unsigned)ul00.start_symbol, (unsigned)ul00.num_symbols,
                   (unsigned)ul00.k2, (unsigned)ul00.mcs);
           bool ul00_dec = true;
+          if (nr_isac_mode() == NR_ISAC_MODE_SENSING)
+            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti));
           if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
             const uint64_t tt0 = btim_now_ns();
             ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti));
@@ -9426,6 +9432,12 @@ constdiag_done:;
     NR_BLIND_CTR_INC(g_accepts);
     int t_seen = 0; /* traffic mode only: DCIs of this DL RNTI seen so far (probe triage) */
     int tw = -1; /* traffic mode only: 1 = a non-probe decode of this DCI is wanted, 0 = suppressed (-1 in legacy mode: never read) */
+    if (nr_isac_mode() == NR_ISAC_MODE_SENSING) { /* sensing: all grants of an enabled PDSCH_DATA unit, the traffic policy + a sampled check otherwise */
+      const bool is10t = out.dci_format == NR_BLIND_DCI_FORMAT_1_0;
+      const bool slv = !is10t && nr_pdsch_solver_enabled() && cand_task[ti].dl_auto && g_dci11_state == 1 && g_dci11_resolver != NULL;
+      const nr_layout_state_t lst = is10t ? NR_LAYOUT_FIXED : slv ? nr_pdsch_solver_layout_state(out.rnti, NULL, NULL) : NR_LAYOUT_SOLVED;
+      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false) ? 1 : 0;
+    }
     if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
       const uint64_t tt0 = btim_now_ns();
       const bool is10t = out.dci_format == NR_BLIND_DCI_FORMAT_1_0;
@@ -10544,6 +10556,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
         job.rnti_class = out.rnti_class;
         job.harq_pid_tag = blind_harq_tag(abs_slot, out.rnti, o->harq_pid);
         job.want_data = want_data && !var[v].probe;
+        job.dmrs_tap = !var[v].probe;
         job.fo_hz = isnan(nr_slot_fep_fo_override_hz) ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                                                       : nr_slot_fep_fo_override_hz;
         job.sweep_ticket.layout_index = 0xFFFF;
@@ -10677,6 +10690,10 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
         run++;
       chest_alloc = set_bitmap_from_start_size(freq_alloc.prb_list[0], run);
     }
+    /* SENSING mode unit gate (spec 5.6): a disabled (RNTI, PDSCH_DMRS) unit gets no DM-RS tap: no extra chest, no extraction, no hand-off. Counted once per accepted grant as a disabled skip (queued under g_phase2_mu, booked after the unlock); with the tap off the grant is handled exactly as under sources = "pdsch_data". */
+    const bool dmrs_gate_g = dmrs_source >= 0 && nr_sense_unit_gate_deferred(NR_UNIT_PDSCH_DMRS, out.rnti, (uint16_t)chest_alloc.num_rbs);
+    const int dmrs_source_g = dmrs_gate_g ? dmrs_source : -1;
+    const bool want_dmrs_g = dmrs_source_g >= 0;
 
     /* ---- Is the per-accept channel estimate needed AT ALL on this thread? -----------------------
      * It exists for exactly two consumers: the DM-RS CFR tap (`want_dmrs`) and the post-estimation
@@ -10694,7 +10711,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
      * The DEFERRED decode does its own FEP and channel estimation in the consumer, so skipping here
      * costs it nothing. `sources = "pdsch_data"` makes want_dmrs false, and this deployment runs the
      * SNR gate off, so on the sensing config this skips the whole block. */
-    const bool need_chest = nr_sense_blind_need_chest(dmrs_source, cfg->min_snr_lin);
+    const bool need_chest = nr_sense_blind_need_chest(dmrs_source_g, cfg->min_snr_lin);
     if (tw == 0 && want_decode && !rv0_drop(cfg, &out) && decodes_this_occasion < cfg->pdsch_max_per_slot && traffic_skip_note())
       continue; /* traffic mode: not a grantdrop; the policy declined this decode */
     if (want_decode && (rv0_drop(cfg, &out)))
@@ -10768,7 +10785,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
 
     /* ---- Nothing below this point can be USED once the per-occasion decode cap is reached.
      * MEASURED: BTIM reports chest[n=61..2147 mean~100us] on runs configured with
-     * sources = "pdsch_data", where want_dmrs is FALSE and the estimate therefore has no consumer
+     * sources = "pdsch_data", where want_dmrs_g is FALSE and the estimate therefore has no consumer
      * at all. The cause is the cap: the fast enqueue path above requires
      * decodes_this_occasion < pdsch_max_per_slot, so once an occasion has queued its 16 grants every
      * FURTHER accepted candidate fell through to here, paid a full-slot FEP plus
@@ -10777,9 +10794,9 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
      *
      * That cost scales with the ACCEPT rate, i.e. with offered load, which is exactly the wrong
      * direction: it is largest in the regime where receive-thread duty is already at the ~18 % PBCH
-     * lock threshold. Bail out before the expensive work instead. `want_dmrs` still gets its
+     * lock threshold. Bail out before the expensive work instead. `want_dmrs_g` still gets its
      * estimate because the DM-RS CFR tap is not subject to the decode cap. */
-    if (!enq_done && nr_sense_blind_skip_capped(dmrs_source, want_decode,
+    if (!enq_done && nr_sense_blind_skip_capped(dmrs_source_g, want_decode,
                                   decodes_this_occasion >= cfg->pdsch_max_per_slot)) {
       NR_BLIND_CTR_INC(g_dec_over_cap);
       continue;
@@ -10791,7 +10808,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
 
     // Full-slot FEP for the PDSCH's own DMRS symbol -- separate from the CORESET FEP above (a
     // different symbol in general; the PDSCH allocation starts after the PDCCH region).
-    const uint64_t t_sense_chest=nr_sense_blind_extra_chest(dmrs_source,cfg->min_snr_lin) ? nr_sense_now_ns() : 0;
+    const uint64_t t_sense_chest=nr_sense_blind_extra_chest(dmrs_source_g,cfg->min_snr_lin) ? nr_sense_now_ns() : 0;
     const uint64_t uc_chest = t_sense_chest ? nr_sense_unit_cpu_ns() : 0; /* per-unit cost (sensing mode): the chest that only the DM-RS tap needs */
     const uint64_t btim_t_che = btim_on ? btim_now() : 0;
     __attribute__((aligned(32))) c16_t rxdataF_pdsch[fp->nb_antennas_rx][rxdataF_sz];
@@ -10818,9 +10835,9 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
     if (t_sense_chest)
       nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PDSCH_DMRS,nr_sense_now_ns()-t_sense_chest);
     btim_add(BTIM_CHEST, btim_t_che);
-    const uint64_t uc_mark = (uc_chest || want_dmrs) ? nr_sense_unit_cpu_ns() : 0; /* 0 outside the sensing mode */
+    const uint64_t uc_mark = (uc_chest || want_dmrs_g) ? nr_sense_unit_cpu_ns() : 0; /* 0 outside the sensing mode */
     const uint64_t uc_acc = uc_chest && uc_mark ? uc_mark - uc_chest : 0;
-    if (uc_mark && !want_dmrs) /* chest only: no extraction follows */
+    if (uc_mark && !want_dmrs_g) /* chest only: no extraction follows */
       nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, out.rnti, uc_acc, 0, false, (uint16_t)chest_alloc.num_rbs, nr_sense_now_ns());
 
     const int num_sc = chest_alloc.num_rbs * NR_NB_SC_PER_RB;
@@ -10839,11 +10856,11 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       static __thread uint32_t isac_l[273 * NR_NB_SC_PER_RB];
       uint32_t nof_re  = 0;
       double   h_pow_sum = 0; // antenna 0 only -- feeds the post-estimation SNR gate below
-      const uint64_t t_sense_extract=want_dmrs ? nr_sense_now_ns() : 0;
+      const uint64_t t_sense_extract=want_dmrs_g ? nr_sense_now_ns() : 0;
       for (int j = 0; j < num_sc && nof_re < 273 * NR_NB_SC_PER_RB; j += 2) { // comb-2, matches pdsch_dmrs
         for (uint32_t a = 0; a < nof_ant; a++) {
           const c16_t *dl_ch_a = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_sym];
-          if (want_dmrs) {
+          if (want_dmrs_g) {
             const size_t o = 2 * ((size_t)a * (273 * NR_NB_SC_PER_RB) + nof_re);
             isac_h[o]     = (float)dl_ch_a[j].r;
             isac_h[o + 1] = (float)dl_ch_a[j].i;
@@ -10852,7 +10869,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
             h_pow_sum += (double)dl_ch_a[j].r * dl_ch_a[j].r + (double)dl_ch_a[j].i * dl_ch_a[j].i;
           }
         }
-        if (want_dmrs) {
+        if (want_dmrs_g) {
           isac_k[nof_re] = base_sc + (uint32_t)j;
           isac_l[nof_re] = (uint32_t)dmrs_sym;
         }
@@ -10860,7 +10877,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       }
       if (t_sense_extract)
         nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PDSCH_DMRS,nr_sense_now_ns()-t_sense_extract);
-      if (uc_mark && want_dmrs) /* the grant's chest (if extra) + extraction: one message of the RNTI's PDSCH_DMRS unit */
+      if (uc_mark && want_dmrs_g) /* the grant's chest (if extra) + extraction: one message of the RNTI's PDSCH_DMRS unit */
         nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, out.rnti, uc_acc + (nr_sense_unit_cpu_ns() - uc_mark), 0, false, (uint16_t)chest_alloc.num_rbs, nr_sense_now_ns());
       // ---- Gate 3 (last, most expensive to reach): the actual DMRS channel estimate itself looks
       // like noise even though every payload-level check passed by chance. mean|H|^2/nvar is
@@ -10872,7 +10889,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
           !(cfg->min_snr_lin > 0.0f && nof_re > 0 && nvar > 0
             && (float)(h_pow_sum / nof_re) < cfg->min_snr_lin * (float)nvar);
       if (nof_re > 0 && snr_ok) {
-        if (want_dmrs && (!sweep_ticket.generation || sweep_ticket.settled)) {
+        if (want_dmrs_g && (!sweep_ticket.generation || sweep_ticket.settled)) {
           /* Do not publish unverified hypothesis-derived DMRS rows into sensing. */
           nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
                                        .scs_hz          = fp->subcarrier_spacing,
@@ -10892,7 +10909,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
            * frame-derived abs_slot above stays the internal key (rings, hashes) */
           const uint32_t export_slot = (uint32_t)nr_sense_abs_slot_align(source_absolute_slot, proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame);
           const uint64_t uc_sub = nr_sense_unit_cpu_ns();
-          nr_isac_submit_cfr_multi_meta(export_slot, 0.0f, dmrs_source, &carrier, isac_h, nof_ant,
+          nr_isac_submit_cfr_multi_meta(export_slot, 0.0f, dmrs_source_g, &carrier, isac_h, nof_ant,
                                         273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, nvar > 0 ? (float)nvar : NAN, &rs_meta);
           if (uc_sub) /* the hand-off into the sense ring: cost only (the message was counted above) */
             nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, out.rnti, nr_sense_unit_cpu_ns() - uc_sub, 0, false, 0, nr_sense_now_ns());

@@ -108,6 +108,12 @@ typedef struct {
   /* traffic mode only (has_traffic = nr_isac_mode() == TRAFFIC; the keys are omitted otherwise): nr_traffic_stats() + DCI record ring counters */
   int has_traffic;
   nr_traffic_stats_t traffic;
+  /* sensing mode only (has_sense_sched = nr_isac_mode() == SENSING; the keys are omitted otherwise, so legacy and traffic outputs are unchanged). su_*: this cell's unit totals
+   * (nr_sense_unit_cell_stats); ss_*: the process-wide scheduler (one thread for every cell), repeated in each cell's line, never summed across cells. */
+  int has_sense_sched;
+  uint64_t su_units_enabled, su_violations, su_disabled_skips, su_wb_valid, su_wb_valid_prbs, su_gap_max_ms;
+  uint64_t ss_decisions, ss_enables, ss_disables, ss_bad_cap, ss_deferrals;
+  int ss_binding; /* nr_res_id_t of the last decision, -1 = none yet */
   uint64_t dci_rec_generated, dci_rec_persisted, dci_rec_lost;
   /* admission per class, all modes (nr_admit.h): [0] JANON, [1] DMRS_ID; {attempts, skipped, recovered, expired}; keys omitted while attempts == 0 */
   uint64_t admit_cls[2][4];

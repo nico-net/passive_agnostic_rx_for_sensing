@@ -11,6 +11,7 @@
  * links that module through its emitters and supplies the formatter. */
 __attribute__((weak)) int nr_sense_rs_to_json(nr_sense_src_t, const nr_sense_rs_meta_t *, uint64_t, char *, size_t);
 __attribute__((weak)) int nr_sense_dci_to_json(const nr_sense_dci_rec_t *, char *, size_t);
+static __thread bool tl_frame_ring_full; /* set by a CFR push dropped on a full frame ring, taken by the same thread (nr_sense_take_ring_full) */
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -103,7 +104,7 @@ NR_CELL_STATIC(rs_job_t *, rs_jobs)
 NR_CELL_STATIC(nr_sense_dci_rec_t *, dci_jobs)
 #define dci_jobs NR_CELL_REF(dci_jobs)
 /* S3: quality of the CFR frames still addressable by id, slot = frame_id % frame_cap, id 0 = empty. SENSING mode only; guarded by mu. */
-typedef struct { uint64_t id; bool ok; nr_sense_quality_t q; } qslot_t;
+typedef struct { uint64_t id; bool ok; uint32_t qwork_ns; nr_sense_quality_t q; } qslot_t; /* qwork_ns: the writer time that computed this frame's quality (charged to the record's unit) */
 NR_CELL_STATIC(qslot_t *, qring)
 #define qring NR_CELL_REF(qring)
 NR_CELL_STATIC(uint32_t, qcap)
@@ -208,7 +209,7 @@ static void frame_quality(const uint8_t *p, nr_sense_quality_t *q, bool *ok)
   const uint16_t *k=(const uint16_t *)(p+FRAME_HEADER);
   const uint8_t *l=p+FRAME_HEADER+2*(size_t)keep;
   const float *iq=(const float *)(p+((FRAME_HEADER+3*(size_t)keep+3)&~(size_t)3));
-  nr_sense_quality_compute(n_ant,iq,(int)keep,(int)keep,k,l,noise,q);
+  nr_sense_quality_compute_ex(n_ant,iq,(int)keep,(int)keep,k,l,noise,p[16]==NR_SENSE_SRC_CSIRS?NR_SENSE_Q_SPARSE:0u,q);
   *ok=true;
 #else
   (void)p; (void)q; *ok=false;
@@ -216,7 +217,7 @@ static void frame_quality(const uint8_t *p, nr_sense_quality_t *q, bool *ok)
 }
 /* Fill job->meta.q from the quality ring. 1 = settled (q_valid set, or definitively unavailable); 0 = the frame is still queued: format later.
  * Caller does not hold mu. */
-static int job_quality(rs_job_t *job, bool may_wait)
+static int job_quality(rs_job_t *job, bool may_wait, uint32_t *qcost)
 {
   nr_sense_rs_meta_t *m=&job->meta;
   m->q_valid=false;
@@ -224,7 +225,7 @@ static int job_quality(rs_job_t *job, bool may_wait)
   nr_sense_quality_t q; int r=1;
   pthread_mutex_lock(&mu);
   const qslot_t *s=qring && qcap ? &qring[job->frame_id%qcap] : NULL;
-  if (s && s->id==job->frame_id && s->ok) q=s->q, m->q_valid=true;
+  if (s && s->id==job->frame_id && s->ok) q=s->q, m->q_valid=true, *qcost=s->qwork_ns;
   else if (may_wait && frame_count && s && s->id<job->frame_id) r=0;
   else stats.q_miss++;
   pthread_mutex_unlock(&mu);
@@ -277,16 +278,20 @@ static void *run_writer(void *arg)
         } else {
         rs_job_t *job=&rs_jobs[at];
         char *line=records+(size_t)at*RECORD_BYTES;
-        if (!job_quality(job,i>0) ) { count=i; break; }   /* frame still queued: stop the batch, the frame stream runs next */
+        uint32_t qcost=0;
+        if (!job_quality(job,i>0,&qcost) ) { count=i; break; }   /* frame still queued: stop the batch, the frame stream runs next */
         if (job->meta.q_valid) { /* per-unit view of the record (sensing mode only: the call is a no-op otherwise) */
-          const int us=job->src==NR_SENSE_SRC_PDSCH_DMRS?NR_UNIT_PDSCH_DMRS:job->src==NR_SENSE_SRC_PDSCH_DATA?NR_UNIT_PDSCH_DATA:
-                       job->src==NR_SENSE_SRC_PUSCH_DMRS?NR_UNIT_PUSCH_DMRS:job->src==NR_SENSE_SRC_SRS?NR_UNIT_SRS:-1;
+          const int us=nr_sense_unit_of_src(job->src);
           if (us>=0) nr_sense_unit_cfr((nr_unit_src_t)us,(uint16_t)job->meta.rnti,job->meta.q.valid_cfr_prbs,job->meta.q.snr_db_p50,nr_sense_now_ns());
         }
         length=nr_sense_rs_to_json(job->src,&job->meta,job->frame_id,line,RECORD_BYTES-1);
         if (length>0) { line[length]='\n'; record_lengths[at]=(uint32_t)length+1; }
         else { record_lengths[at]=0; format_drops++; }
-        nr_sense_cost_add(NR_SENSE_COST_REC,job->src,nr_sense_now_ns()-t_rec);
+        { /* the unit pays its writer cost: this record's formatting + the quality computed for its frame (SENSE_RING demand, not the unit's whole CPU) */
+          const uint64_t t_now=nr_sense_now_ns(); const int us=nr_sense_unit_of_src(job->src);
+          nr_sense_cost_add(NR_SENSE_COST_REC,job->src,t_now-t_rec);
+          if (us>=0) nr_sense_unit_cost_ring((nr_unit_src_t)us,(uint16_t)job->meta.rnti,(t_now-t_rec)+qcost,t_now);
+        }
         record_binary[at]=0;
         }
       }
@@ -294,13 +299,14 @@ static void *run_writer(void *arg)
                             : (void *)(records+(size_t)at*RECORD_BYTES);
       vec[i].iov_len=frame ? frame_lengths[at] : record_lengths[at];
     }
-    nr_sense_quality_t fq[16]; uint64_t fid[16]; bool fok[16]; uint32_t fn=0;
+    nr_sense_quality_t fq[16]; uint64_t fid[16]; bool fok[16]; uint32_t fcost[16]; uint32_t fn=0;
     if (frame && nr_isac_mode()==NR_ISAC_MODE_SENSING) {
       for (uint32_t i=0;i<count;i++) {
         const uint8_t *p=frames+(size_t)((frame_head+i)%frame_cap)*frame_stride;
         const uint64_t t_q=nr_sense_now_ns();
         memcpy(&fid[fn],p+8,8);
         frame_quality(p,&fq[fn],&fok[fn]);
+        fcost[fn]=(uint32_t)(nr_sense_now_ns()-t_q);
         nr_sense_cost_add(NR_SENSE_COST_REC,(nr_sense_src_t)(p[16]<NR_SENSE_SRC_COUNT?p[16]:0),nr_sense_now_ns()-t_q);
         fn++;
       }
@@ -333,7 +339,7 @@ static void *run_writer(void *arg)
 #ifdef NR_SENSE_HAVE_ZMQ
     if (zmq_failed) stats.zmq_drops++;
 #endif
-    for (uint32_t i=0;i<fn;i++) if (qring && qcap) { qslot_t *qs=&qring[fid[i]%qcap]; qs->id=fid[i]; qs->ok=fok[i]; if (fok[i]) { qs->q=fq[i]; stats.q_computed++; } }
+    for (uint32_t i=0;i<fn;i++) if (qring && qcap) { qslot_t *qs=&qring[fid[i]%qcap]; qs->id=fid[i]; qs->ok=fok[i]; qs->qwork_ns=fcost[i]; if (fok[i]) { qs->q=fq[i]; stats.q_computed++; } }
     last_frame=frame;
     atomic_fetch_add(&written_items,count);
     if (frame) { frame_head=(frame_head+count)%frame_cap; frame_count-=count; }
@@ -484,7 +490,7 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
       if (((const uint32_t *)k_abs)[i]>UINT16_MAX || ((const uint32_t *)l_sym)[i]>UINT8_MAX) {
         stats.cfr_rejected++; pthread_mutex_unlock(&mu); return 0;
       }
-    next_id++; stats.cfr_dropped[src]++; pthread_mutex_unlock(&mu); return 0;
+    next_id++; stats.cfr_dropped[src]++; tl_frame_ring_full=true; pthread_mutex_unlock(&mu); return 0;
   }
   const uint32_t at=(frame_head+frame_count)%frame_cap;
   const uint64_t t_pack=nr_sense_now_ns();
@@ -571,7 +577,12 @@ int nr_sense_push_rs_binary(nr_sense_src_t src, const nr_sense_rs_meta_t *meta, 
   if (cslen>=256 || atlen>=256) return -1;
   pthread_mutex_lock(&mu);
   if (!opened) { pthread_mutex_unlock(&mu); return -1; }
-  if (no_sink || record_count==record_cap) { stats.rec_dropped++; pthread_mutex_unlock(&mu); return 0; }
+  if (no_sink || record_count==record_cap) {
+    const bool ring_full=!no_sink;
+    stats.rec_dropped++; pthread_mutex_unlock(&mu);
+    if (ring_full) { const int us=nr_sense_unit_of_src(src); if (us>=0) nr_sense_unit_violation((nr_unit_src_t)us,(uint16_t)meta->rnti); } /* a record of an enabled unit lost on the full ring */
+    return 0;
+  }
   const uint32_t at=(record_head+record_count)%record_cap;
   rs_job_t *job=&rs_jobs[at];
   job->meta=*meta; job->src=src; job->frame_id=frame_id;
@@ -602,6 +613,12 @@ int nr_sense_push_dci(const nr_sense_dci_rec_t *r)
   record_count++; stats.rec_pushed++; pthread_cond_signal(&cv); pthread_mutex_unlock(&mu);
   return 1;
 }
+int nr_sense_unit_of_src(nr_sense_src_t src)
+{
+  return src==NR_SENSE_SRC_PDSCH_DMRS?NR_UNIT_PDSCH_DMRS:src==NR_SENSE_SRC_PDSCH_DATA?NR_UNIT_PDSCH_DATA:
+         src==NR_SENSE_SRC_PUSCH_DMRS?NR_UNIT_PUSCH_DMRS:src==NR_SENSE_SRC_SRS?NR_UNIT_SRS:-1;
+}
+bool nr_sense_take_ring_full(void) { const bool f=tl_frame_ring_full; tl_frame_ring_full=false; return f; }
 void nr_sense_async_note(nr_sense_src_t src, int queued)
 {
   if ((unsigned)src >= NR_SENSE_SRC_COUNT) return;

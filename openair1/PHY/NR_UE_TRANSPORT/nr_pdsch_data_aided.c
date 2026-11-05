@@ -55,6 +55,7 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "nr_pdsch_mimo_ls.h"
 #include "nr_sense_api.h"
 #include "nr_sense_unit.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_noise_est.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_prg_latched
 #include "executables/nr-uesoftmodem.h"
@@ -137,7 +138,11 @@ static void da_emit(uint32_t slot_idx, float frac, const nr_isac_carrier_t *carr
                     uint32_t nl, const float *h, uint32_t nant, uint32_t stride, const uint32_t *k, const uint32_t *l, uint32_t off,
                     uint32_t cnt, float nvar)
 {
+  /* The demodulator's nvar is in rxdataF units; H = Y/X is not (|X| is the constellation scale, ~16 at QPSK), so the noise handed to the quality is the
+   * one measured on H itself (second difference over consecutive subcarriers, as the PUSCH data tap). NaN/0 = none: the quality uses the record's residual. */
   if (nl <= 1) {
+    if (nr_isac_mode() == NR_ISAC_MODE_SENSING) /* legacy/traffic records keep the demodulator's figure */
+      nvar = nr_sense_h_noise_var(&h[2 * (size_t)off], &k[off], &l[off], cnt, stride, nant);
     nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, &h[2 * (size_t)off], nant, stride, &k[off], &l[off],
                                   cnt, nvar, rs_meta);
     return;
@@ -151,8 +156,9 @@ static void da_emit(uint32_t slot_idx, float frac, const nr_isac_carrier_t *carr
     if (port_known) ports &= ports - 1;
     m.layer_idx1 = (int)lay + 1;
     m.n_layers = (int)nl;
-    nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, &h[2 * ((size_t)lay * nant * stride + off)], nant,
-                                  stride, &k[off], &l[off], cnt, nvar, &m);
+    const float *hl = &h[2 * ((size_t)lay * nant * stride + off)];
+    nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, hl, nant, stride, &k[off], &l[off], cnt,
+                                  nr_isac_mode() == NR_ISAC_MODE_SENSING ? nr_sense_h_noise_var(hl, &k[off], &l[off], cnt, stride, nant) : nvar, &m);
   }
 }
 
@@ -200,6 +206,10 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     return;
   }
   if (!nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+    return;
+  /* SENSING mode unit gate (spec 5.6): a disabled (RNTI, PDSCH_DATA) unit is skipped before any work and counted as a disabled skip. The daBg worker re-enters here with a
+   * message that was admitted when the unit was enabled: it is finished, never re-gated. */
+  if (!da_on_worker && !nr_sense_unit_gate_deferred(NR_UNIT_PDSCH_DATA, rnti, (uint16_t)freq_alloc->num_rbs)) /* called under g_phase2_mu by the monitor: the skip is booked after its unlock */
     return;
 
   /* MULTI-LAYER (Nl = 2..4): Ĥ[k] = Y[k]/X[k] is a SCALAR division and is only valid when one modulation symbol is transmitted
@@ -821,8 +831,11 @@ static void da_run(void *arg)
   nr_isac_abs_slot_override = 0;
   const uint64_t t1 = da_now_ns();
   if (unit_c0)
-    nr_sense_unit_job(NR_UNIT_PDSCH_DATA, j->rnti, nr_sense_unit_cpu_ns() - unit_c0, t0 - j->t_enq_ns, t1 - j->t_enq_ns > NR_UNIT_LATE_NS,
-                      (uint16_t)j->fa.num_rbs, t1);
+  {
+    const uint64_t cpu_da = nr_sense_unit_cpu_ns() - unit_c0;
+    nr_sense_unit_job(NR_UNIT_PDSCH_DATA, j->rnti, cpu_da, 0 /* the daBg queue wait is the DA resource's own (violation path on a shed); QUEUE_DL is the decode queue */, t1 - j->t_enq_ns > NR_UNIT_LATE_NS, (uint16_t)j->fa.num_rbs, t1);
+    nr_sense_unit_cost_da(NR_UNIT_PDSCH_DATA, j->rnti, cpu_da, t1); /* the daBg worker CPU is the unit's DA demand (it is also pool CPU: the worker leases a pool token) */
+  }
   atomic_fetch_add(&P->run_ns, t1 - t0);
   const uint64_t n = atomic_fetch_add(&P->done, 1) + 1;
   if (n == 1 || n % 2000 == 0) {
@@ -834,12 +847,16 @@ static void da_run(void *arg)
   __atomic_fetch_or(&P->free_mask, 1u << j->idx, __ATOMIC_RELEASE);
 }
 
-static int da_shed(_Atomic uint64_t *why)
+/* daBg workers of the calling thread's cell (0 before the pool is up): the capacity the DA resource of the sensing scheduler is built from */
+int nr_isac_pdsch_data_aided_workers(void) { return atomic_load_explicit(&g_da.ready, memory_order_acquire) ? g_da_qs.n : 0; }
+
+static int da_shed(_Atomic uint64_t *why, uint16_t rnti)
 {
   da_pool_t *P = &g_da;
   atomic_fetch_add(why, 1);
   atomic_fetch_add(&P->dropped, 1);
   nr_sense_async_note(NR_SENSE_SRC_PDSCH_DATA, 0);
+  nr_sense_unit_violation(NR_UNIT_PDSCH_DATA, rnti); /* a message of an enabled unit was dropped (counted only when the unit is enabled) */
   return 0;
 }
 
@@ -863,12 +880,14 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
     nr_isac_pdsch_data_aided_submit(ue, proc, cw, dlsch_config, freq_alloc, rnti, tb_bytes, harq_pid_tag, rxdataF, nvar, decode_G, dmrs_snr_db);
     return 0;
   }
+  if (!nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, rnti, (uint16_t)freq_alloc->num_rbs)) /* SENSING mode: a disabled unit is skipped before the snapshot, counted once */
+    return 0;
   /* Everything else is sensing work (re-encode, scramble, modulate, LS solve, CFR export): it never runs on this thread. A grant the worker cannot take
    * is shed and counted per source (nr_sense_async_note -> ISAC_METRICS sense_async_drop_pdsch_data); decode CRC and latency come first. */
   const uint32_t A = cw->TBS;
   const size_t tb_n = ((size_t)A + (A > NR_MAX_PDSCH_TBS ? 24 : 16) + 7) / 8;
   if (!atomic_load_explicit(&P->ready, memory_order_acquire) || tb_n > DA_TB_CAP || (int)P->nant != fp->nb_antennas_rx || P->stride != (uint32_t)fp->samples_per_slot_wCP)
-    return da_shed(&P->drop_geom);
+    return da_shed(&P->drop_geom, rnti);
   da_qs_t *Q = &g_da_qs;
   const int nq = Q->n;
   int qi = -1;
@@ -882,14 +901,14 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
     }
   }
   if (qi < 0)
-    return da_shed(&P->drop_queue);
+    return da_shed(&P->drop_queue, rnti);
   da_job_t *j = NULL;
   unsigned m = __atomic_load_n(&P->free_mask, __ATOMIC_ACQUIRE);
   while (m && !j)
     if (__atomic_compare_exchange_n(&P->free_mask, &m, m & (m - 1u), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
       j = P->job[__builtin_ctz(m)];
   if (!j)
-    return da_shed(&P->drop_pool);
+    return da_shed(&P->drop_pool, rnti);
   const uint64_t t_snap0 = da_now_ns();
   /* a non-contiguous allocation reads PRBs anywhere in the carrier: snapshot the carrier's whole band (same index map as the tap's) */
   int start_re, num_sc;
@@ -924,5 +943,5 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
     }
   }
   __atomic_fetch_or(&P->free_mask, 1u << j->idx, __ATOMIC_RELEASE);
-  return da_shed(ok ? &P->drop_queue : &P->drop_geom);
+  return da_shed(ok ? &P->drop_queue : &P->drop_geom, rnti);
 }

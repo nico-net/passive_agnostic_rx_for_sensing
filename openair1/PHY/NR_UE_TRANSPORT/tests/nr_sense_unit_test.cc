@@ -32,6 +32,15 @@ TEST_F(Unit, BucketsAccumulate)
   EXPECT_EQ(nr_sense_unit_bucket_cpu(0, 0x4601, NR_UNIT_PDSCH_DATA, tb(6)), 1 * MS);
   EXPECT_EQ(nr_sense_unit_bucket_cpu(0, 0x4601, NR_UNIT_PDSCH_DMRS, tb(5)), 0u); /* the source is part of the key */
   EXPECT_EQ(nr_sense_unit_bucket_cpu(0, 0x4602, NR_UNIT_PDSCH_DATA, tb(5)), 0u); /* so is the RNTI */
+  nr_sense_unit_view_t vw[8];
+  ASSERT_GE(snap(0, tb(7), vw), 1);
+  EXPECT_EQ(vw[0].n_cfr, 0u);
+  nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 0x4601, 150, 10.f, tb(6));
+  nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 0x4601, 150, 10.f, tb(6));
+  ASSERT_GE(snap(0, tb(7), vw), 1);
+  EXPECT_EQ(vw[0].n_cfr, 2u); /* since row creation */
+  EXPECT_EQ(vw[0].last_cfr_ns, tb(6));
+  EXPECT_EQ(vw[0].est_usable_prbs, 200); /* the latest usable PRBs are in the view (scheduler value) */
 }
 
 TEST_F(Unit, P99OverWindow)
@@ -89,6 +98,7 @@ TEST_F(Unit, LruEvictsIdle)
 TEST_F(Unit, ViolationAndSkipCounted)
 {
   nr_sense_unit_job(NR_UNIT_PDSCH_DATA, 9, MS, 0, false, 200, tb(1));
+  nr_sense_unit_set_enabled(0, 9, NR_UNIT_PDSCH_DATA, true); /* a new row starts disabled (S7); a drop counts only in an enabled unit */
   nr_sense_unit_violation(NR_UNIT_PDSCH_DATA, 9);
   nr_sense_unit_violation(NR_UNIT_PDSCH_DATA, 9);
   nr_sense_unit_skip(NR_UNIT_PDSCH_DATA, 9, 200, tb(1));
@@ -114,6 +124,7 @@ TEST_F(Unit, SnapshotPerCell)
   std::thread t([] {
     nr_cell_bind(1);
     nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, 6, 8 * MS, 0, true, 200, tb(1));
+    nr_sense_unit_set_enabled(1, 6, NR_UNIT_PDSCH_DMRS, true);
     nr_sense_unit_violation(NR_UNIT_PDSCH_DMRS, 6);
   });
   t.join();
@@ -285,6 +296,7 @@ static void evict_row_77()
 TEST_F(Unit, LateWriterCannotTouchTheSuccessor)
 {
   nr_sense_unit_job(NR_UNIT_PDSCH_DATA, 77, MS, 0, false, 200, tb(1)); /* oldest row */
+  nr_sense_unit_set_enabled(0, 77, NR_UNIT_PDSCH_DATA, true); /* enabled: a violation that reached it would count */
   nr_sense_unit_view_t v[256];
   ASSERT_EQ(snap(0, tb(2), v), 1);
   const uint32_t g_before = v[0].gen;
@@ -352,4 +364,32 @@ TEST_F(Unit, DISABLED_Cost)
   for (int i = 0; i < 100; i++) n = snap(0, tb(2000), v);
   clock_gettime(CLOCK_MONOTONIC, &b);
   printf("%d units, %.1f us per snapshot\n", n, ((b.tv_sec - a.tv_sec) * 1e9 + (b.tv_nsec - a.tv_nsec)) / 100 / 1e3);
+}
+
+TEST_F(Unit, RatioInitialisedByFirstRecord)
+{
+  nr_sense_unit_job(NR_UNIT_PDSCH_DATA, 0x4601, MS, 0, false, 200, tb(1));
+  nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 0x4601, 20, 5.f, tb(2));   /* first record: invalid (20 of 200 PRBs) -> ratio 0.1 */
+  nr_sense_unit_view_t vw[8];
+  ASSERT_GE(snap(0, tb(3), vw), 1);
+  EXPECT_FLOAT_EQ(vw[0].valid_ratio, 0.1f);
+  for (int i = 0; i < 12; i++) nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 0x4601, 200, 5.f, tb(3) + i);
+  ASSERT_GE(snap(0, tb(4), vw), 1);
+  EXPECT_GT(vw[0].valid_ratio, 0.9f); /* follows the records, not an average from 0 */
+}
+
+TEST_F(Unit, RingAndDaCostStreamsAreSeparatePerUnit)
+{
+  nr_sense_unit_job(NR_UNIT_PDSCH_DATA, 5, 80 * MS, 0, false, 200, tb(1)); /* pool CPU */
+  nr_sense_unit_cost_da(NR_UNIT_PDSCH_DATA, 5, 70 * MS, tb(1));
+  nr_sense_unit_cost_ring(NR_UNIT_PDSCH_DATA, 5, 2 * MS, tb(1));
+  nr_sense_unit_cost_ring(NR_UNIT_PDSCH_DATA, 99, 5 * MS, tb(1)); /* no row: not attributed, no row opened */
+  nr_sense_unit_view_t v[8];
+  ASSERT_EQ(snap(0, tb(100), v), 1);
+  EXPECT_FLOAT_EQ(v[0].cpu_max_ns, 80.f * MS);
+  EXPECT_FLOAT_EQ(v[0].da_p99_ns, 0.f);   /* one busy bucket of 320 is not the p99 (nearest rank) ... */
+  for (int k = 0; k < 320; k++) { nr_sense_unit_cost_da(NR_UNIT_PDSCH_DATA, 5, 3 * MS, tb(10 + k)); nr_sense_unit_cost_ring(NR_UNIT_PDSCH_DATA, 5, MS / 2, tb(10 + k)); }
+  ASSERT_EQ(snap(0, tb(331), v), 1);
+  EXPECT_FLOAT_EQ(v[0].da_p99_ns, 3.f * MS);    /* ... a steady one is */
+  EXPECT_FLOAT_EQ(v[0].ring_p99_ns, 0.5f * MS);
 }

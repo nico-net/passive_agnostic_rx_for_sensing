@@ -64,6 +64,9 @@
 #include "nr_traffic_record.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_sense_unit.h"
+#include "nr_sense_api.h" /* nr_sense_crb_re */
+#include "PHY/NR_UE_ESTIMATION/nr_estimation.h" /* nr_pdsch_channel_estimation */
+#include "nr_sense_gating.h" /* nr_sense_blind_dmrs_source */
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.h" // SLOTPHASE evidence of failing slot phases
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_evm_acc.h"               // RESID: nr_pdsch_resid (position-keyed equaliser residual)
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h"
@@ -625,6 +628,12 @@ NR_CELL_STATIC(_Atomic uint64_t, g_dropped_narrow);
 #define g_dropped_narrow NR_CELL_REF(g_dropped_narrow) /* budget: narrow grant refused while the ring was nearly full */
 NR_CELL_STATIC(_Atomic uint64_t, g_dropped_stale);
 #define g_dropped_stale NR_CELL_REF(g_dropped_stale)
+/* SENSING mode: a full-decode job dropped from the queue is a message of its RNTI's PDSCH_DATA unit; counted as a violation only if that unit is enabled (layout probes are not messages). */
+static inline void pdsch_unit_drop(const nr_pdsch_passive_job_t *j)
+{
+  if (!j->layout_probe)
+    nr_sense_unit_violation(NR_UNIT_PDSCH_DATA, j->rnti);
+}
 NR_CELL_STATIC(_Atomic uint64_t, g_stale_after_decode);
 #define g_stale_after_decode NR_CELL_REF(g_stale_after_decode) /* K33 */
 void nr_pdsch_passive_note_stale_after_decode(void)
@@ -1381,6 +1390,79 @@ void nr_pdsch_recovery_thread_prewarm(void)
 }
 
 extern __thread uint32_t nr_gp_tt[26]; /* nr_gpu_pass_dl.c */
+/* SENSING-mode DM-RS tap for a grant the SOLVER path decoded. The monitor's own DM-RS tap (nr_pdcch_blind_monitor_rt.c, after the unit gate) sits behind the
+ * solver's enqueue-and-continue, so a solver grant never reached it: no message of the (RNTI, PDSCH_DMRS) unit was ever counted (a disabled unit only gains
+ * history through nr_sense_unit_gate), so the scheduler never saw it and no record was ever produced. Here, after the TB CRC verified the identity: gate
+ * (counts the message, skips when disabled), FEP of the first DM-RS symbol, the same estimator, the same comb-2 export as the monitor tap. */
+static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdsch_passive_job_t *job, int rxdataF_sz,
+                              c16_t rxdataF[][rxdataF_sz])
+{
+  const int src = nr_sense_blind_dmrs_source();
+  if (src < 0 || nr_isac_mode() != NR_ISAC_MODE_SENSING)
+    return;
+  NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu = &job->dlsch_pdu;
+  freq_alloc_bitmap_t ca = job->freq_alloc; /* the estimate is contiguous: a PRB-list grant exports its first run (as the monitor tap) */
+  if (ca.n_prb_list > 0) {
+    int run = 1;
+    while (run < ca.n_prb_list && ca.prb_list[run] == ca.prb_list[run - 1] + 1)
+      run++;
+    ca = set_bitmap_from_start_size(ca.prb_list[0], run);
+  }
+  if (!nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, job->rnti, (uint16_t)ca.num_rbs))
+    return;
+  int dmrs_sym = -1;
+  for (int m = pdu->start_symbol; m < pdu->start_symbol + pdu->number_symbols && m < 32; m++)
+    if (pdu->dlDmrsSymbPos & (1u << m)) {
+      dmrs_sym = m;
+      break;
+    }
+  const int nsc = ca.num_rbs * NR_NB_SC_PER_RB, nant = fp->nb_antennas_rx < 8 ? fp->nb_antennas_rx : 8;
+  if (dmrs_sym < 0 || dmrs_sym >= fp->symbols_per_slot || nsc < 2 || nant < 1)
+    return;
+  const uint64_t uc0 = nr_sense_unit_cpu_ns();
+  const uint32_t est_sz = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16, ncomb = (uint32_t)(nsc + 1) / 2;
+  int32_t(*est)[est_sz] = calloc((size_t)fp->nb_antennas_rx, sizeof *est);
+  float *h = malloc(sizeof(float) * 2 * (size_t)nant * ncomb);
+  uint32_t *k = malloc(sizeof(uint32_t) * 2 * (size_t)ncomb), *l = k + ncomb;
+  if (est && h && k) {
+    nr_slot_fep(ue, fp, proc->nr_slot_rx, dmrs_sym, rxdataF, link_type_dl, 0, nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
+    uint32_t nvar = 0;
+    nr_pdsch_channel_estimation(ue, proc, pdu, &ca, 0, get_dmrs_port(0, pdu->dmrs_ports), (unsigned char)dmrs_sym, est_sz, est,
+                                fp->samples_per_slot_wCP, rxdataF, &nvar);
+    const uint32_t base_sc = nr_sense_crb_re(pdu->BWPStart + ca.first_rb, 0);
+    uint32_t n = 0;
+    double pw = 0;
+    for (int j = 0; j < nsc; j += 2, n++) {
+      for (int a = 0; a < nant; a++) {
+        const c16_t *e = (const c16_t *)&est[a][fp->ofdm_symbol_size * dmrs_sym];
+        h[2 * ((size_t)a * ncomb + n)] = (float)e[j].r;
+        h[2 * ((size_t)a * ncomb + n) + 1] = (float)e[j].i;
+        if (a == 0)
+          pw += (double)e[j].r * e[j].r + (double)e[j].i * e[j].i;
+      }
+      k[n] = base_sc + (uint32_t)j;
+      l[n] = (uint32_t)dmrs_sym;
+    }
+    const int prg = nr_pdsch_prg_latched(job->rnti);
+    const nr_sense_rs_meta_t meta = nr_sense_meta_with_snr((nr_sense_rs_meta_t){.rnti = job->rnti, .prg_valid = prg >= 0, .prg_size = prg >= 0 ? prg : 0,
+        .start_rb = pdu->BWPStart + ca.first_rb, .nb_rb = ca.num_rbs, .ports = __builtin_popcount((unsigned)pdu->dmrs_ports),
+        .port_mask = (int)pdu->dmrs_ports, .ssb_index = -1, .k_ssb = -1, .ta_est_samples = -1, .transform_precoding = -1,
+        .dmrs_type = pdu->dmrsConfigType ? 2 : 1, .dmrs_add_pos = -1, .dmrs_n_scid = pdu->nscid},
+        nvar > 0 && pw > 0.0 ? (float)(10.0 * log10(pw / n / (double)nvar)) : NAN);
+    const nr_isac_carrier_t carrier = {.nof_prb = (uint32_t)fp->N_RB_DL, .scs_hz = fp->subcarrier_spacing, .dl_center_hz = fp->dl_CarrierFreq,
+                                       .pci = fp->Nid_cell, .slots_per_frame = fp->slots_per_frame};
+    nr_isac_submit_cfr_multi_meta((uint32_t)job->absolute_slot, 0.0f, src, &carrier, h, (uint32_t)nant, ncomb, k, l, n, nvar > 0 ? (float)nvar : NAN, &meta);
+  }
+  free(est);
+  free(h);
+  free(k);
+  const uint64_t uc1 = nr_sense_unit_cpu_ns();
+  if (uc1) /* one message of the RNTI's PDSCH_DMRS unit: FEP + estimate + export */
+    nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, job->rnti, uc1 > uc0 ? uc1 - uc0 : 0, 0, false, (uint16_t)ca.num_rbs, nr_sense_now_ns());
+}
+
+
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   nr_cell_bind(((consumer_arg_t *)arg)->cell); /* mpci A5: threadCreate does not inherit the cell */
@@ -1599,6 +1681,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       const int count = owned ? n_more + 1 : 1;
       atomic_fetch_add_explicit(&g_dropped_stale, count, memory_order_relaxed);
       if (owned) atomic_fetch_add(&g_drop_reason[prod < job.absolute_slot ? NR_PDSCH_DROP_FUTURE : NR_PDSCH_DROP_QUEUE], count);
+      pdsch_unit_drop(&job);
+      for (int k = 0; owned && k < n_more; k++) pdsch_unit_drop(&more[k]);
       release_solver(&job);
       for (int k = 0; owned && k < n_more; k++) release_solver(&more[k]);
       continue;
@@ -1622,6 +1706,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                             job.absolute_slot, slots_per_frame, queue_producer_slot, NULL)) {
         atomic_fetch_add(&g_dropped_stale, n_more + 1);
         atomic_fetch_add(&g_drop_reason[NR_PDSCH_DROP_COPY], n_more + 1);
+        pdsch_unit_drop(&job);
+        for (int k = 0; k < n_more; k++) pdsch_unit_drop(&more[k]);
         release_solver(&job);
         for (int k = 0; k < n_more; k++) release_solver(&more[k]);
         continue;
@@ -2344,6 +2430,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+        if (job.dmrs_tap)
+          consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF);
         if (job.want_data) {
           /* Publish THIS job's monotonic slot so the CPI grid indexes it correctly. Without this the
            * submit derives the index from proc->frame_rx, which wraps at 1024 -- harmless in order,
@@ -2958,6 +3046,7 @@ static bool enqueue_one(const nr_pdsch_passive_job_t *job, uint64_t enqueue_ns) 
     while (victim < g_count && g_ring[(g_tail + victim) % g_depth].rnti != top_rnti) victim++;
     if (victim >= g_count) victim = 0;
     REAL_ADD(g_ring[(g_tail + victim) % g_depth], -1);
+    pdsch_unit_drop(&g_ring[(g_tail + victim) % g_depth]);
     release_solver(&g_ring[(g_tail + victim) % g_depth]);
     for (int i = victim; i > 0; i--) { /* shift the entries older than the victim up by one */
       g_ring[(g_tail + i) % g_depth] = g_ring[(g_tail + i - 1) % g_depth];

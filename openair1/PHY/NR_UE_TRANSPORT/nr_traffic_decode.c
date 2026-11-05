@@ -1,13 +1,15 @@
 /* SPDX-License-Identifier: LicenseRef-CSSL-1.0 */
 #include "nr_traffic_decode.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pdcch_blind_monitor.h"
+#include "nr_sense_unit.h"
 #include "common/utils/nr_cell.h"
 #include "nr_snr_gate.h"
 #include <pthread.h>
 #include <string.h>
 
 #define TD_RNTIS 128
-typedef struct { bool used; uint16_t rnti; uint32_t grants, fails; uint8_t k, bo, pend; uint64_t last_check_ns, last_t_ns, stamp; } td_ent_t;
+typedef struct { bool used; uint16_t rnti; uint32_t grants, sgrants, fails; uint8_t k, bo, pend; uint64_t last_check_ns, last_t_ns, stamp; } td_ent_t;
 typedef struct { uint64_t clock; uint32_t ul_n; td_ent_t e[2][TD_RNTIS]; } td_tab_t;
 /* DCIs seen per (dir, C-RNTI): its own table, so that the busy cell's other RNTIs cannot evict a count (exact LRU; shortcut: linear scan of 1024, fine at DCI rates) */
 #define TD_SEEN 1024
@@ -44,8 +46,7 @@ static bool bo_pass(td_ent_t *e)
   return true;
 }
 
-bool nr_traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
-                              uint64_t t_ns, bool hrv_alert)
+static bool policy_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned, uint64_t t_ns, bool hrv_alert)
 {
   if (rnti_class != NR_BLIND_RNTI_CLASS_C) return true;
   if (dir == 0 && ls != NR_LAYOUT_SOLVED) return false; /* FIXED: layout known; CANDIDATE/UNSOLVED: the solver's probes work */
@@ -66,6 +67,29 @@ bool nr_traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_
   const bool want = hrv_alert || ++e->grants >= NR_TRAFFIC_CHECK_EVERY_GRANTS || (t_ns > e->last_check_ns && t_ns - e->last_check_ns >= NR_TRAFFIC_T_CHECK_NS);
   pthread_mutex_unlock(&g_td_mu);
   return want;
+}
+
+/* SENSING mode (plan S7, ruling I1): the grants of an ENABLED unit (DL: PDSCH_DATA, UL: PUSCH_DMRS of the RNTI) are all decoded to the end. A disabled unit follows the traffic
+ * policy above plus a sampled check decode (1 in NR_TRAFFIC_CHECK_EVERY_GRANTS grants per RNTI and direction, whatever the layout state), so that a TB still reaches the unit gate
+ * now and then, the skip is counted and the scheduler keeps a (weighted, nr_sense_unit.c) rate for it. Non-C RNTIs are always decoded. */
+bool nr_traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
+                              uint64_t t_ns, bool hrv_alert)
+{
+  if (nr_isac_mode() != NR_ISAC_MODE_SENSING)
+    return policy_wanted(dir, rnti, rnti_class, ls, ul_table_learned, t_ns, hrv_alert);
+  if (rnti_class != NR_BLIND_RNTI_CLASS_C) return true;
+  if (nr_sense_unit_enabled(dir == 0 ? NR_UNIT_PDSCH_DATA : NR_UNIT_PUSCH_DMRS, rnti)) return true;
+  const bool pol = policy_wanted(dir, rnti, rnti_class, ls, ul_table_learned, t_ns, hrv_alert);
+  td_tab_t *t = &g_td;
+  pthread_mutex_lock(&g_td_mu);
+  td_ent_t *e = ent(t, dir, rnti);
+  e->sgrants++; /* grants seen since the last one let through */
+  const bool sample = e->sgrants >= NR_TRAFFIC_CHECK_EVERY_GRANTS;
+  const unsigned stands_for = e->sgrants;
+  if (pol || sample) e->sgrants = 0;
+  pthread_mutex_unlock(&g_td_mu);
+  if (pol || sample) nr_sense_unit_offer(dir == 0 ? NR_UNIT_PDSCH_DATA : NR_UNIT_PUSCH_DMRS, rnti, stands_for); /* the unit's next skip stands for that many grants */
+  return pol || sample;
 }
 
 bool nr_traffic_decode_result(int dir, uint16_t rnti, int rv, float snr_db, bool crc_ok)
