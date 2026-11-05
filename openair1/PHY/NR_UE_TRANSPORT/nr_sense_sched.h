@@ -63,7 +63,7 @@ typedef struct {
 /* Kept between decisions by the caller (zero-initialised at start). st->enabled is the decision: the caller applies it with nr_sense_unit_set_enabled
  * (cell, st->rnti[cell][slot], src) where it differs from the unit's view. */
 typedef struct {
-  uint8_t fl_idx[NR_SENSE_CELLS], fl_pend[NR_SENSE_CELLS], fl_cnt[NR_SENSE_CELLS]; /* S9: level index of T_cell, the level the last decisions asked for, how many decisions in a row asked for it */
+  uint8_t fl_idx[NR_SENSE_CELLS], fl_pend[NR_SENSE_CELLS], fl_cnt[NR_SENSE_CELLS], fl_warm[NR_SENSE_CELLS]; /* fl_warm: an earlier decision saw arrivals of the cell, so this decision's window is full */ /* S9: level index of T_cell, the level the last decisions asked for, how many decisions in a row asked for it */
   uint8_t streak[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
   bool enabled[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
   uint16_t rnti[NR_SENSE_CELLS][NR_SENSE_SLOTS];
@@ -91,6 +91,9 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
 int nr_sense_cell_floor(int cell);
 void nr_sense_cell_floor_publish(int cell, int prbs);
 void nr_sense_cell_floor_reset(void);
+/* S9: a cell changed (re-sync, unit reset): its T_cell goes back to sense_min_prb at once; the scheduler restarts its level/confirm/warm-up state at the next decision (take_cell_resets: bitmask of cells, clears it). Any thread. */
+void nr_sense_sched_cell_reset(int cell);
+uint32_t nr_sense_sched_take_cell_resets(void);
 
 /* exposed for tests */
 bool nr_sense_unit_ratio_known(const nr_sense_unit_view_t *v, uint64_t now_ns); /* n_cfr > 0 and the latest CFR is not older than one cost window (SENSE_WIN_DECISIONS x SENSE_DECIDE_NS) */

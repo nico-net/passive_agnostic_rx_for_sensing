@@ -1,5 +1,6 @@
 #include "nr_sense_unit.h"
 #include "nr_sense_sched.h"
+#include "nr_sense_api.h"
 #include "common/utils/nr_cell.h"
 #include <gtest/gtest.h>
 #include <atomic>
@@ -418,6 +419,44 @@ TEST_F(Unit, ArrivalGapsPerThreshold)
   nr_sense_unit_arrival_gaps(0, now + 2000 * MS, win, thr, 1, g);
   EXPECT_LT(g[0].n, 40u);
   EXPECT_GE(g[0].p95_gap_ns, 100 * MS);
+}
+
+/* S9 fix round 2: a grant between T_cell and sense_min_prb opens its unit, is gated like a wideband one and its CFR is exported; the wideband metric keeps sense_min_prb. */
+TEST_F(Unit, NarrowContinuityGrantOpensTheUnitAndExports)
+{
+  nr_sense_cell_floor_reset();
+  nr_sense_cell_floor_publish(0, 64); /* T_cell = 64, sense_min_prb = 128 */
+  const uint64_t t = nr_sense_now_ns();
+  nr_sense_unit_view_t vw[8];
+  EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x4601, 64)); /* disabled: skipped, but the 64 PRB grant is a message of a new row */
+  ASSERT_EQ(snap(0, t + 2 * B, vw), 1);
+  EXPECT_GT(vw[0].wb_rate_hz, 0.f); /* the scheduler can value it */
+  EXPECT_EQ(vw[0].skips, 1u);
+  nr_sense_unit_set_enabled(0, 0x4601, NR_UNIT_PDSCH_DATA, true);
+  EXPECT_TRUE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x4601, 64)); /* exported */
+  nr_sense_unit_cfr(NR_UNIT_PDSCH_DATA, 0x4601, 64, 10.f, t + 20 * MS);
+  ASSERT_EQ(snap(0, t + 30 * MS, vw), 1);
+  EXPECT_EQ(vw[0].n_cfr, 1u);
+  nr_sense_unit_cell_stats_t cs;
+  nr_sense_unit_cell_stats(0, &cs);
+  EXPECT_EQ(cs.wb_valid, 0u); /* 64 < sense_min_prb: not a wideband record */
+  /* below T_cell: no row, nothing gated or booked */
+  EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x4602, 48));
+  EXPECT_EQ(snap(0, t + 40 * MS, vw), 1);
+  /* the floor back at sense_min_prb: a 64 PRB message of a new RNTI opens nothing */
+  nr_sense_cell_floor_publish(0, 128);
+  EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x4603, 64));
+  EXPECT_EQ(snap(0, t + 50 * MS, vw), 1);
+}
+
+TEST_F(Unit, CellResyncRestartsTheFloor)
+{
+  nr_sense_cell_floor_publish(0, 64);
+  nr_sense_unit_cell_resync(0);
+  EXPECT_EQ(nr_sense_cell_floor(0), nr_isac_sense_min_prb());
+  nr_sense_cell_floor_publish(0, 64);
+  nr_sense_unit_reset(0);
+  EXPECT_EQ(nr_sense_cell_floor(0), nr_isac_sense_min_prb());
 }
 
 TEST_F(Unit, ArrivalGapsIgnoreExportedCfrs)

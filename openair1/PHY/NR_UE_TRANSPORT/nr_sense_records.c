@@ -3,6 +3,7 @@
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "common/utils/nr_cell.h"
 #include "nr_passive_cfg_epoch.h"
+#include "nr_sense_sched.h"
 #include "nr_passive_ue_ctx.h"
 #include "PHY/defs_nr_common.h"
 #include "common/oai_version.h"
@@ -150,6 +151,7 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
     real(&j,"snr_db_p50",q->snr_db_p50); real(&j,"snr_db_p10",q->snr_db_p10); real(&j,"resid_db",q->resid_db);
     real(&j,"sym_consist",q->sym_consist); real(&j,"recon_conf",q->recon_conf);
     put(&j,",\"wideband\":%s",m->wideband?"true":"false");
+    if (m->cont_floor>0) integer(&j,"cont_floor",m->cont_floor);
     if (ul) put(&j,",\"tx\":\"rnti:%x\"",(unsigned)m->rnti);
     else if (m->pci>=0) integer(&j,"tx",m->pci);
     else put(&j,",\"tx\":null");
@@ -326,6 +328,7 @@ void nr_sense_emit_rs(nr_sense_src_t src, const nr_sense_rs_meta_t *in, uint64_t
   m.q_valid=false;
   m.want_q=frame_id && nr_isac_mode()==NR_ISAC_MODE_SENSING;
   m.min_prb=nr_isac_sense_min_prb();
+  m.cont_floor=nr_sense_cell_floor(nr_cell_idx());
   if ((!m.csirs_resource || strnlen(m.csirs_resource,256)<256) &&
       (!m.srs_attribution || strnlen(m.srs_attribution,256)<256)) {
     if (nr_sense_push_rs_binary(src,&m,frame_id)>=0) return;

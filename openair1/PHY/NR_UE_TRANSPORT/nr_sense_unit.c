@@ -222,14 +222,17 @@ static inline unit_t *unit_get(unit_tab_t *T, nr_unit_src_t s, uint16_t rnti, bo
   return &T->u[r][s];
 }
 
-static inline bool wideband_capable(unsigned prbs) { return prbs >= (unsigned)nr_isac_sense_min_prb(); }
+static inline bool wideband_capable(unsigned prbs) { return prbs >= (unsigned)nr_isac_sense_min_prb(); } /* the wideband metric: unchanged */
+/* S9: a unit is opened, booked and gated for every message of >= T_cell PRBs (the calling cell's adaptive floor; sense_min_prb until the first decision), so a continuity grant narrower than
+ * sense_min_prb is exported like a wideband one. The scheduler weights the same messages (wb_rate_hz counts them). */
+static inline bool cont_capable(unsigned prbs) { return prbs >= (unsigned)nr_sense_cell_floor(nr_cell_idx()); }
 
 void nr_sense_unit_job(nr_unit_src_t s, uint16_t rnti, uint64_t cpu_ns, uint64_t wait_ns, bool late, uint16_t est_usable_prbs, uint64_t t_ns)
 {
   unit_tab_t *T = tab_of(nr_cell_idx());
   rnti = unit_rnti(s, rnti);
   int r;
-  unit_t *u = unit_get(T, s, rnti, wideband_capable(est_usable_prbs), t_ns, &r);
+  unit_t *u = unit_get(T, s, rnti, cont_capable(est_usable_prbs), t_ns, &r);
   if (!u) {
     /* no row and none to create (narrow or cost-only call): the cost stays in the cell's baseline, not lost */
     if (cpu_ns && nr_isac_mode() == NR_ISAC_MODE_SENSING)
@@ -241,7 +244,7 @@ void nr_sense_unit_job(nr_unit_src_t s, uint16_t rnti, uint64_t cpu_ns, uint64_t
     atomic_fetch_add_explicit(&u->late, 1, memory_order_relaxed);
   if (est_usable_prbs)
     atomic_store_explicit(&u->est_last, est_usable_prbs, memory_order_relaxed);
-  bucket_add(u, t_ns, cpu_ns, wait_ns, est_usable_prbs ? 1 : 0, wideband_capable(est_usable_prbs) ? 1 : 0);
+  bucket_add(u, t_ns, cpu_ns, wait_ns, est_usable_prbs ? 1 : 0, cont_capable(est_usable_prbs) ? 1 : 0);
 }
 
 static inline float bits_f(uint32_t b) { float f; memcpy(&f, &b, 4); return f; }
@@ -253,7 +256,7 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
   unit_tab_t *T = tab_of(nr_cell_idx());
   rnti = unit_rnti(s, rnti);
   int r;
-  unit_t *u = unit_get(T, s, rnti, wideband_capable(valid_prbs), t_ns, &r);
+  unit_t *u = unit_get(T, s, rnti, cont_capable(valid_prbs), t_ns, &r);
   if (!u)
     return;
   touch(T, r, u, t_ns);
@@ -261,7 +264,7 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
   /* ratio of real counts: valid / usable PRBs when the unit reports usable PRBs; otherwise (SRS) the record is 1 when it is wideband-valid, else 0 */
   float ratio;
   if (est) ratio = valid_prbs >= est ? 1.f : (float)valid_prbs / (float)est;
-  else ratio = wideband_capable(valid_prbs) ? 1.f : 0.f;
+  else ratio = cont_capable(valid_prbs) ? 1.f : 0.f;
   const float snr = snr_db == snr_db ? snr_db : 0.f;
   /* single writer per record in practice (the sense writer); a lost update between two writers only skews one EWMA step */
   if (atomic_fetch_add_explicit(&u->n_cfr, 1, memory_order_relaxed) == 0) {
@@ -279,7 +282,7 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
     while (o < t_ns && !atomic_compare_exchange_weak_explicit(&u->last_cfr_ns, &o, t_ns, memory_order_relaxed, memory_order_relaxed)) {}
   }
   if (s == NR_UNIT_SRS) /* SRS has no daBg/queue job to count the message: the exported record is the message */
-    bucket_add(u, t_ns, 0, 0, 1, wideband_capable(valid_prbs) ? 1 : 0);
+    bucket_add(u, t_ns, 0, 0, 1, cont_capable(valid_prbs) ? 1 : 0);
   if (wideband_capable(valid_prbs)) {
     atomic_fetch_add_explicit(&T->wb_valid, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&T->wb_valid_prbs, valid_prbs, memory_order_relaxed);
@@ -332,7 +335,7 @@ void nr_sense_unit_skip_w(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_pr
   unit_tab_t *T = tab_of(nr_cell_idx());
   rnti = unit_rnti(s, rnti);
   int r;
-  unit_t *u = unit_get(T, s, rnti, wideband_capable(est_usable_prbs), t_ns, &r);
+  unit_t *u = unit_get(T, s, rnti, cont_capable(est_usable_prbs), t_ns, &r);
   if (!u)
     return;
   touch(T, r, u, t_ns);
@@ -342,7 +345,7 @@ void nr_sense_unit_skip_w(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_pr
   if (est_usable_prbs)
     atomic_store_explicit(&u->est_last, est_usable_prbs, memory_order_relaxed);
   if (weight < 1) weight = 1;
-  bucket_add(u, t_ns, 0, 0, est_usable_prbs ? weight : 0, wideband_capable(est_usable_prbs) ? weight : 0);
+  bucket_add(u, t_ns, 0, 0, est_usable_prbs ? weight : 0, cont_capable(est_usable_prbs) ? weight : 0);
 }
 
 void nr_sense_unit_set_enabled(int cell, uint16_t rnti, nr_unit_src_t s, bool enabled)
@@ -638,4 +641,9 @@ void nr_sense_unit_reset(int cell)
   atomic_store_explicit(&T->last_wb_ns, 0, memory_order_relaxed);
   atomic_store_explicit(&T->gap_max_ns, 0, memory_order_relaxed);
   atomic_store_explicit(&T->ev_head, 0, memory_order_relaxed);
+  nr_sense_sched_cell_reset(cell); /* a new unit table = a new cell: its T_cell restarts at sense_min_prb */
+}
+void nr_sense_unit_cell_resync(int cell)
+{
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING) nr_sense_unit_reset(cell); /* legacy and traffic: untouched */
 }

@@ -42,13 +42,16 @@ static struct {
   int no_sample;                                           /* consecutive periods without a pool sample (M3) */
 } g_prev;
 
-static struct { int prb; uint64_t gap_ms; bool in_gap; } g_floor_log[NR_SENSE_CELLS]; /* last decision, for ISAC_METRICS */
+/* last decision per cell, for ISAC_METRICS (written by the scheduler thread, read by the metrics thread): prb(16) | in_gap(1) | gap_ms(47) in one atomic word, so a read is never torn */
+static _Atomic uint64_t g_floor_log[NR_SENSE_CELLS];
 int nr_sense_sched_floor_info(int cell, uint64_t *gap_p95_ms, bool *in_gap)
 {
   if ((unsigned)cell >= NR_SENSE_CELLS) return 0;
-  *gap_p95_ms = g_floor_log[cell].gap_ms; *in_gap = g_floor_log[cell].in_gap;
-  return g_floor_log[cell].prb;
+  const uint64_t w = atomic_load_explicit(&g_floor_log[cell], memory_order_relaxed);
+  *gap_p95_ms = w >> 17; *in_gap = (w >> 16) & 1;
+  return (int)(w & 0xFFFF);
 }
+
 
 static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample_t *sm, const nr_sense_sched_out_t *out);
 
@@ -148,7 +151,8 @@ void nr_sense_sched_reset(void)
   memset(&g_st, 0, sizeof g_st);
   memset(&g_prev, 0, sizeof g_prev);
   nr_sense_cell_floor_reset();
-  memset(g_floor_log, 0, sizeof g_floor_log);
+  for (int c = 0; c < NR_SENSE_CELLS; c++) atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed);
+  (void)nr_sense_sched_take_cell_resets();
   atomic_store(&g_decisions, 0); atomic_store(&g_enables, 0); atomic_store(&g_disables, 0); atomic_store(&g_bad_cap, 0); atomic_store(&g_deferrals, 0);
   atomic_store(&g_binding, 0);
   atomic_store(&g_sampler, NULL);
@@ -177,6 +181,9 @@ static void apply(const nr_sense_sched_in_t *in)
 
 void nr_sense_sched_step(uint64_t now_ns)
 {
+  const uint32_t rm = nr_sense_sched_take_cell_resets(); /* a cell that changed starts its T_cell over (a decision already in flight may publish the old level once) */
+  for (int c = 0; c < NR_SENSE_CELLS; c++)
+    if (rm & (1u << c)) { g_st.fl_idx[c] = g_st.fl_pend[c] = g_st.fl_cnt[c] = g_st.fl_warm[c] = 0; nr_sense_cell_floor_publish(c, 0); atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed); }
   nr_sense_sched_sample_t sm;
   bool (*smp)(nr_sense_sched_sample_t *, uint64_t) = atomic_load(&g_sampler);
   if (!(smp ? smp(&sm, now_ns) : sample_prod(&sm, now_ns))) {
@@ -215,7 +222,7 @@ void nr_sense_sched_step(uint64_t now_ns)
   apply(&in);
   for (int c = 0; c < in.n_cells; c++) {
     nr_sense_cell_floor_publish(c, out.floor_prb[c]);
-    g_floor_log[c].prb = out.floor_prb[c]; g_floor_log[c].gap_ms = out.gap_p95_ns[c] / 1000000ull; g_floor_log[c].in_gap = out.in_gap[c];
+    atomic_store_explicit(&g_floor_log[c], ((out.gap_p95_ns[c] / 1000000ull) << 17) | ((uint64_t)out.in_gap[c] << 16) | ((uint64_t)out.floor_prb[c] & 0xFFFF), memory_order_relaxed);
   }
   atomic_fetch_add(&g_decisions, 1);
   atomic_fetch_add(&g_enables, (uint64_t)out.enables);

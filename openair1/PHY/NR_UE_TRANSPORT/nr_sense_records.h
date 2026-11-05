@@ -63,6 +63,7 @@ typedef struct nr_sense_rs_meta_s {
   bool want_q, q_valid;
   bool wideband;         /* q.valid_cfr_prbs >= min_prb as snapshotted at emit time */
   int min_prb;           /* nr_isac_sense_min_prb() at emit time */
+  int cont_floor;        /* T_cell of the cell at emit time (nr_sense_cell_floor); 0 = unset. valid_cfr_prbs in [cont_floor, min_prb) = a continuity record, not a wideband one */
   bool recon_valid;      /* the producer measured q.recon_conf and recon_prb_ok (data-aided, rank 1): spec 4(d) joins the PRB validity */
   uint8_t recon_prb_ok[(NR_SENSE_MAX_PRB + 7) / 8]; /* bit = ABSOLUTE PRB (k/12) passes the reconstruction test */
   bool prg_valid;        /* prg_size is the per-RNTI PRG sweep's latched value (nr_pdsch_prg_latched); false prints null = "not latched", NOT "wideband" */

@@ -4591,7 +4591,8 @@ static _Thread_local uint64_t t_bank_slot;
  *   Duplicates still count as traffic for the bank's reconfiguration bookkeeping. Updates the global accept counters per pass kind.
  *   Callers: nr_pdcch_blind_monitor_run_occasion_one() (accept handling, two sites). Takes s_dedupe_mu.
  */
-/* dedupe_hit: the table lookup + insert alone (no counters, no bank bookkeeping). Traffic mode uses it with dir 2 (DL records). */
+/* dedupe_hit: the table lookup + insert alone (no counters, no bank bookkeeping). Traffic mode uses it with dir 2 (DL records); sensing: dir 2 = DL, dir 3 = UL 0_0 (continuity feed).
+ * s_dedupe_mu is a LEAF lock (nothing is taken inside it) and every caller already runs under the Phase-2 lock (accept handling), so it is uncontended and the order is always g_phase2_mu -> s_dedupe_mu. */
 static bool dedupe_hit(uint32_t abs_slot, long mono, uint16_t rnti, int dir)
 {
   pthread_mutex_lock(&s_dedupe_mu);
@@ -5336,10 +5337,10 @@ static void e3_grant(e3_in_t *in)
 /* The decode gate of a non-probe C-RNTI job (see nr_traffic_decode.h); other RNTI classes are always decoded. */
 static bool traffic_skip_note(void) { nr_traffic_count(NR_TRAFFIC_CNT_SKIP); return true; }
 static bool traffic_ul_skip_note(void) { nr_traffic_count(NR_TRAFFIC_CNT_UL_SKIP); return traffic_skip_note(); }
-static bool traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_learned, uint16_t est_prbs)
+static bool traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_learned, uint16_t est_prbs, bool proven)
 {
   const bool hv = dir == 0 && rnti_class == NR_BLIND_RNTI_CLASS_C && nr_pdsch_solver_take_hrv_alert(rnti);
-  return nr_traffic_decode_wanted_prbs(dir, rnti, rnti_class, ls, ul_learned, btim_now_ns(), hv, est_prbs, ls == NR_LAYOUT_SOLVED || ls == NR_LAYOUT_FIXED); /* S9: proven = CRC-solved, fixed (1_0 / 0_0) or trusted */
+  return nr_traffic_decode_wanted_prbs(dir, rnti, rnti_class, ls, ul_learned, btim_now_ns(), hv, est_prbs, proven); /* S9: proven = solver SOLVED/FIXED, CRC-learned UL tag, spec-fixed (DCI 1_0 / 0_0) or an exact (non-autodiscovered) 1_1 layout; the sensing default lst=SOLVED of an unsolved 1_1 is NOT proof */
 }
 
 /* The banked CORESET passes of ONE dedicated-only slot (T26d): each pass is ~250 us FEP+LLR + decode, and Phase 1 of different
@@ -9122,14 +9123,14 @@ constdiag_done:;
         bool ul_dec = true; /* traffic mode: a non-probe PUSCH decode of this grant is wanted */
         if (nr_isac_mode() == NR_ISAC_MODE_SENSING) { /* sensing: all grants of an enabled PUSCH_DMRS unit, the traffic policy + a sampled check otherwise */
           const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
-          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti), u->num_rb);
+          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti), u->num_rb, uls == NR_LAYOUT_SOLVED);
           nr_sense_dci_arrival(u->num_rb, nr_sense_now_ns());
         }
         if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
           const uint64_t tt0 = btim_now_ns();
           const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
           /* E4: with the lock off there is no lock to wait for (the layout is as known as it gets) */
-          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, nr_ul_layout_lock_enabled() ? uls : NR_LAYOUT_SOLVED, nr_pusch_passive_ul_table_learned(u->rnti), u->num_rb);
+          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, nr_ul_layout_lock_enabled() ? uls : NR_LAYOUT_SOLVED, nr_pusch_passive_ul_table_learned(u->rnti), u->num_rb, false);
           traffic_emit_ul(cfg, fp, u, &ul_opts, cand_task[ti].L, cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot, source_absolute_slot,
                           uls, ul_dec, tt0);
         }
@@ -9274,12 +9275,12 @@ constdiag_done:;
                   (unsigned)ul00.k2, (unsigned)ul00.mcs);
           bool ul00_dec = true;
           if (nr_isac_mode() == NR_ISAC_MODE_SENSING) {
-            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti), ul00.num_rb);
-            if (!dedupe_hit(abs_slot, source_absolute_slot, ul00.rnti, 1)) nr_sense_dci_arrival(ul00.num_rb, nr_sense_now_ns()); /* once per distinct DCI */
+            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti), ul00.num_rb, true);
+            if (!dedupe_hit(abs_slot, source_absolute_slot, ul00.rnti, 3)) nr_sense_dci_arrival(ul00.num_rb, nr_sense_now_ns()); /* once per distinct DCI; dir 3 = UL 0_0, distinct from the 0_1 key (dir 1) so a 0_0 never hides a 0_1 */
           }
           if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
             const uint64_t tt0 = btim_now_ns();
-            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti), ul00.num_rb);
+            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti), ul00.num_rb, true);
             if (dedupe_hit(abs_slot, source_absolute_slot, ul00.rnti, 1)) nr_traffic_count(NR_TRAFFIC_CNT_DUP);
             else traffic_emit_ul(cfg, fp, &ul00, &ul_opts, cand_task[ti].L, cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot,
                                  source_absolute_slot, NR_LAYOUT_FIXED, ul00_dec, tt0);
@@ -9467,7 +9468,8 @@ constdiag_done:;
       const bool is10t = out.dci_format == NR_BLIND_DCI_FORMAT_1_0;
       const bool slv = !is10t && nr_pdsch_solver_enabled() && cand_task[ti].dl_auto && g_dci11_state == 1 && g_dci11_resolver != NULL;
       const nr_layout_state_t lst = is10t ? NR_LAYOUT_FIXED : slv ? nr_pdsch_solver_layout_state(out.rnti, NULL, NULL) : NR_LAYOUT_SOLVED;
-      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false, out.num_rb) ? 1 : 0;
+      const bool dl_proven = is10t || (slv ? (lst == NR_LAYOUT_SOLVED || lst == NR_LAYOUT_FIXED) : !cand_task[ti].dl_auto); /* an unsolved dl_auto 1_1 is not proven even though its policy state defaults to SOLVED */
+      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false, out.num_rb, dl_proven) ? 1 : 0;
       /* S9: the continuity feed counts DISTINCT DCI arrivals, whatever is decoded (dl_auto 1_1 outside a discovered pass already went through the dir-0 dedupe; dir 2 is unused in sensing) */
       if (out.rnti_class == NR_BLIND_RNTI_CLASS_C && ((cand_task[ti].dl_auto && !t_discovered_token && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) || !dedupe_hit(abs_slot, source_absolute_slot, out.rnti, 2)))
         nr_sense_dci_arrival(out.num_rb, nr_sense_now_ns());
@@ -9478,7 +9480,8 @@ constdiag_done:;
       const bool slv = !is10t && nr_pdsch_solver_enabled() && cand_task[ti].dl_auto && g_dci11_state == 1 && g_dci11_resolver != NULL;
       const int rep_t = !is10t ? nr_pdsch_solver_rep(out.rnti) : -1;
       const nr_layout_state_t lst = is10t ? NR_LAYOUT_FIXED : slv ? nr_pdsch_solver_layout_state(out.rnti, NULL, NULL) : NR_LAYOUT_SOLVED;
-      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false, out.num_rb) ? 1 : 0;
+      const bool dl_proven = is10t || (slv ? (lst == NR_LAYOUT_SOLVED || lst == NR_LAYOUT_FIXED) : !cand_task[ti].dl_auto); /* an unsolved dl_auto 1_1 is not proven even though its policy state defaults to SOLVED */
+      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false, out.num_rb, dl_proven) ? 1 : 0;
       /* the record never presents a guess as solved: a 1_1 without solver state is a CANDIDATE (the decode policy above still sees SOLVED) */
       const nr_layout_state_t rec_lst = (!is10t && !slv) ? NR_LAYOUT_CANDIDATE : lst;
       /* DL 1_1 of dl_auto already went through the dir-0 dedupe (not in a discovered pass: no dir-0 dedupe there); every other accept can repeat (other passes / AL / CORESET hypotheses) */

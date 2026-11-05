@@ -319,6 +319,24 @@ TEST(TrafficDecode, FloorOfTheCellSetsTheWideRule)
   nr_sense_unit_reset(0);
   nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
 }
+TEST(TrafficDecode, UnprovenLayoutIsNeverForceDecodedAtTheFloor)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_isac_sense_min_prb_set(128);
+  nr_cell_bind(0);
+  nr_sense_unit_reset(0);
+  nr_sense_cell_floor_publish(0, 64);
+  int n = 0, m = 0;
+  for (int i = 0; i < 64; i++) {
+    n += nr_traffic_decode_wanted_prbs(0, 0x3108, C, NR_LAYOUT_FIXED, false, S + i, false, 70, false); /* proven=false: not forced even above T_cell */
+    m += nr_traffic_decode_wanted_prbs(0, 0x3109, C, NR_LAYOUT_FIXED, false, S + i, false, 70, true);
+  }
+  EXPECT_LE(n, 2); /* policy + the 1-in-32 check only */
+  EXPECT_EQ(m, 64);
+  nr_sense_cell_floor_reset();
+  nr_sense_unit_reset(0);
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}
 TEST(TrafficDecode, LegacyAndTrafficIgnoreTheFloor)
 {
   nr_sense_cell_floor_publish(0, 32);

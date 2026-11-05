@@ -24,6 +24,14 @@ int nr_sense_cell_floor(int cell)
   return v > 0 ? v : nr_isac_sense_min_prb();
 }
 void nr_sense_cell_floor_publish(int cell, int prbs) { if ((unsigned)cell < NR_SENSE_CELLS) atomic_store_explicit(&g_cell_floor[cell], prbs, memory_order_relaxed); }
+static _Atomic uint32_t g_cell_reset_mask;
+void nr_sense_sched_cell_reset(int cell)
+{
+  if ((unsigned)cell >= NR_SENSE_CELLS) return;
+  nr_sense_cell_floor_publish(cell, 0);
+  atomic_fetch_or_explicit(&g_cell_reset_mask, 1u << cell, memory_order_relaxed);
+}
+uint32_t nr_sense_sched_take_cell_resets(void) { return atomic_exchange_explicit(&g_cell_reset_mask, 0, memory_order_relaxed); }
 void nr_sense_cell_floor_reset(void) { for (int c = 0; c < NR_SENSE_CELLS; c++) atomic_store_explicit(&g_cell_floor[c], 0, memory_order_relaxed); }
 
 int nr_sense_floor_steps(int min_prb, int floor_prb, int *steps)
@@ -57,6 +65,8 @@ static void floor_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *
         for (int k = 0; k < idx; k++) if (in->gap[c][k].p95_gap_ns <= tgt_up) { want = k; break; }
       }
     }
+    if (want > idx && !st->fl_warm[c]) want = idx; /* no step down on a partly filled window: the first arrivals of the cell were seen in this very window */
+    if (in->arrivals[c]) st->fl_warm[c] = 1;
     if (want == idx) st->fl_cnt[c] = 0;
     else {
       if (st->fl_cnt[c] && st->fl_pend[c] == (uint8_t)want) { if (st->fl_cnt[c] < 255) st->fl_cnt[c]++; }
@@ -69,7 +79,7 @@ static void floor_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *
   } else {
     st->fl_cnt[c] = 0;
   }
-  out->floor_prb[c] = steps[idx];
+  out->floor_prb[c] = steps[st->fl_idx[c]];
 }
 
 static bool uses(nr_unit_src_t s, int r)
@@ -104,7 +114,7 @@ bool nr_sense_unit_ratio_known(const nr_sense_unit_view_t *v, uint64_t now_ns)
 
 bool nr_sense_unit_eligible(const nr_sense_unit_view_t *v, uint64_t now_ns)
 {
-  /* wb_rate_hz is a window quantity (messages with usable PRBs >= min_prb), so the size of the latest message does not matter */
+  /* wb_rate_hz is a window quantity (messages with usable PRBs >= T_cell of the cell), so the size of the latest message does not matter */
   return v->wb_rate_hz > 0.f && (!nr_sense_unit_ratio_known(v, now_ns) || v->valid_ratio >= SENSE_ELIG_VALID_MIN);
 }
 
@@ -211,8 +221,9 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       if (k->elig && st->known[c][sl][v->src] && !st->was_elig[c][sl][v->src]) st->elig_since[c][sl][v->src] = in->now_ns;
       st->was_elig[c][sl][v->src] = k->elig;
       if (k->elig) {
-        /* a wideband message had >= min_prb usable PRBs by construction; est_usable_prbs (latest) only raises the size */
-        double prbs = v->est_usable_prbs > in->min_prb ? v->est_usable_prbs : in->min_prb;
+        /* a counted message had >= T_cell usable PRBs by construction (the cell's floor, sense_min_prb until it steps down); est_usable_prbs (latest) only raises the size */
+        const int lo = out->floor_prb[c] > 0 ? out->floor_prb[c] : in->min_prb;
+        double prbs = v->est_usable_prbs > lo ? v->est_usable_prbs : lo;
         if (prbs < 1) prbs = 1;
         const double ratio = nr_sense_unit_ratio_known(v, in->now_ns) ? v->valid_ratio : SENSE_ELIG_VALID_MIN; /* unknown ratio: the floor */
         uint64_t ref = v->last_valid_wb_ns ? v->last_valid_wb_ns : v->first_ns;

@@ -447,6 +447,7 @@ struct F : H {
   {
     in.cont_target_ns = 25 * MS_;
     in.floor_prb = 32;
+    for (int c = 0; c < NR_SENSE_CELLS; c++) st.fl_warm[c] = 1; /* a cell that has been seen: its window is full (NoStepDownOnAPartlyFilledWindow starts cold) */
   }
   /* the DCI-arrival feed of cell c: the p95 gap (ms) at each of the 5 levels; arrivals > 0 = the cell has grants at all */
   void feed(int c, const double *gap_ms, uint32_t arrivals = 100)
@@ -542,6 +543,23 @@ TEST(Floor, HysteresisAtTheBoundary)
   h.step(); EXPECT_EQ(h.floor(), 96);
   /* 64 at 26 ms (just over) while 96 is still fine: stays at 96, which is the higher one */
   h.steps(10); EXPECT_EQ(h.floor(), 96);
+}
+
+TEST(Floor, NoStepDownOnAPartlyFilledWindow)
+{
+  F h;
+  h.st.fl_warm[0] = 0; /* the first decision that sees arrivals of this cell: they began inside its window */
+  const double g[5] = {4000, 4000, 20, 10, 10}; /* 128 and 96 have no arrival yet in the window */
+  h.feed(0, g);
+  h.steps(1); EXPECT_EQ(h.floor(), 128);
+  h.steps(1); EXPECT_EQ(h.floor(), 128); /* the window is full now: streak 1 of 2 */
+  h.steps(1); EXPECT_EQ(h.floor(), 64);
+  /* an up move is not held back by the warm-up */
+  F k;
+  k.feed(0, g); k.steps(2); ASSERT_EQ(k.floor(), 64);
+  k.st.fl_warm[0] = 0;
+  const double up[5] = {10, 10, 10, 10, 10};
+  k.feed(0, up); k.steps(2); EXPECT_EQ(k.floor(), 128);
 }
 
 TEST(Floor, NoFlapOnAlternatingDecisions)

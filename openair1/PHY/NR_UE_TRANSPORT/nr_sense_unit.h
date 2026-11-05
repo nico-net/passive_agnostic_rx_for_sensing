@@ -18,7 +18,7 @@ typedef enum { NR_UNIT_PDSCH_DMRS = 0, NR_UNIT_PDSCH_DATA, NR_UNIT_PUSCH_DMRS, N
 #define NR_UNIT_ROWS 64              /* RNTIs per cell, LRU on the last message */
 #define NR_UNIT_LATE_NS 20000000ull  /* a job whose enqueue-to-end time exceeds this is late (the DECSLOW threshold of the PDSCH queue) */
 
-/* Rows (RNTIs) are opened only by wideband-capable calls: est_usable_prbs (job, skip) or valid_prbs (cfr) >= sense_min_prb. A cost-only or narrow call for an
+/* Rows (RNTIs) are opened only by continuity-capable calls: est_usable_prbs (job, skip) or valid_prbs (cfr) >= T_cell of the calling cell (nr_sense_cell_floor; sense_min_prb until the first decision). A cost-only or narrow call for an
  * RNTI without a row changes no unit; its CPU is added to the cell's nr_sense_unit_unattributed_ns() so it stays in the baseline. The one exception is SRS:
  * it is a per-cell unit (rnti forced to 0 in every call) for both cost and messages (one message per exported record, counted by nr_sense_unit_cfr).
  * Messages: PDSCH_DATA is a message only when its daBg job runs (est_usable_prbs > 0 there; the decode stage passes 0), so a grant that was decoded but not
@@ -92,6 +92,7 @@ int nr_sense_unit_snapshot(int cell, nr_sense_unit_view_t *out, int max);
 int nr_sense_unit_snapshot_at(int cell, uint64_t now_ns, nr_sense_unit_view_t *out, int max); /* now_ns explicit (tests, replay) */
 uint64_t nr_sense_unit_bucket_cpu(int cell, uint16_t rnti, nr_unit_src_t s, uint64_t t_ns); /* CPU ns accumulated in the bucket holding t_ns (0 if none) */
 void nr_sense_unit_test_seam(void (*f)(void));                                                /* tests: called between locating a row and updating it */
+void nr_sense_unit_cell_resync(int cell); /* production: the cell synchronised again / changed (SENSING only): unit_reset + T_cell back to sense_min_prb */
 void nr_sense_unit_reset(int cell);                                                           /* tests / cell restart */
 
 /* Thread CPU clock for the sites: 0 outside the SENSING mode (the one mode branch per site), else a nonzero stamp. */

@@ -15,6 +15,7 @@ int nr_ue_rx_synced_g = 0;
 #include "PHY/NR_UE_TRANSPORT/nr_passive_cell_prealloc.h" // nr_passive_metrics_set_pci (A3/A8)
 #include "common/utils/nr_core_layout.h" // per-cell RT reader core (A8)
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_unit.h"
 #include <dlfcn.h>
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
@@ -381,6 +382,7 @@ static void UE_synch(void *arg) {
     /* new cell or new timing epoch: the SFO estimate is relative to the clock of the gNB tracked before (frame reads are only
      * noted while is_synchronized, so nothing races this reset) */
     nr_sfo_resync_cell(UE->Mod_id, "initial sync");
+    nr_sense_unit_cell_resync(UE->Mod_id); /* S9: a new timing epoch: unit table, DCI-arrival ring and T_cell of this cell start over (sensing only) */
     UE->is_synchronized = 1;
     __atomic_store_n(&nr_ue_rx_synced_g, 1, __ATOMIC_RELEASE);
   } else {
@@ -638,6 +640,7 @@ static void apply_live_tune(PHY_VARS_NR_UE *UE, const ru_tune_t *t)
   UE->is_synchronized = 0;
   UE->target_Nid_cell = -1; /* the slot may now serve another PCI than the one it locked before; UE_synch() pins the descriptor's PCI again when it names one (A10) */
   nr_sfo_resync_cell(UE->Mod_id, "live cell change"); /* this cell only */
+  nr_sense_unit_cell_resync(UE->Mod_id);
 }
 
 static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
