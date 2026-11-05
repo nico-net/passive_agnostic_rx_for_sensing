@@ -90,6 +90,7 @@ H comes from the CSI-RS occasion nearest in time (|lag| up to 80 slots = 40 ms f
 - (b) `run_b.py`, ID 415 resource (the serving one), 21 Nl = 1 CRC-OK grants of RNTI 58971 (16 to 208 RB): score = mean over RBs of cos^2(h_eff, H w). Best Type I rank-1 codeword over all 20 (N1,N2,ordering) models
   (mode 1 and mode 2 span the same beam x co-phase grid for rank 1, 8704 candidates): **mean 0.383, second best 0.383 (ties), random isotropic w best-of-8704: 0.405, same H with another grant's h_eff: 0.437.**
   Best above the random-best in 4 of 21 grants (chance level), above the shuffled control in 5. ID 418 resource: 0.387 vs 0.420 (12 grants). **No Type I signature.**
+- Quantisation test (`run_b_grid.py`, ID 415 H, 30 grants): on-grid beats the half-step-shifted grid in 8 of 30 grants (mean gap -0.006): no Type I preference either.
 - Test power (`power_check.py`, planted codeword w on the measured H, noise, same sweep): true codeword within 2 % of the best score in 12/12 trials at 20 and 10 dB and 11-12/12 at 0 dB (16 and 96 RB); at 20 dB also 12/12 when the matching H is taken one or two occasions (80-160 ms) later.
   So a Type I gNB would have been seen with this H; the negative is not a lack of sensitivity [SIM-style control on measured H].
 - (c) per PRG, same grants: with 2 or 4 RB the 16-unknown system is under/just determined (residual 0.00, identical to the shuffled control); at 8 RB residual 0.30-0.55 vs 0.33-0.50 shuffled; at 16 RB 0.52-0.75 vs 0.52-0.80.
