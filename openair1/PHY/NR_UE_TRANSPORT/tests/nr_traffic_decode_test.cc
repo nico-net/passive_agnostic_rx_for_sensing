@@ -101,3 +101,45 @@ TEST(TrafficDecode, SensingEnabledUnitDecodesEveryGrantDisabledFollowsPolicyPlus
   nr_sense_unit_reset(0);
   nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
 }
+TEST(TrafficDecode, SensingWidebandGrantsAreDecodedWhateverTheUnitSaysOnlyTheExportIsGated)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_isac_sense_min_prb_set(128);
+  nr_sense_unit_reset(0);
+  nr_cell_bind(0);
+  /* a disabled unit: every wideband grant is decoded (FIXED layout, no traffic policy would), the export gate stays closed */
+  for (int i = 0; i < 100; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(0, 0x3001, C, NR_LAYOUT_FIXED, false, S + i, false, 200)) << i;
+  EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x3001, 200));
+  nr_sense_unit_cell_stats_t cs;
+  nr_sense_unit_cell_stats(0, &cs);
+  EXPECT_EQ(cs.skips, 1u);
+  /* UL too */
+  for (int i = 0; i < 40; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(1, 0x3001, C, NR_LAYOUT_SOLVED, true, S + i, false, 200)) << i;
+  /* narrow grants of the same disabled unit follow the traffic policy + the 1-in-32 sample */
+  int n = 0;
+  for (int i = 0; i < 64; i++) n += nr_traffic_decode_wanted_prbs(0, 0x3002, C, NR_LAYOUT_FIXED, false, S + i, false, 50);
+  EXPECT_EQ(n, 2);
+  /* an enabled unit decodes narrow grants too and exports */
+  nr_sense_unit_set_enabled(0, 0x3002, NR_UNIT_PDSCH_DATA, true);
+  for (int i = 0; i < 40; i++) EXPECT_TRUE(nr_traffic_decode_wanted_prbs(0, 0x3002, C, NR_LAYOUT_FIXED, false, S + i, false, 50));
+  EXPECT_TRUE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x3002, 50));
+  nr_sense_unit_reset(0);
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}
+TEST(TrafficDecode, DecodeStageIsBaselineNotUnitCost)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_sense_unit_reset(0);
+  nr_cell_bind(0);
+  nr_sense_unit_skip(NR_UNIT_PDSCH_DATA, 0x3003, 200, 1000000000ull);
+  nr_sense_unit_decode_job(7000000, 15000000, 1000000000ull);
+  EXPECT_EQ(nr_sense_unit_unattributed_ns(0), 7000000u); /* the decode CPU joins the baseline */
+  nr_sense_unit_view_t v[8];
+  ASSERT_EQ(nr_sense_unit_snapshot_at(0, 1000000000ull + 200000000ull, v, 8), 1);
+  EXPECT_FLOAT_EQ(v[0].cpu_p99_ns, 0.f);     /* ... and not the unit's */
+  EXPECT_FLOAT_EQ(v[0].wait_p99_ns, 0.f);
+  EXPECT_EQ(nr_sense_unit_take_decode_wait_max(0), 15000000u);
+  EXPECT_EQ(nr_sense_unit_take_decode_wait_max(0), 0u);
+  nr_sense_unit_reset(0);
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}

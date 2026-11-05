@@ -99,6 +99,7 @@ static bool sample_prod(nr_sense_sched_sample_t *o, uint64_t now_ns)
   g_prev.no_sample = 0;
   const int prev_cell = nr_cell_idx();
   int da_workers[NR_SENSE_CELLS] = {0};
+  uint64_t dec_wait[NR_SENSE_CELLS] = {0};
   const bool primed = g_prev.primed && now_ns > g_prev.t_ns;
   for (int k = 0; k < n; k++) {
     o->pci[k] = nr_passive_metrics_pci_of ? nr_passive_metrics_pci_of(k) : -1;
@@ -106,6 +107,7 @@ static bool sample_prod(nr_sense_sched_sample_t *o, uint64_t now_ns)
     nr_sense_stats_t st;
     nr_sense_stats(&st);
     da_workers[k] = nr_isac_pdsch_data_aided_workers ? nr_isac_pdsch_data_aided_workers() : 0;
+    dec_wait[k] = nr_sense_unit_take_decode_wait_max(k);
     nr_cell_bind(prev_cell);
     if (primed) o->ring_drops[k] = st.rec_dropped >= g_prev.rec_dropped[k] ? st.rec_dropped - g_prev.rec_dropped[k] : 0;
     g_prev.rec_dropped[k] = st.rec_dropped;
@@ -123,6 +125,7 @@ static bool sample_prod(nr_sense_sched_sample_t *o, uint64_t now_ns)
   for (int k = 0; k < n; k++) { /* the per-cell resources (queues, ring, DA) of each cell */
     o->cell_res_set[k] = true;
     memcpy(o->cell_res[k], o->res, sizeof o->res);
+    o->cell_res[k][NR_RES_QUEUE_DL].base_p99_ns = (float)dec_wait[k]; /* measured: the longest decode-queue wait of the period (a max, not a p99: conservative) */
     o->cell_res[k][NR_RES_DA].cap_ns = (float)((da_workers[k] > 1 ? da_workers[k] : 1) * (double)SENSE_BUCKET_NS); /* workers x one bucket (the headroom is applied by the decision) */
     if (o->ring_drops[k]) o->cell_res[k][NR_RES_SENSE_RING].base_p99_ns = (float)SENSE_BUCKET_NS;
   }
@@ -208,7 +211,7 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
     nr_sense_unit_cell_stats(c, &cs);
     viol += cs.violations; skips += cs.skips; en += cs.units_enabled; drops += sm->ring_drops[c];
   }
-  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s admitted=%d [%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_base=unmeasured gpu_base=unmeasured\n",
+  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s admitted=%d [%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_ul_base=unmeasured gpu_base=unmeasured\n",
         (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), out->n_admitted, set, en,
         (unsigned long)viol, (unsigned long)skips, (unsigned long)drops, sm->res[NR_RES_POOL].cap_ns * 1e-6, sm->res[NR_RES_POOL].base_p99_ns * 1e-6); /* per 50 ms bucket */
   /* the units behind the decision (the first 8 per cell): enabled flag, wideband rate, valid ratio, p99 CPU per bucket (ms), skips and violations since the row was created */
@@ -221,7 +224,7 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
       w += snprintf(u + w, sizeof u - (size_t)w, "%s%u/%s:%s wb=%.1f ratio=%.2f cpu99=%.2f ring99=%.2f da99=%.2f wait99=%.2f skips=%u viol=%u", i ? " | " : "", (unsigned)v->rnti, sn[v->src], v->enabled ? "ON" : "off",
                     v->wb_rate_hz, v->valid_ratio, v->cpu_p99_ns * 1e-6, v->ring_p99_ns * 1e-6, v->da_p99_ns * 1e-6, v->wait_p99_ns * 1e-6, v->skips, v->violations);
     }
-    LOG_A(PHY, "SENSING: SENSE_UNITS cell=%d pci=%d da_cap_ms=%.0f ring_cap_ms=%.0f n=%d %s\n", c, sm->pci[c], sm->cell_res[c][NR_RES_DA].cap_ns * 1e-6, sm->cell_res[c][NR_RES_SENSE_RING].cap_ns * 1e-6, in->n_units[c], u);
+    LOG_A(PHY, "SENSING: SENSE_UNITS cell=%d pci=%d da_cap_ms=%.0f ring_cap_ms=%.0f dec_wait_max_ms=%.1f n=%d %s\n", c, sm->pci[c], sm->cell_res[c][NR_RES_DA].cap_ns * 1e-6, sm->cell_res[c][NR_RES_SENSE_RING].cap_ns * 1e-6, sm->cell_res[c][NR_RES_QUEUE_DL].base_p99_ns * 1e-6, in->n_units[c], u);
   }
 }
 

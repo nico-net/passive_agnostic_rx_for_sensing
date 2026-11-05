@@ -4753,10 +4753,10 @@ static void traffic_emit_ul(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
 
 /* The decode gate of a non-probe C-RNTI job (see nr_traffic_decode.h); other RNTI classes are always decoded. */
 static bool traffic_skip_note(void) { nr_traffic_count(NR_TRAFFIC_CNT_SKIP); return true; }
-static bool traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_learned)
+static bool traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_learned, uint16_t est_prbs)
 {
   const bool hv = dir == 0 && rnti_class == NR_BLIND_RNTI_CLASS_C && nr_pdsch_solver_take_hrv_alert(rnti);
-  return nr_traffic_decode_wanted(dir, rnti, rnti_class, ls, ul_learned, btim_now_ns(), hv);
+  return nr_traffic_decode_wanted_prbs(dir, rnti, rnti_class, ls, ul_learned, btim_now_ns(), hv, est_prbs);
 }
 
 /* The banked CORESET passes of ONE dedicated-only slot (T26d): each pass is ~250 us FEP+LLR + decode, and Phase 1 of different
@@ -8514,12 +8514,12 @@ constdiag_done:;
         bool ul_dec = true; /* traffic mode: a non-probe PUSCH decode of this grant is wanted */
         if (nr_isac_mode() == NR_ISAC_MODE_SENSING) { /* sensing: all grants of an enabled PUSCH_DMRS unit, the traffic policy + a sampled check otherwise */
           const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
-          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti));
+          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti), u->num_rb);
         }
         if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
           const uint64_t tt0 = btim_now_ns();
           const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
-          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti));
+          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti), u->num_rb);
           traffic_emit_ul(cfg, fp, u, &ul_opts, cand_task[ti].L, cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot, source_absolute_slot,
                           uls, ul_dec, tt0);
         }
@@ -8664,10 +8664,10 @@ constdiag_done:;
                   (unsigned)ul00.k2, (unsigned)ul00.mcs);
           bool ul00_dec = true;
           if (nr_isac_mode() == NR_ISAC_MODE_SENSING)
-            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti));
+            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti), ul00.num_rb);
           if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
             const uint64_t tt0 = btim_now_ns();
-            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti));
+            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti), ul00.num_rb);
             if (dedupe_hit(abs_slot, source_absolute_slot, ul00.rnti, 1)) nr_traffic_count(NR_TRAFFIC_CNT_DUP);
             else traffic_emit_ul(cfg, fp, &ul00, &ul_opts, cand_task[ti].L, cand_task[ti].cce, cand_task[ti].frame, cand_task[ti].slot,
                                  source_absolute_slot, NR_LAYOUT_FIXED, ul00_dec, tt0);
@@ -8853,7 +8853,7 @@ constdiag_done:;
       const bool is10t = out.dci_format == NR_BLIND_DCI_FORMAT_1_0;
       const bool slv = !is10t && nr_pdsch_solver_enabled() && cand_task[ti].dl_auto && g_dci11_state == 1 && g_dci11_resolver != NULL;
       const nr_layout_state_t lst = is10t ? NR_LAYOUT_FIXED : slv ? nr_pdsch_solver_layout_state(out.rnti, NULL, NULL) : NR_LAYOUT_SOLVED;
-      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false) ? 1 : 0;
+      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false, out.num_rb) ? 1 : 0;
     }
     if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
       const uint64_t tt0 = btim_now_ns();
@@ -8861,7 +8861,7 @@ constdiag_done:;
       const bool slv = !is10t && nr_pdsch_solver_enabled() && cand_task[ti].dl_auto && g_dci11_state == 1 && g_dci11_resolver != NULL;
       const int rep_t = !is10t ? nr_pdsch_solver_rep(out.rnti) : -1;
       const nr_layout_state_t lst = is10t ? NR_LAYOUT_FIXED : slv ? nr_pdsch_solver_layout_state(out.rnti, NULL, NULL) : NR_LAYOUT_SOLVED;
-      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false) ? 1 : 0;
+      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false, out.num_rb) ? 1 : 0;
       /* the record never presents a guess as solved: a 1_1 without solver state is a CANDIDATE (the decode policy above still sees SOLVED) */
       const nr_layout_state_t rec_lst = (!is10t && !slv) ? NR_LAYOUT_CANDIDATE : lst;
       /* DL 1_1 of dl_auto already went through the dir-0 dedupe (not in a discovered pass: no dir-0 dedupe there); every other accept can repeat (other passes / AL / CORESET hypotheses) */
