@@ -550,3 +550,44 @@ TEST_F(QRing, UlSourcesQualityWithTimingRamp)
 
   }
 }
+
+/* Low SNR (0-6 dB): the phase step is estimated from noisy pilots. The SAME noisy record with and without the TA ramp must give the same verdict (valid PRBs within 2 of 24, p50 within 1.5 dB):
+ * a biased step estimate would cost valid PRBs or SNR only in the ramped copy. DM-RS type 1 (comb 2), type 2 (pairs, CDM-group sibling REs 6 apart) and a dense record, several DM-RS symbols. */
+TEST_F(QRing, UlPhaseStepUnbiasedAtLowSnr)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  open(8);
+  const float nv = 1e-3f;
+  uint64_t rng = 99887766554433ull;
+  auto gauss = [&] { double u = 0; for (int i = 0; i < 12; i++) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; u += (rng >> 11) * (1.0 / 9007199254740992.0); } return float(u - 6); };
+  struct Pat { const char *name; std::vector<int> ko; std::vector<int> syms; };
+  const Pat pats[] = {{"dense", {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, {2}}, {"type1", {0, 2, 4, 6, 8, 10}, {2, 7, 11}}, {"type2", {0, 1, 6, 7}, {2, 7}}, {"comb4", {1, 5, 9}, {12}}};
+  for (const Pat &pt : pats) for (double snr : {0.0, 2.0, 4.0, 6.0}) for (double ta : {1600.0, -1100.0, 300.0}) {
+    const int first = 5, nprb = 24, nant = 4;
+    std::vector<uint16_t> kk; std::vector<uint8_t> ll;
+    for (int sy : pt.syms) for (int p = 0; p < nprb; p++) for (int o : pt.ko) { kk.push_back(12 * (first + p) + o); ll.push_back(sy); }
+    const int n = (int)kk.size();
+    std::vector<std::complex<float>> base((size_t)nant * n);
+    for (int a = 0; a < nant; a++) for (int i = 0; i < n; i++) {
+      const double th = 2 * M_PI * 3 * kk[i] / 4096.0 + 0.9 * a;
+      std::complex<float> h0 = std::complex<float>(1.f, 0.f) + 0.4f * std::complex<float>(cosf(th), sinf(th));
+      base[(size_t)a * n + i] = h0 * float(std::sqrt(nv * std::pow(10.0, snr / 10.0) / std::norm(h0))) + std::sqrt(nv / 2) * std::complex<float>(gauss(), gauss());
+    }
+    nr_sense_quality_t q[2];
+    for (int r = 0; r < 2; r++) {
+      std::vector<float> v(2 * (size_t)nant * n);
+      for (int a = 0; a < nant; a++) for (int i = 0; i < n; i++) {
+        std::complex<float> x = base[(size_t)a * n + i];
+        const double ph = r ? 2 * M_PI * ta * kk[i] / 4096.0 : 0.0;
+        x *= std::complex<float>(cosf(ph), sinf(ph));
+        v[2 * ((size_t)a * n + i)] = x.real(); v[2 * ((size_t)a * n + i) + 1] = x.imag();
+      }
+      const uint64_t id = nr_sense_push_cfr(NR_SENSE_SRC_PUSCH_DMRS, nant, v.data(), n, n, kk.data(), ll.data(), 7, 0.f, nv, 0, 0, nullptr);
+      ASSERT_NE(id, 0u);
+      ASSERT_TRUE(wait_q(id, &q[r]));
+    }
+    SCOPED_TRACE(testing::Message() << pt.name << " snr " << snr << " ta " << ta);
+    EXPECT_NEAR(q[1].valid_cfr_prbs, q[0].valid_cfr_prbs, 2);
+    if (q[0].valid_cfr_prbs >= 8 && q[1].valid_cfr_prbs >= 8) EXPECT_NEAR(q[1].snr_db_p50, q[0].snr_db_p50, 1.5);
+  }
+}
