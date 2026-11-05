@@ -37,3 +37,23 @@ Mutation (nr_cfo_alias_k returns 0) -> 7 FAILURES; restored -> all checks pass.
 - Legacy 4-RX rfsim gate, 1 run x 420 s, under flock -x heavy + td_measure: PASS [solver] n_solved=1 ttc 4.53 s, postsolve CRC 100.00 (51992 grants), crc_floor 96.14, drop_full 0.057 %. N=1 only (not the default 2).
   This run has no RX_RECOVER, so it shows no regression of the non-prior path, not the fix.
 - No OTA run done.
+
+## Fix round 1 (commit 6f2da2c9c5)
+Rulings implemented: C1+I2 verified absolute per-cell prior; I1 symmetric decision; I3 all re-sync paths; M4 seam tests; M2 no extern/TLS. The "+14161 is an alias" reading in the first report was wrong (review C1).
+- Prior: PHY_VARS_NR_UE.cfo_verify. Each lock records (total CFO, PCI, evidence = pdschq_crc_ok + acq_sib1_decodes of the cell). At the next UE_synch entry the last lock becomes the prior
+  only if the evidence grew after it (CRC24 false pass 6e-8/TB, one is conclusive); an unverified or wrong lock never replaces an older verified one. prior_est = prior_total - radio tuning
+  (cont_fo_comp: 0), i.e. the units of the estimate. Set for every UE_synch search (fast tries, full-capture fallback, retry, sync-loss re-sync). Cleared on MPCI live tune; used only when the locked PCI equals prior_pci.
+  No verified lock = unchanged behaviour (I read "try both k=+-1 when no verified prior" as: not done, initial acquisition unchanged; with a prior only the alias nearest it is tested).
+- nr_resync_cfo_reeval (nr_initial_sync.c): k = nearest alias to the prior; k=0 -> nothing runs. Else H0 (est, SSS residual applied) and H1 (est+k*P) decoded at full compensation from the saved SSB window;
+  nr_resync_cfo_decide: one CRC pass decides; both: PBCH DM-RS correlation energy (best SSB index, coherent over 3 symbols; nr_pbch_detection now returns it and the mean of the wrong indices mu0),
+  variance 2 m mu0 + mu0^2 (exponential noise bins), alias needs not to lose by 3 sigma, H0 only wins by 3 sigma, ties -> alias (nearer prior); neither -> measurement kept, window and rxdataF restored bit-exactly, cfo_verify.unresolved counted, logged.
+- A1B epoch 3: est +14161, prior_est = 237 + 13977 -> k 0, nothing runs, total 184 accepted.
+- Tests (test_nr_sync_pin resync_alias): OTA values E1B/A1B ep2/ep3; decide rule (6 cases); production reeval on synthetic captures with a fake PBCH (CP-based residual): both-CRC-pass alias taken, only-alias-CRC, neither (state restored memcmp, rxdataF memcmp, rsrp equal, unresolved=1),
+  estimate at prior (no call), A1B mistuned radio no flip; exact window check (entry window rotated by -(sss+kP), max diff 3).
+  Mutations all fail the test: reeval restore removed (3 FAIL), compensation sign flipped (2 FAIL), decision comparison inverted (5 FAIL). Restored; all checks pass.
+- Verification [DGX aarch64]: full build 24 .so; ctest -j4 18 failed = exactly the known set (uci x7, qam64/256, pusch_ul_disc, nr_td_sim_test, ssb_rate_match_prod, gpu_pass_cells, gpu_pass_geo_discrete, ldpc_cuda_pool_cpu, dft_test, test_nr_modulation)
+  plus time_management_tests (load-flaky, passes on rerun and in the previous round). Static audit --check rc 0 (TLS rows removed), frozen OK.
+  Legacy 4-RX rfsim gate 2 x 420 s under both locks: PASS x2 (ttc 3.42/3.26 s, postsolve CRC 100.00 over 52164/52093 grants, crc_floor 97.04/97.17, drop_full 0.014/0.013 %).
+- Concerns: the DM-RS energy margin is derived from the model, not measured on OTA captures; the PBCH decode of the real hypotheses is not exercised (fake decoder in the test, no PBCH encoder in the harness);
+  a cell with no TB CRC / SIB1 before its first RX_RECOVER has no verified prior (behaviour unchanged, fault possible); evidence counters are the cell's metrics_collect (called at each UE_synch entry once a lock exists).
+  The post-hoc PDCCH-collapse detector remains out of scope. No OTA run.
