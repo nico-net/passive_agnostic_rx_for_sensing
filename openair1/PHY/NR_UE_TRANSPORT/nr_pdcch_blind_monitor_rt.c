@@ -9936,6 +9936,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
         job.rnti_class = out.rnti_class;
         job.harq_pid_tag = blind_harq_tag(abs_slot, out.rnti, o->harq_pid);
         job.want_data = want_data && !var[v].probe;
+        job.dmrs_tap = !var[v].probe;
         job.fo_hz = isnan(nr_slot_fep_fo_override_hz) ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                                                       : nr_slot_fep_fo_override_hz;
         job.sweep_ticket.layout_index = 0xFFFF;

@@ -55,6 +55,7 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "nr_pdsch_mimo_ls.h"
 #include "nr_sense_api.h"
 #include "nr_sense_unit.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_noise_est.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_prg_latched
 #include "executables/nr-uesoftmodem.h"
@@ -137,7 +138,11 @@ static void da_emit(uint32_t slot_idx, float frac, const nr_isac_carrier_t *carr
                     uint32_t nl, const float *h, uint32_t nant, uint32_t stride, const uint32_t *k, const uint32_t *l, uint32_t off,
                     uint32_t cnt, float nvar)
 {
+  /* The demodulator's nvar is in rxdataF units; H = Y/X is not (|X| is the constellation scale, ~16 at QPSK), so the noise handed to the quality is the
+   * one measured on H itself (second difference over consecutive subcarriers, as the PUSCH data tap). NaN/0 = none: the quality uses the record's residual. */
   if (nl <= 1) {
+    if (nr_isac_mode() == NR_ISAC_MODE_SENSING) /* legacy/traffic records keep the demodulator's figure */
+      nvar = nr_sense_h_noise_var(&h[2 * (size_t)off], &k[off], &l[off], cnt, stride, nant);
     nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, &h[2 * (size_t)off], nant, stride, &k[off], &l[off],
                                   cnt, nvar, rs_meta);
     return;
@@ -151,8 +156,9 @@ static void da_emit(uint32_t slot_idx, float frac, const nr_isac_carrier_t *carr
     if (port_known) ports &= ports - 1;
     m.layer_idx1 = (int)lay + 1;
     m.n_layers = (int)nl;
-    nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, &h[2 * ((size_t)lay * nant * stride + off)], nant,
-                                  stride, &k[off], &l[off], cnt, nvar, &m);
+    const float *hl = &h[2 * ((size_t)lay * nant * stride + off)];
+    nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, hl, nant, stride, &k[off], &l[off], cnt,
+                                  nr_isac_mode() == NR_ISAC_MODE_SENSING ? nr_sense_h_noise_var(hl, &k[off], &l[off], cnt, stride, nant) : nvar, &m);
   }
 }
 

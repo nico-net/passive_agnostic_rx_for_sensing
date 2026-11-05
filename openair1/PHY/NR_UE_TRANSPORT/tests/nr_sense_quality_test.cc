@@ -65,6 +65,35 @@ TEST(SenseQuality, CleanChannelAllValid)
   EXPECT_GT(q.sym_consist, 0.9f);
   EXPECT_TRUE(std::isnan(q.recon_conf));
 }
+/* A noiseless simulation: the producer's estimate is 0, NaN or absurdly small; every PRB must be valid at the 30 dB ceiling, not invalid. */
+TEST(SenseQuality, NoiselessInputIsValidAtTheSnrCeiling)
+{
+  Cfr c = make(128, [](int) { return 100.f; }, 1.f); /* noise 100 dB below the channel: effectively noiseless */
+  for (float nv : {0.f, NAN, 1e-30f, 1e-12f}) {
+    auto q = run(c, nv);
+    EXPECT_EQ(q.valid_cfr_prbs, 128) << nv;
+    EXPECT_NEAR(q.snr_db_p50, 30.f, 0.1f) << nv; /* NR_SENSE_RECON_IMPL_LOSS = 1e-3 */
+    EXPECT_TRUE(std::isfinite(q.snr_db_p10));
+  }
+}
+/* No producer estimate on a really noisy record: the local-fit residual gives the SNR; a given estimate is used as is. */
+TEST(SenseQuality, MissingNoiseEstimateComesFromTheRecord)
+{
+  Cfr c = make(128, [](int) { return 15.f; }, 1.f);
+  auto given = run(c, 1.f), none = run(c, 0.f), nan = run(c, NAN);
+  EXPECT_EQ(given.valid_cfr_prbs, 128);
+  EXPECT_NEAR(given.snr_db_p50, 15.f, 1.f);
+  EXPECT_EQ(none.valid_cfr_prbs, 128);
+  EXPECT_NEAR(none.snr_db_p50, given.snr_db_p50, 1.5f);
+  EXPECT_EQ(nan.valid_cfr_prbs, none.valid_cfr_prbs);
+  EXPECT_FLOAT_EQ(nan.snr_db_p50, none.snr_db_p50);
+}
+/* The record-derived estimate must not turn noise into signal: pure noise stays invalid without any producer estimate. */
+TEST(SenseQuality, NoiseOnlyWithoutEstimateStaysInvalid)
+{
+  Cfr c = make(128, [](int) { return -300.f; }, 1.f);
+  EXPECT_EQ(run(c, 0.f).valid_cfr_prbs, 0);
+}
 TEST(SenseQuality, NoiseOnlyNoneValid)
 {
   Cfr c = make(128, [](int) { return -300.f; }, 1.f);
@@ -137,11 +166,10 @@ TEST(SenseQuality, DegeneratePrbInvalid)
   auto q = run(d, 1.f);
   EXPECT_FALSE(bit(q, 5));
   EXPECT_EQ(q.valid_cfr_prbs, 127);
+  /* noise_var 0 = the producer has no estimate: the record's own residual stands in (it used to invalidate every PRB, S3 defect 2026-11-05) */
   auto z = run(c, 0.f);
-  EXPECT_EQ(z.valid_cfr_prbs, 0);
-  for (unsigned char b : z.valid_mask)
-    EXPECT_EQ(b, 0);
-  EXPECT_TRUE(std::isnan(z.snr_db_p50));
+  EXPECT_EQ(z.valid_cfr_prbs, 128);
+  EXPECT_NEAR(z.snr_db_p50, 20.f, 1.5f);
 }
 TEST(SenseQuality, SnrGateAt6And1Db)
 {

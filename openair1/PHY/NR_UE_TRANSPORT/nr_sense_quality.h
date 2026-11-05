@@ -25,7 +25,8 @@ typedef struct {
   float sym_consist;            /* 0..1 correlation of per-symbol estimates on shared k; NAN with < 2 symbols */
   float recon_conf;             /* data-aided only, set by the producer; NAN otherwise */
 } nr_sense_quality_t;
-/* noise_var: variance of the same quantity as H (post-estimation, per RE, same scaling); producers own that.
+/* noise_var: variance of the same quantity as H (post-estimation, per RE, same scaling); producers own that. <= 0 or NaN = the producer has none: the
+ * PRB's own local-fit residual stands in. Either way the noise is floored at NR_SENSE_RECON_IMPL_LOSS x the PRB's mean power (30 dB SNR ceiling).
  * Per-PRB SNR = (mean|H|^2 over antennas and all REs - noise_var) / noise_var, -100 dB when the signal is <= 0.
  * The caller passes one estimate per (k, l); REs with l >= 16 or PRB >= 275 above the lowest are ignored in the fit.
  * Cost: O(n_re * n_ant), measured ~29 us for DM-RS-only input (128 PRB x 4 ant x 6 RE/PRB x 2 sym); a data-aided

@@ -185,6 +185,22 @@ TEST_F(Sched, ColdUnitIsEnabledAfterTwoDecisions)
   EXPECT_EQ(cs.units_enabled, 1u);
 }
 
+/* The solver DM-RS tap (consumer_dmrs_tap) reaches a disabled unit only through nr_sense_unit_gate: that call alone must give the unit the history the
+ * scheduler needs, so a new (RNTI, PDSCH_DMRS) unit is enabled through the cold path, next to the same RNTI's PDSCH_DATA unit (one cold unit per decision). */
+TEST_F(Sched, DmrsUnitGainsHistoryFromTheGateAndIsEnabledNextToData)
+{
+  for (uint64_t k = 0; k < 6 * DEC; k += 2) {
+    for (nr_unit_src_t x : {NR_UNIT_PDSCH_DATA, NR_UNIT_PDSCH_DMRS}) nr_sense_unit_skip(x, 0x4660, 200, tb(k)); /* what nr_sense_unit_gate does for a disabled unit */
+  }
+  EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, 0x4661, 106)); /* the gate itself: new RNTI, disabled, counted */
+  nr_sense_unit_cell_stats_t cs;
+  nr_sense_unit_cell_stats(0, &cs);
+  EXPECT_GE(cs.skips, 1u);
+  for (int d = 1; d <= 5; d++) nr_sense_sched_step(tb(d * DEC));
+  EXPECT_TRUE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DATA, 0x4660));
+  EXPECT_TRUE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DMRS, 0x4660));
+}
+
 TEST_F(Sched, ViolationRemovesTheUnitAtOnce)
 {
   feed_skips(0x460a, NR_UNIT_PDSCH_DATA, 0, 4 * DEC);
