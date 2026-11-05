@@ -36,7 +36,8 @@ typedef struct {
   _Atomic uint32_t key[NR_UNIT_ROWS];
   _Atomic uint64_t row_last[NR_UNIT_ROWS];
   _Atomic uint32_t gen[NR_UNIT_ROWS];  /* bumped when the row is evicted (I-5) */
-  _Atomic uint64_t unattributed_ns;    /* cost-only calls of an RNTI without a row (I-1) */
+  _Atomic uint64_t unattributed_ns;    /* cost-only calls of an RNTI without a row (I-1) and the PDSCH decode stage (protected baseline) */
+  _Atomic uint64_t dec_wait_max;       /* longest decode-queue wait since the last take (ns) */
   _Atomic uint64_t viol_total, skip_total, wb_valid, wb_valid_prbs, last_wb_ns, gap_max_ns; /* cell totals for the metrics (S7) */
   atomic_flag create_lock;
   unit_t u[NR_UNIT_ROWS][NR_UNIT_SRC_N];
@@ -446,6 +447,20 @@ void nr_sense_unit_cell_stats(int cell, nr_sense_unit_cell_stats_t *out)
   }
 }
 
+void nr_sense_unit_decode_job(uint64_t cpu_ns, uint64_t wait_ns, uint64_t t_ns)
+{
+  (void)t_ns;
+  if (nr_isac_mode() != NR_ISAC_MODE_SENSING) return;
+  unit_tab_t *T = tab_of(nr_cell_idx());
+  if (cpu_ns) atomic_fetch_add_explicit(&T->unattributed_ns, cpu_ns, memory_order_relaxed);
+  uint64_t o = atomic_load_explicit(&T->dec_wait_max, memory_order_relaxed);
+  while (o < wait_ns && !atomic_compare_exchange_weak_explicit(&T->dec_wait_max, &o, wait_ns, memory_order_relaxed, memory_order_relaxed)) {}
+}
+uint64_t nr_sense_unit_take_decode_wait_max(int cell)
+{
+  return cell < 0 || cell >= NR_CELL_MAX ? 0 : atomic_exchange_explicit(&tab_of(cell)->dec_wait_max, 0, memory_order_relaxed);
+}
+
 uint64_t nr_sense_unit_unattributed_ns(int cell)
 {
   return cell < 0 || cell >= NR_CELL_MAX ? 0 : atomic_load_explicit(&tab_of(cell)->unattributed_ns, memory_order_relaxed);
@@ -566,6 +581,7 @@ void nr_sense_unit_reset(int cell)
     for (int s = 0; s < NR_UNIT_SRC_N; s++) reset_unit(&T->u[r][s]);
   }
   atomic_store_explicit(&T->unattributed_ns, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->dec_wait_max, 0, memory_order_relaxed);
   atomic_store_explicit(&T->viol_total, 0, memory_order_relaxed);
   atomic_store_explicit(&T->skip_total, 0, memory_order_relaxed);
   atomic_store_explicit(&T->wb_valid, 0, memory_order_relaxed);

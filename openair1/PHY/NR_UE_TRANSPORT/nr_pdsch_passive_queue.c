@@ -1951,8 +1951,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_chest_occ_override = -1;
     const uint64_t dec_t1 = now_ns();
     if (unit_c0)
-      nr_sense_unit_job(NR_UNIT_PDSCH_DATA, job.rnti, nr_sense_unit_cpu_ns() - unit_c0, enqueue_ns && dec_t0 > enqueue_ns ? dec_t0 - enqueue_ns : 0,
-                        enqueue_ns && dec_t1 - enqueue_ns > NR_UNIT_LATE_NS, 0, dec_t1);
+      nr_sense_unit_decode_job(nr_sense_unit_cpu_ns() - unit_c0, enqueue_ns && dec_t0 > enqueue_ns ? dec_t0 - enqueue_ns : 0, dec_t1); /* decode = protected baseline (wideband grants are always decoded), not a unit cost */
     const double dec_us = (double)(dec_t1 - dec_t0) / 1000.0;
     { /* per-path trial of the graph pass (DISCRETE): this grant's decode wall time per 1000 LLRs, GPU or CPU side; probes are not samples */
       const int side = nr_pdsch_passive_path_trial_side();

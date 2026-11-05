@@ -25,6 +25,9 @@ int nr_traffic_note_dci(int dir, uint16_t rnti, bool count);
 bool nr_traffic_probe_wanted(int cell, uint16_t rnti, int dir, int n_dci_seen, int n_alive, bool family_match, float snr_db, int mcs, int mcs_table);
 /* Outcome of a UL decode with a CRC verdict (dir 1): a pass resets the backoff, a fail counts once per wanted grant. */
 void nr_traffic_probe_result(int dir, uint16_t rnti, bool crc_ok);
+/* As above with the grant's PRB count: in SENSING mode a wideband grant (>= sense_min_prb) is always decoded, narrower ones follow the unit state / traffic policy / sample. */
+bool nr_traffic_decode_wanted_prbs(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
+                                   uint64_t t_ns, bool hrv_alert, uint16_t est_prbs);
 /* Returns true when the RNTI must be reopened (K_REOPEN consecutive counted failures: rv 0 and snr >= 10 dB). */
 bool nr_traffic_decode_result(int dir, uint16_t rnti, int rv, float snr_db, bool crc_ok);
 void nr_traffic_decode_reset(void);   /* HARD_RESET epochs: forget every RNTI's counters */

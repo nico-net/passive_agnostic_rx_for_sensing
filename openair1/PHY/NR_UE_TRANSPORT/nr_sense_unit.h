@@ -59,6 +59,10 @@ typedef struct {
   uint32_t units_enabled;                     /* units enabled now */
 } nr_sense_unit_cell_stats_t;
 void nr_sense_unit_cell_stats(int cell, nr_sense_unit_cell_stats_t *out);
+/* The PDSCH decode stage (LDPC of a grant) in SENSING mode: every wideband grant is decoded whatever its unit says, so this is a protected baseline, not a unit cost. Its CPU joins the
+ * cell's unattributed (baseline) cost; its queue wait feeds the baseline of the decode queue (nr_sense_unit_take_decode_wait_max: longest wait since the previous take). */
+void nr_sense_unit_decode_job(uint64_t cpu_ns, uint64_t wait_ns, uint64_t t_ns);
+uint64_t nr_sense_unit_take_decode_wait_max(int cell);
 /* CPU ns of cost-only calls that had no row (cumulative, per cell). */
 uint64_t nr_sense_unit_unattributed_ns(int cell);
 

@@ -69,15 +69,23 @@ static bool policy_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_stat
   return want;
 }
 
-/* SENSING mode (plan S7, ruling I1): the grants of an ENABLED unit (DL: PDSCH_DATA, UL: PUSCH_DMRS of the RNTI) are all decoded to the end. A disabled unit follows the traffic
+
+/* SENSING mode (plan S7, rulings I1 + round 3): every WIDEBAND grant (est_prbs >= sense_min_prb) is decoded; the grants of an ENABLED unit (DL: PDSCH_DATA, UL: PUSCH_DMRS of the RNTI) are all decoded to the end. A disabled unit follows the traffic
  * policy above plus a sampled check decode (1 in NR_TRAFFIC_CHECK_EVERY_GRANTS grants per RNTI and direction, whatever the layout state), so that a TB still reaches the unit gate
  * now and then, the skip is counted and the scheduler keeps a (weighted, nr_sense_unit.c) rate for it. Non-C RNTIs are always decoded. */
 bool nr_traffic_decode_wanted(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
                               uint64_t t_ns, bool hrv_alert)
 {
+  return nr_traffic_decode_wanted_prbs(dir, rnti, rnti_class, ls, ul_table_learned, t_ns, hrv_alert, 0);
+}
+
+bool nr_traffic_decode_wanted_prbs(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
+                                   uint64_t t_ns, bool hrv_alert, uint16_t est_prbs)
+{
   if (nr_isac_mode() != NR_ISAC_MODE_SENSING)
     return policy_wanted(dir, rnti, rnti_class, ls, ul_table_learned, t_ns, hrv_alert);
   if (rnti_class != NR_BLIND_RNTI_CLASS_C) return true;
+  if (est_prbs >= (unsigned)nr_isac_sense_min_prb()) return true; /* a wideband grant is always decoded: the unit state gates the export, not the decode */
   if (nr_sense_unit_enabled(dir == 0 ? NR_UNIT_PDSCH_DATA : NR_UNIT_PUSCH_DMRS, rnti)) return true;
   const bool pol = policy_wanted(dir, rnti, rnti_class, ls, ul_table_learned, t_ns, hrv_alert);
   td_tab_t *t = &g_td;
