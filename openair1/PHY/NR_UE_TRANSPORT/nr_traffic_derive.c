@@ -41,6 +41,7 @@ void nr_traffic_derive_dl(const nr_traffic_dl_in_t *in, nr_traffic_derived_t *ou
   if (qr_ok) out->qm = (int8_t)qm;
   /* tbs: needs a CRC-solved RNTI (S, L and the DM-RS mask are CRC-learnt, not read), nl <= 4, a learnt xOverhead and no special-slot override */
   if (!qr_ok || nl < 1 || nl > 4 || !in->layout_crc || !in->sv_crc || in->sv_ov || !in->class_c) return;
+  if (in->k0 < 0 || in->slot_dl_syms != 14) return;   /* S and L are valid only in a full DL slot whose offset is known */
   if (in->sv_S < 0 || in->sv_L < 1 || in->S != in->sv_S || in->L != in->sv_L || in->xoh < 0) return;
   if (in->expect_mask == 0 || in->expect_mask != in->dmrs_mask || nsym != 1) return;   /* double-symbol DM-RS: not derived */
   const uint32_t t = nr_traffic_tbs(qm, r10, in->nb_rb, in->L, in->dmrs_type, cdm, __builtin_popcount(in->dmrs_mask), in->xoh, nl);

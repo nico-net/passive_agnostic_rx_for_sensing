@@ -4776,7 +4776,7 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
                                .ap_field = ro->ant_ports_bits > 0 ? (int)nr_dci_bits_field(payload, ro->total, ro->ant_ports, ro->ant_ports_bits) : -1,
                                .rd_cdm = out->n_dmrs_cdm_groups, .rd_ports = out->dmrs_ports, .mcs = out->mcs, .mcs_table = out->mcs_table,
                                .table_evidence = r.table_evidence, .nb_rb = out->num_rb, .S = out->start_symbol, .L = out->num_symbols,
-                               .dmrs_mask = out->dl_dmrs_symb_pos, .xoh = -1, .class_c = out->rnti_class == NR_BLIND_RNTI_CLASS_C, .sv_S = -1, .sv_L = -1};
+                               .dmrs_mask = out->dl_dmrs_symb_pos, .k0 = -1, .slot_dl_syms = -1 /* no learnt k0 per TDA index exists: tbs stays null until one does */, .xoh = -1, .class_c = out->rnti_class == NR_BLIND_RNTI_CLASS_C, .sv_S = -1, .sv_L = -1};
       di.sv_ok = nr_pdsch_solver_derive_inputs(out->rnti, out->tda_index, &di.sv_crc, &di.sv_add_pos, &di.sv_table, &di.sv_S, &di.sv_L, &di.sv_ov);
       if (di.sv_ok && di.sv_S >= 0 && out->dl_dmrs_symb_pos != 0)
         di.expect_mask = nr_pdsch_solver_dmrs_mask(__builtin_ctz(out->dl_dmrs_symb_pos), di.sv_S, di.sv_L, di.sv_add_pos);

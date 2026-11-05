@@ -32,6 +32,8 @@ typedef struct {
   int nb_rb, S, L; uint16_t dmrs_mask;   /* the reading's allocation and DM-RS symbol mask */
   uint16_t expect_mask;     /* nr_pdsch_solver_dmrs_mask(first DM-RS symbol, S, L, sv_add_pos), 0 = not computed */
   int xoh;                  /* xOverhead proven by the cell's CRC-confirmed elimination, -1 not proven */
+  int k0;                   /* PDSCH slot offset from the DCI slot, from a LEARNT TDA row; -1 unknown (the tree learns no per-index k0 for DCI 1_1) */
+  int slot_dl_syms;         /* nr_passive_acq_tdd_pdsch_dl_symbols() of slot (dci slot + k0): 14 = full DL slot; -1 pattern unknown. Anything but 14 (special, flexible, UL) = no tbs */
   bool class_c;             /* C-RNTI grant (tb scaling 0, xOverhead applies) */
 } nr_traffic_dl_in_t;
 typedef struct { int8_t nl, qm; int32_t tbs; } nr_traffic_derived_t;   /* -1 unknown */

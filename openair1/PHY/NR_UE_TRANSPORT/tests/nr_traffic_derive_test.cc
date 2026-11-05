@@ -146,7 +146,7 @@ static nr_traffic_dl_in_t proven()
   nr_traffic_dl_in_t d{};
   d.layout_trusted = true; d.layout_crc = true; d.ap_bits = 5; d.dmrs_type = 0; d.ap_field = 2; d.rd_cdm = 1; d.rd_ports = 0x3;
   d.mcs = 28; d.mcs_table = 0; d.table_evidence = 2; d.sv_ok = d.sv_crc = true; d.sv_ov = false; d.sv_add_pos = 1; d.sv_table = 0; d.sv_S = 2; d.sv_L = 12;
-  d.nb_rb = 106; d.S = 2; d.L = 12; d.dmrs_mask = (1u << 2) | (1u << 9); d.expect_mask = d.dmrs_mask; d.xoh = 0; d.class_c = true;
+  d.nb_rb = 106; d.S = 2; d.L = 12; d.dmrs_mask = (1u << 2) | (1u << 9); d.expect_mask = d.dmrs_mask; d.xoh = 0; d.k0 = 0; d.slot_dl_syms = 14; d.class_c = true;
   return d;
 }
 static nr_traffic_derived_t run(const nr_traffic_dl_in_t &d) { nr_traffic_derived_t o; nr_traffic_derive_dl(&d, &o); return o; }
@@ -187,6 +187,11 @@ TEST(TrafficDerive, EachUnprovenInputNullsItsFields)
   d = proven(); d.S = 3; expect(d, 2, 6, false, "S disagrees with the learnt one");
   d = proven(); d.L = 11; expect(d, 2, 6, false, "L disagrees with the learnt one");
   d = proven(); d.xoh = -1; expect(d, 2, 6, false, "xOverhead not proven");
+  d = proven(); d.slot_dl_syms = 9; expect(d, 2, 6, false, "TDD special slot");
+  d = proven(); d.slot_dl_syms = 0; expect(d, 2, 6, false, "UL slot");
+  d = proven(); d.slot_dl_syms = -1; expect(d, 2, 6, false, "TDD pattern unknown");
+  d = proven(); d.k0 = -1; expect(d, 2, 6, false, "PDSCH slot unknown");
+  d = proven(); d.k0 = 2; expect(d, 2, 6, true, "known offset, full DL slot");
   d = proven(); d.expect_mask = 0; expect(d, 2, 6, false, "mask not cross-checked");
   d = proven(); d.expect_mask = (1u << 2) | (1u << 8); expect(d, 2, 6, false, "mask disagrees with the learnt add_pos");
   d = proven(); d.ap_field = 12; d.rd_ports = 0x1; d.rd_cdm = 2; expect(d, 1, 6, false, "double-symbol DM-RS row: nl and qm, no tbs");
