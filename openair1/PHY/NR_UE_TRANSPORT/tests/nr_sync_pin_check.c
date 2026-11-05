@@ -486,16 +486,28 @@ static void verify_gate(void)
 {
   const int P = nr_sss_cfo_period_hz(30000);
   /* only first-pass TBs whose slot is at/after the lock count; rescues and in-flight jobs from before the lock do not */
-  CHECK(nr_cfo_crc_counts(1000, 1000, 0) && nr_cfo_crc_counts(1001, 1000, 0), "job at or after the lock counts");
-  CHECK(!nr_cfo_crc_counts(999, 1000, 0), "in-flight job enqueued before the lock must not count");
+  CHECK(nr_cfo_crc_counts(1001, 1000, 0), "job after the lock counts");
+  CHECK(!nr_cfo_crc_counts(1000, 1000, 0) && !nr_cfo_crc_counts(999, 1000, 0), "the last pre-loss slot and earlier in-flight jobs must not count (strict)");
+  CHECK(nr_cfo_crc_counts(0, -1, 0) && nr_cfo_crc_counts(5000, -1, 0), "first lock of a cell (producer slot still -1): every later TB verifies it");
   CHECK(!nr_cfo_crc_counts(5000, 1000, 1), "a rescue (decodable at some FO) must not count");
-  CHECK(!nr_cfo_crc_counts(5000, -1, 0), "no lock slot yet");
   nr_cfo_verify_t v = {0};
   int dropped;
   /* first lock at total 248 (radio then at 248), nothing verified yet: no prior */
   nr_cfo_verify_record_lock(&v, 248, 923);
   dropped = nr_cfo_verify_select_prior(&v, 0, 0, 248);
   CHECK(!v.prior_valid && !dropped, "unverified first lock is not a prior");
+  /* A,A,B,A: a lock of another PCI breaks the streak (3 unverified locks of the PRIOR's PCI in a row drop it) */
+  {
+    nr_cfo_verify_t w = {0};
+    nr_cfo_verify_record_lock(&w, 100, 923);
+    nr_cfo_verify_select_prior(&w, 4, 0, 100);
+    const int pcis[4] = {923, 923, 415, 923};
+    for (int i = 0; i < 4; i++) {
+      nr_cfo_verify_record_lock(&w, 100, pcis[i]);
+      nr_cfo_verify_select_prior(&w, 0, 0, 100);
+    }
+    CHECK(w.prior_valid, "a PCI change must reset the unverified streak (streak %d)", w.unverified_streak);
+  }
   /* verified lock: promoted; prior in estimate units = total - radio tuning */
   nr_cfo_verify_record_lock(&v, 248, 923);
   nr_cfo_verify_select_prior(&v, 7, 0, 248);
@@ -571,7 +583,7 @@ static void dmrs_metric(void)
       }
     }
     int bi = -1;
-    nr_pbch_dmrs_metrics(&fp, nid, SSB_SC, F, &e[c], &mu[c], &bi);
+    nr_pbch_dmrs_metrics(&fp, nid, 1, SSB_SC, F, &e[c], &mu[c], &bi);
     printf("  dmrs metric f=%.0f: best %.3g mu0 %.3g idx %d\n", f, e[c], mu[c], bi);
     if (c == 0)
       CHECK(bi == idx, "best index %d, expected %d", bi, idx);

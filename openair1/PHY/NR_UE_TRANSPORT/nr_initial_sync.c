@@ -74,38 +74,59 @@ static int ssb_sort(const void *a, const void *b)
   return ((NR_UE_SSB *)b)->metric - ((NR_UE_SSB *)a)->metric;
 }
 
-/* nr_pbch_dmrs_metrics: PBCH DM-RS correlation energy (coherent over the 3 PBCH symbols, so a residual CFO costs it) of every SSB-index hypothesis; *best = the largest,
- * *mu0 = mean of the others (wrong indices: the noise-only distribution of the energy, independent of the CFO), *best_idx = the winner's index (n_hf * N_L + i_ssb). */
+/* pbch_dmrs_scan: PBCH DM-RS correlation energy (coherent over the three PBCH symbols, so a residual CFO costs it) of every SSB-index hypothesis; the single place that computes it.
+ * The PBCH DM-RS sits in the SSB symbols 1, 2 and 3 (TS 38.211 7.4.3.1: 0 PSS, 1 PBCH, 2 PBCH + SSS, 3 PBCH), i.e. pbch_initial_symbol .. +2 with pbch_initial_symbol = 1. */
+static void pbch_dmrs_scan(const NR_DL_FRAME_PARMS *frame_parms,
+                           int Nid_cell,
+                           int pbch_initial_symbol,
+                           int ssb_start_subcarrier,
+                           const c16_t rxdataF[NR_N_SYMBOLS_SSB][frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size],
+                           NR_UE_SSB *out)
+{
+  const int N_L = (frame_parms->Lmax == 4) ? 4 : 8;
+  const int N_hf = (frame_parms->Lmax == 4) ? 2 : 1;
+  for (int hf = 0; hf < N_hf; hf++)
+    for (int l = 0; l < N_L; l++) {
+      cd_t cumul = {0};
+      for (int i = pbch_initial_symbol; i < pbch_initial_symbol + 3; i++) {
+        c32_t meas = nr_pbch_dmrs_correlation(frame_parms, i, i - pbch_initial_symbol, Nid_cell, ssb_start_subcarrier, nr_gold_pbch(frame_parms->Lmax, Nid_cell, hf, l), rxdataF[i]);
+        csum(cumul, cumul, meas);
+      }
+      *out++ = (NR_UE_SSB){.i_ssb = l, .n_hf = hf, .metric = squaredMod(cumul)};
+    }
+}
+
+/* energy of the best hypothesis and the mean of the others (wrong indices: the noise-only distribution of the energy, independent of the CFO) */
+static void pbch_dmrs_stats(const NR_UE_SSB *h, int n, int N_L, double *best, double *mu0, int *best_idx)
+{
+  double sum = 0, mx = -1;
+  int mi = 0;
+  for (int i = 0; i < n; i++) {
+    sum += h[i].metric;
+    if (h[i].metric > mx) {
+      mx = h[i].metric;
+      mi = (int)(h[i].n_hf * N_L + h[i].i_ssb);
+    }
+  }
+  *best = mx;
+  *mu0 = n > 1 ? (sum - mx) / (n - 1) : 0;
+  if (best_idx)
+    *best_idx = mi;
+}
+
 void nr_pbch_dmrs_metrics(const NR_DL_FRAME_PARMS *frame_parms,
                           int Nid_cell,
+                          int pbch_initial_symbol,
                           int ssb_start_subcarrier,
                           const c16_t rxdataF[NR_N_SYMBOLS_SSB][frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size],
                           double *best,
                           double *mu0,
                           int *best_idx)
 {
+  NR_UE_SSB h[16];
+  pbch_dmrs_scan(frame_parms, Nid_cell, pbch_initial_symbol, ssb_start_subcarrier, rxdataF, h);
   const int N_L = (frame_parms->Lmax == 4) ? 4 : 8;
-  const int N_hf = (frame_parms->Lmax == 4) ? 2 : 1;
-  double sum = 0, mx = -1;
-  int mi = 0;
-  for (int hf = 0; hf < N_hf; hf++)
-    for (int l = 0; l < N_L; l++) {
-      cd_t cumul = {0};
-      for (int i = 1; i < 4; i++) {
-        c32_t meas = nr_pbch_dmrs_correlation(frame_parms, i, i - 1, Nid_cell, ssb_start_subcarrier, nr_gold_pbch(frame_parms->Lmax, Nid_cell, hf, l), rxdataF[i]);
-        csum(cumul, cumul, meas);
-      }
-      const double m = squaredMod(cumul);
-      sum += m;
-      if (m > mx) {
-        mx = m;
-        mi = hf * N_L + l;
-      }
-    }
-  *best = mx;
-  *mu0 = N_L * N_hf > 1 ? (sum - mx) / (N_L * N_hf - 1) : 0;
-  if (best_idx)
-    *best_idx = mi;
+  pbch_dmrs_stats(h, N_L * ((frame_parms->Lmax == 4) ? 2 : 1), N_L, best, mu0, best_idx);
 }
 
 static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
@@ -123,29 +144,10 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
   const int N_L = (frame_parms->Lmax == 4) ? 4 : 8;
   const int N_hf = (frame_parms->Lmax == 4) ? 2 : 1;
   NR_UE_SSB best_ssb[N_L * N_hf];
-  NR_UE_SSB *current_ssb = best_ssb;
-  // loops over possible pbch dmrs cases to retrieve best estimated i_ssb (and n_hf for Lmax=4) for multiple ssb detection
-  for (int hf = 0; hf < N_hf; hf++) {
-    for (int l = 0; l < N_L; l++) {
-      // computing correlation between received DMRS symbols and transmitted sequence for current i_ssb and n_hf
-      cd_t cumul = {0};
-      for (int i = pbch_initial_symbol; i < pbch_initial_symbol + 3; i++) {
-        c32_t meas = nr_pbch_dmrs_correlation(frame_parms,
-                                              i,
-                                              i - pbch_initial_symbol,
-                                              Nid_cell,
-                                              ssb_start_subcarrier,
-                                              nr_gold_pbch(frame_parms->Lmax, Nid_cell, hf, l),
-                                              rxdataF[i]);
-        csum(cumul, cumul, meas);
-      }
-      *current_ssb = (NR_UE_SSB){.i_ssb = l, .n_hf = hf, .metric = squaredMod(cumul)};
-      current_ssb++;
-    }
-  }
+  pbch_dmrs_scan(frame_parms, Nid_cell, pbch_initial_symbol, ssb_start_subcarrier, rxdataF, best_ssb);
   qsort(best_ssb, N_L * N_hf, sizeof(NR_UE_SSB), ssb_sort);
   if (dmrs_m && dmrs_mu0)
-    nr_pbch_dmrs_metrics(frame_parms, Nid_cell, ssb_start_subcarrier, rxdataF, dmrs_m, dmrs_mu0, NULL);
+    pbch_dmrs_stats(best_ssb, N_L * N_hf, N_L, dmrs_m, dmrs_mu0, NULL);
 
   const int nb_ant = frame_parms->nb_antennas_rx;
   const int estimateSz = frame_parms->ofdm_symbol_size;

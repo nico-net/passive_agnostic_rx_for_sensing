@@ -1206,10 +1206,10 @@ openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.cuh	37	NN	global	constexpr int	CONST
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_ul.cuh	37	NS	global	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_stage_census.h	35	g_c	global	std::atomic<uint64_t>[NR_GPU_STG_N][6]	PROCESS	G1	mpci audit: aggregate census counters of the GPU staging (atomics, summed over cells)
 openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	32	s_ssb_reject	file_static	nr_ssb_reject_t [converted]	PER_CELL	AUDIT	converted FIX1102 B: rejected SSB beams of the cell
-openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	260	do_time_to_freq::s_fepdiag_acq_left	func_static	int	PROCESS	AUDIT	one-shot diagnostic budgets of the initial sync (log only)
-openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	478	nr_scan_ssb::s_rms_done	func_static	volatile int	PROCESS	AUDIT	one-shot diagnostic budgets of the initial sync (log only)
-openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	663	nr_initial_sync_capture_start	tls	int64_t	TLS	AUDIT	existing thread-local
-openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	737	nr_initial_sync_impl::s_pinned_fail	func_static	int [converted]	PER_CELL	AUDIT	converted (fix1031)
+openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	314	do_time_to_freq::s_fepdiag_acq_left	func_static	int	PROCESS	AUDIT	one-shot diagnostic budgets of the initial sync (log only)
+openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	592	nr_scan_ssb::s_rms_done	func_static	volatile int	PROCESS	AUDIT	one-shot diagnostic budgets of the initial sync (log only)
+openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	790	nr_initial_sync_capture_start	tls	int64_t	TLS	AUDIT	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	864	nr_initial_sync_impl::s_pinned_fail	func_static	int [converted]	PER_CELL	AUDIT	converted (fix1031)
 openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	44	g_cfo_taken	file_static	_Atomic uint64_t [converted]	PER_CELL	AUDIT	converted: NR_CELL_STATIC (CFO re-sync alias / lock verification)
 openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	46	g_cfo_kept	file_static	_Atomic uint64_t [converted]	PER_CELL	AUDIT	converted: NR_CELL_STATIC (CFO re-sync alias / lock verification)
 openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c	48	g_cfo_unresolved	file_static	_Atomic uint64_t [converted]	PER_CELL	AUDIT	converted: NR_CELL_STATIC (CFO re-sync alias / lock verification)
@@ -2680,8 +2680,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	430	g_cb_ok	file_static	_A
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	432	g_cb_tried	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	434	g_cb_total	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	436	g_crc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	440	g_lock_slot	file_static	_Atomic long [converted]	PER_CELL	AUDIT	converted: NR_CELL_STATIC (CFO re-sync alias / lock verification)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	442	g_lock_crc_ok	file_static	_Atomic uint64_t [converted]	PER_CELL	AUDIT	converted: NR_CELL_STATIC (CFO re-sync alias / lock verification)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	440	g_lock_slot	file_static	long [converted]	PER_CELL	AUDIT	converted: NR_CELL_STATIC (CFO re-sync alias / lock verification)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	442	g_lock_crc_ok	file_static	uint64_t [converted]	PER_CELL	AUDIT	converted: NR_CELL_STATIC (CFO re-sync alias / lock verification)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	445	s_lock_verify_mutex	file_static	pthread_mutex_t	PROCESS	AUDIT	guards the lock slot/count pair of every cell (touched at a lock and at a CRC-OK TB)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	457	g_cs_dmrs	file_static	g_cs_dmrs_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	459	g_cs_dmrs_mu	file_static	pthread_mutex_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	515	g_dl_dmrs_id	file_static	g_dl_dmrs_id_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC

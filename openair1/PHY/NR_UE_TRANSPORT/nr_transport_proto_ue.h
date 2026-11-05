@@ -211,7 +211,7 @@ bool nr_search_ssb_select(nr_ssb_search_params_t *params, int idx);
 /* decode the PBCH of hypothesis hyp (0 measured, 1 alias) from params->rxdataF; returns the CRC and the DM-RS correlation energies (nr_resync_hyp_t) */
 typedef bool (*nr_resync_decode_fn)(void *ctx, int hyp, double *m, double *mu0);
 int nr_resync_cfo_reeval(nr_ssb_search_params_t *p, int est_hz, int prior_hz, int sss_hz, nr_resync_decode_fn decode, void *ctx);
-void nr_pbch_dmrs_metrics(const NR_DL_FRAME_PARMS *fp, int Nid_cell, int ssb_start_subcarrier, const c16_t rxdataF[4][fp->nb_antennas_rx][fp->ofdm_symbol_size], double *best, double *mu0, int *best_idx);
+void nr_pbch_dmrs_metrics(const NR_DL_FRAME_PARMS *fp, int Nid_cell, int pbch_initial_symbol, int ssb_start_subcarrier, const c16_t rxdataF[4][fp->nb_antennas_rx][fp->ofdm_symbol_size], double *best, double *mu0, int *best_idx);
 void nr_resync_cfo_stats(uint64_t *taken, uint64_t *kept, uint64_t *unresolved); /* the calling cell's re-sync alias census */
 
 /*!

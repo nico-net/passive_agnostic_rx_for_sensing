@@ -61,7 +61,7 @@ typedef struct {
 } nr_cfo_verify_t;
 static inline int nr_cfo_crc_counts(long job_slot, long lock_slot, int rescued)
 {
-  return !rescued && lock_slot >= 0 && job_slot >= lock_slot; /* jobs enqueued before the lock, and rescues (decodable at SOME FO), prove nothing about it */
+  return !rescued && job_slot > lock_slot; /* strictly after the lock: the slot at the lock is the last one produced before the loss; jobs enqueued before it and rescues (decodable at SOME FO) prove nothing. The first lock of a cell has lock_slot -1 (producer clock not started), every produced slot (>= 0) is after it */
 }
 void nr_cfo_verify_record_lock(nr_cfo_verify_t *v, int total_hz, int pci);
 /* At a UE_synch entry: evaluates the previous lock once (lock_crc_ok = counted TBs since it), updates prior_est_hz for the radio tuning now in force. Returns 1 when the prior was dropped. */

@@ -58,7 +58,9 @@ int nr_cfo_verify_select_prior(nr_cfo_verify_t *v, unsigned long long lock_crc_o
       v->prior_total = v->last_total;
       v->prior_pci = v->last_pci;
       v->unverified_streak = 0;
-    } else if (v->prior_valid && v->prior_pci == v->last_pci && ++v->unverified_streak >= NR_CFO_UNVERIFIED_MAX) {
+    } else if (v->prior_valid && v->prior_pci != v->last_pci) {
+      v->unverified_streak = 0; /* another cell's lock says nothing about this prior */
+    } else if (v->prior_valid && ++v->unverified_streak >= NR_CFO_UNVERIFIED_MAX) {
       v->prior_valid = 0;
       v->unverified_streak = 0;
       dropped = 1;
