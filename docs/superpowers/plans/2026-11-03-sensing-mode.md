@@ -425,6 +425,43 @@ past its operator checkpoint. From it this plan uses:
   unchanged.
 - [ ] **Step 5: Commit** with the message `feat(sense): scheduler thread, pre-work unit gates, violation routing, sensing metrics`.
 
+### Task S9: Adaptive continuity floor (operator 2026-11-05)
+
+**Files:**
+- Modify:
+  - nr_sense_sched.{h,c} (per-cell T_cell state machine);
+  - nr_sense_sched_rt.c (per-cell gap/rate measurement from the CFR records, publish T_cell);
+  - nr_traffic_decode.c (sensing wideband rule uses T_cell of the cell and requires a proven layout);
+  - nr_pdcch_blind_monitor_rt.c (call sites pass layout proof and PRBs; largest-first ordering within one
+    occasion);
+  - nr_isac.cc and nr_isac_mode (cfg keys `sense_cont_target_ms` default 25, `sense_min_prb_floor` default 32);
+  - tools/sense/score_sensing.py (25 ms windows).
+- Test: nr_sense_sched_test.cc, nr_traffic_decode_test.cc, test_score_sensing.py.
+
+**Interfaces:**
+- Produces:
+  - `int nr_sense_cell_floor(int cell);` returns the current T_cell (sense_min_prb when no data);
+  - `bool nr_traffic_decode_wanted_prbs(..., uint16_t est_prbs, bool layout_proven)`.
+- Rules (spec addendum 2026-11-05):
+  - steps 128, 96, 64, 48, floor; step down when p95 gap > target; step up with a 2x rate margin; streak 2,
+    hysteresis as S6;
+  - cross-cell precedence for a PCI in a gap;
+  - legacy and traffic unchanged.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `FloorStepsDownOnGaps`
+  - `FloorStepsUpWithMargin`
+  - `NoFlap`
+  - `UnprovenLayoutNotForceDecoded`
+  - `LargestFirst`
+  - `GapCellGetsPrecedence`
+  - `LegacyTrafficUntouched`
+  - scorer: 25 ms windows
+- [ ] **Step 2: Verify they fail.**
+- [ ] **Step 3: Implement it.**
+- [ ] **Step 4: Run the tests, the build and ctest, and a sensing rfsim.**
+- [ ] **Step 5: Commit.**
+
 ### Task S8: Replay validation, headroom calibration, checkpoint
 
 **Files:**

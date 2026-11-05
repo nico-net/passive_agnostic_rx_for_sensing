@@ -320,10 +320,10 @@ Ranked bandwidth first, then quality (operator):
 | Dimension | Metrics |
 |---|---|
 | Continuity | inter-wideband-valid-CFR gap p50/p95/max, per PCI and aggregate (union of PCIs) |
-| Availability | fraction of 100 ms and 1 s windows with >= 1 valid wideband CFR, per PCI and aggregate |
+| Availability | fraction of 25 ms (operator 2026-11-05; was 100 ms) and 1 s windows with >= 1 valid wideband CFR, per PCI and aggregate |
 | Bandwidth | valid PRBs/s, distribution of `valid_cfr_prbs`, time-frequency coverage (PRB x window occupancy map) |
 | Quality | SNR, pilot residual, reconstruction confidence, valid CFR rate (valid / produced) |
-| Multi-PCI | per-PCI share of valid wideband CFRs; aggregate availability; **rescue fraction** = share of 100 ms windows where no PCI but one had a valid wideband CFR, and the share where each PCI was that one |
+| Multi-PCI | per-PCI share of valid wideband CFRs; aggregate availability; **rescue fraction** = share of 25 ms windows where no PCI but one had a valid wideband CFR, and the share where each PCI was that one |
 | Real-time | lost PDCCH occasions, discovery health (bank state, solved RNTIs, CSI-RS confirmed), queue stalls, deadline misses, CPU/GPU demand per resource, processing latency p50/p99 |
 | Stability | enabled-unit violations, `disabled_skips` (intentional), units enabled over time, overload recovery time (violation to 0 violations), run length without violations |
 
@@ -459,3 +459,20 @@ present; legacy (no `mode` key) unchanged, checked by the existing regression ga
 - Whether the scheduler runs in the control thread or its own thread.
 - Fixture design.
 - The scorer for §6.
+
+## Addendum 2026-11-05 (operator): adaptive continuity (plan S9)
+- **Goal:** keep having data to process, while still preferring big grants.
+- **Continuity target:** a valid CFR in every 25 ms window per PCI (cfg key `sense_cont_target_ms`, default 25).
+- **Per-cell adaptive PRB floor T_cell:**
+  - It starts at `sense_min_prb` (128).
+  - When a cell's p95 gap between valid CFRs of >= T_cell PRBs exceeds the target over a decision window, T_cell
+    steps down: 128, 96, 64, 48, then the floor `sense_min_prb_floor` (default 32).
+  - When the rate of grants >= the next higher step would still meet the target with margin, it steps back up.
+  - It uses the S6 streak and hysteresis, so it does not flap.
+- **"Wideband" keeps its meaning:** valid_cfr_prbs >= sense_min_prb (128). T_cell only selects which grants are
+  decoded and exported for continuity.
+- **Decode priority:**
+  - Grants >= T_cell are decoded for RNTIs with a proven layout, largest first within the budget.
+  - Grants of unproven RNTIs are never force-decoded wide. The solver learns them from its normal probes; wide probes
+    almost never pass [MEASURED OTA 2026-11-05].
+- **Cross-cell:** a PCI in a continuity gap gets precedence for the shared pool over a PCI that meets the target.
