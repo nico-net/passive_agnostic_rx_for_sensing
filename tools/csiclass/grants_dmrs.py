@@ -17,7 +17,7 @@ print("CRC-OK grants with Nl=%d: %d" % (a.nl, len(G)))
 def syms(g): return [i for i in range(14) if (g["dmrs_symb_pos"] >> i) & 1]
 def est(Y, g, delta, mode, scid):
     """returns (h[rb,rx] per RB averaged over DM-RS REs, stat)"""
-    ns = g["abs_slot"] % 20; rb0, nrb = g["start_rb"], g["nb_rb"]; hs = []; st = 0
+    ns = g["abs_slot"] % 20; rb0, nrb = g["start_rb"], g["nb_rb"]; hs = []; h1s = []; st = 0
     for l in syms(g):
         nre = 6 * (rb0 + nrb) + 4
         r = D.dmrs_seq(np.array([g["dmrs_scrambling_id"]]), scid, ns, l, nre)[0]
@@ -31,7 +31,9 @@ def est(Y, g, delta, mode, scid):
         y = Y[l][:, ks]
         z = y * np.conj(rr)[None, :]  # rx x RE
         zz = z.sum(0); q = zz[1:] * np.conj(zz[:-1]); st += abs(q.sum()) / np.maximum(np.abs(q).sum(), 1e-30)
-        hs.append(z.reshape(4, nrb, 6).mean(2).T)  # rb x rx
+        zr = z.reshape(4, nrb, 6); sg = np.array([1, -1, 1, -1, 1, -1])
+        hs.append(zr.mean(2).T); h1s.append((zr * sg).mean(2).T)  # rb x rx ; port 1000 (OCC +,+) and port 1001 (OCC +,-)
+    est.h1 = np.mean(h1s, 0)
     return np.mean(hs, 0), st / len(syms(g))
 # slot index: rx_ts is the sample index of the slot start (+-130 samples), so j = abs_slot - c with c = abs_slot - round((rx_ts - t0)/61440) (constant; verified by TRS phase)
 t0 = L.M.SLOT * 0 + sl.t0
@@ -46,8 +48,8 @@ for g in Gs:
     for delta in (0, 1):
         for mode in ("crb", "alloc"):
             for scid in (0, 1):
-                h, st = est(Yd, g, delta, mode, scid); res.append((st, delta, mode, scid, h))
+                h, st = est(Yd, g, delta, mode, scid); res.append((st, delta, mode, scid, h, est.h1))
     res.sort(key=lambda r: -r[0])
     print("abs", g["abs_slot"], "rnti", g["rnti"], "rb", g["start_rb"], g["nb_rb"], "nl", g["nl"], "best stat %.2f (delta %d %s scid %d) 2nd %.2f" % (res[0][0], res[0][1], res[0][2], res[0][3], res[1][0]))
-    out.append(dict(j=j, abs=g["abs_slot"], rnti=g["rnti"], rb0=g["start_rb"], nrb=g["nb_rb"], stat=res[0][0], stat2=res[1][0], hyp=(res[0][1], res[0][2], res[0][3]), h=res[0][4]))
+    out.append(dict(j=j, abs=g["abs_slot"], rnti=g["rnti"], rb0=g["start_rb"], nrb=g["nb_rb"], stat=res[0][0], stat2=res[1][0], hyp=(res[0][1], res[0][2], res[0][3]), h=res[0][4], h1=res[0][5], nl=g["nl"]))
 import pickle; pickle.dump(out, open(a.out, "wb"))

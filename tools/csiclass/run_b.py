@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(__file__)); import codebook_match as C
 
 ap = argparse.ArgumentParser(); ap.add_argument("h"); ap.add_argument("grants"); ap.add_argument("--j0", type=int, required=True); ap.add_argument("--period", type=int, required=True)
 ap.add_argument("--minrb", type=int, default=16); ap.add_argument("--rnti", type=int, default=-1); ap.add_argument("--minstat", type=float, default=0.8); ap.add_argument("--max", type=int, default=40)
-ap.add_argument("--maxlag", type=int, default=100000)
+ap.add_argument("--maxlag", type=int, default=100000); ap.add_argument("--layer", type=int, default=0)
 a = ap.parse_args()
 Hall = np.load(a.h)["H"]; occ, nrb_all, P, nrx = Hall.shape
 G = [g for g in pickle.load(open(a.grants, "rb")) if g["stat"] >= a.minstat and g["nrb"] >= a.minrb and (a.rnti < 0 or g["rnti"] == a.rnti)][: a.max]
@@ -21,7 +21,7 @@ for gi, g in enumerate(G):
     t = int(round((g["j"] - a.j0) / a.period)); t = min(max(t, 0), occ - 1); lag = g["j"] - (a.j0 + a.period * t)
     if abs(lag) > a.maxlag: continue
     sl = slice(g["rb0"], g["rb0"] + g["nrb"]); H = Hall[t, sl].transpose(0, 2, 1)  # rb rx P
-    he = g["h"]
+    he = g["h"] if a.layer == 0 else g["h1"]
     # (b)
     best = None; allbest = []
     for name, perm in models:
@@ -35,7 +35,7 @@ for gi, g in enumerate(G):
     # shuffled h_eff: another grant of the list with same nrb window (different slot) -> same H, wrong channel
     other = G[(gi + 7) % len(G)]; nrb = g["nrb"]
     if other["nrb"] >= nrb:
-        hs = other["h"][:nrb]; sh = max(float(C.scores(H, hs, np.where(True, np.zeros((1, P)), 0) + 0).max()) if False else 0, 0)
+        hs = (other["h"] if a.layer == 0 else other["h1"])[:nrb]; sh = max(float(C.scores(H, hs, np.where(True, np.zeros((1, P)), 0) + 0).max()) if False else 0, 0)
         shuf = 0.0
         for name, perm in models:
             N1, N2 = name[0], name[1]; O1, O2 = C.O_of(N1, N2); W, lab = C.typeI_rank1(N1, N2, O1, O2); Wp = np.zeros_like(W); Wp[:, perm] = W
@@ -50,7 +50,7 @@ for gi, g in enumerate(G):
             # common scalar per PRG is absorbed by an unknown w; solve w = pinv(A) y; residual relative
             w = np.linalg.lstsq(A, y, rcond=1e-3)[0]; r_.append(np.linalg.norm(A @ w - y) / np.linalg.norm(y))
             if other["nrb"] >= r0 + n:
-                ys = other["h"][r0:r0 + n].reshape(-1); ws = np.linalg.lstsq(A, ys, rcond=1e-3)[0]; r_sh.append(np.linalg.norm(A @ ws - ys) / np.linalg.norm(ys))
+                ys = (other["h"] if a.layer == 0 else other["h1"])[r0:r0 + n].reshape(-1); ws = np.linalg.lstsq(A, ys, rcond=1e-3)[0]; r_sh.append(np.linalg.norm(A @ ws - ys) / np.linalg.norm(ys))
         cres[n] = (float(np.mean(r_)), float(np.mean(r_sh)) if r_sh else float("nan"))
     rows.append(dict(abs=g["abs"], rnti=g["rnti"], nrb=g["nrb"], lag=lag, b1=b1, second=second, null=null, shuf=shuf, c=cres))
     print("abs %d rnti %d nrb %3d lag %+4d | (b) best %.3f %s cw=%s | 2nd %.3f | null(best of %d random) %.3f | shuffled-heff best %.3f | (c) resid(prg2/4/8/16/all) %s vs shuffled %s" % (

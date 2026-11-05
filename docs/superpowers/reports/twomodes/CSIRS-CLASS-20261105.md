@@ -9,7 +9,7 @@ gNB logs and configs were not read. No receiver code was changed.
 
 | cell | (b) Type I codebook match | (c) per-PRG LS | what is missing |
 |---|---|---|---|
-| 923 (TIM) | CSI-RS side ready, DM-RS side NOT run (see 923 section) | **neither**: H is rank 1, 3-6 % of an isotropic W is identifiable | decoded 923 grants (replay never synced / queued), a channel with rank > 1 |
+| 923 (TIM) | **no clear winner**: layer 0 best 0.955 vs random-best 0.934 (ceiling, rank-1 H), layer 1 0.860 vs 0.757, but on-grid beats a half-step-shifted grid in only 1/30 and 5/30 grants | **neither**: H is rank 1, 3-6 % of an isotropic W is identifiable | no Type I quantisation signature; a channel with rank > 1 (more RX antennas or a richer scene) |
 | 415 (Vodafone) | **no evidence**: best 0.38 vs random-best 0.41, 4/21 grants above null (chance); the test does recover a planted codeword | **neither**: PRG is 16 RB, usable rank 6-8 of 16 ports, residual equals the shuffled control | the 16-RB precoder change says subband or reciprocity precoding; no Type I signature |
 | 508 (WindTre) | **neither** | **neither** | no multi-port CSI-RS found (all 1024 IDs x 20 slots tried), almost no traffic |
 
@@ -97,19 +97,27 @@ H comes from the CSI-RS occasion nearest in time (|lag| up to 80 slots = 40 ms f
   A 16-RB PRG gives 64 equations for 16 unknowns but only half of the unknown space is observable with 4 RX. **(c) cannot start.**
 - Rank 2-4 grants (200 of 288) were not tested: the rank-2 codebook builder exists (`codebook_match.typeI_rank2`) but the per-layer DM-RS separation (ports 1000/1001 CDM) was not implemented. Not claimed.
 
-### 923 (TIM)
+### 923 (TIM) [REPLAY raw_pci923_4s_1102_0951, FO -4832 (the FO -4800 attempt did not sync), 100 s of replay, 4 RX]
 
-- The OTA run of the same minute (ab_Apci923_1_095716, different samples) has 244 of 245 CRC-OK grants at Nl = 1, port 0x1 [MEASURED OTA 2026-11-02, labelled separately]: rank 1.
-- (b) was **not run on 923**: the replay of `raw_pci923_4s_1102_0951` with FO -4800 did not synchronise (`SYNC_SCAN detected=0`, 0 grants); the second attempt (FO list -4832, 6900, -4800, 0, -4900) was still queued behind other jobs when this report was written.
-  An offline DM-RS identity scan on the periodic DM-RS of the capture (all N_ID 0..65535 x SCID, 4-6 occasions) found no peak (0.38 vs 0.30), so no grant list could be built without the receiver.
-- (c) from the CSI-RS alone (`ls_feasibility.py` on the 32-port H, 200 occasions): per-element SNR about 6 dB (upper bound on noise), per-RB singular values^2 relative to noise x P: +10.4 / +0.3 / -3.5 / -7.2 dB.
-  **Usable rank is 1 for PRG 2, 4, 8 and 16 RB and 2 over the whole 217 RB; the identifiable fraction of an isotropic 32-dim W is 3-6 %.** One dominant path (66 % of the energy) and a 4-element RX make H(f) nearly constant in direction.
-  W cannot be recovered per PRG on 923 whatever the grant list [MEASURED, 923].
-- (b) on 923 is limited the same way: for a rank-1 H only the scalar v^H w is observable, so Type I codewords are separable only through the frequency profile of v(f)^H w. The control (planted codeword, H one occasion = 20 ms later, 96 RB, 20 dB) recovers it in 3/12 trials only.
+- 182 grants, 148 CRC-OK UE-specific; **Nl = 2 for 135, Nl = 3 for 11, Nl = 1 for 2** (132 of them RNTI 22978); all start on a multiple of 16 RB (RBG 16), MCS 0-8. (The OTA run of the same minute, ab_Apci923_1_095716, had 244 of 245 CRC-OK grants at Nl = 1: other samples, other RNTIs, not merged.)
+- Slot mapping j = abs_slot - 2341; DM-RS re-estimate match 0.91-0.99 (second hypothesis 0.1-0.3). Check against the CSI-RS: abs % 40 == 8 <-> j % 40 == 27, exact.
+- For Nl = 2 the DM-RS comb gives both layers: port 1000 = mean over the RE pairs, port 1001 = alternating-sign mean (OCC [+1 +1] / [+1 -1], channel assumed flat over 4 subcarriers). Both are columns of H W; for a rank-2 Type I W each column is itself a rank-1-form vector
+  ([v; phi v] and [v'; -phi v']), so both are tested against the rank-1 candidate set.
+- (b), per-RB cos^2, 32 ports, 17408 candidates (20 models), 40 grants of 16-217 RB, H from the nearest occasion (|lag| <= 20 slots):
+  layer 0: best **0.955**, random-w best 0.934, other-grant h_eff 0.523 (best > random in 40/40, gap +0.02); layer 1: best **0.860**, random-w best 0.757, other-grant 0.498 (40/40, gap +0.10); free least-squares w 0.979 / 0.935.
+  The 0.52 of the shuffled control against 0.955 shows that the chain is consistent (same cell, same direction in RX space at 20 ms lag), but with a rank-1 H the layer-0 score sits at its ceiling for ANY w.
+  The same winners come back (model (2,8) or (4,4) interleave, l 5-7, m 11-12): beams along the dominant channel direction, which is what any good w would be [INFERRED].
+- Coherent variant (`run_b_coh.py`, one scalar per grant, frequency profile must match; 6 grants of 64-217 RB, layer 0): codebook 0.921 vs random 0.908, codebook above random in 6/6 by 0.01-0.02, the same codeword (7,12,1) wins in 4 of 6; the planted control is recovered 6/6. Margin too small to call.
+- **Quantisation test** (`run_b_grid.py`, decisive for "gNB uses Type I"): best on-grid candidate vs best candidate of the same family shifted half a grid step (and pi/4 in co-phase): on-grid wins in **1 of 30 (layer 0) and 5 of 30 (layer 1)** grants.
+  A Type I gNB would win on-grid systematically; the shifted grid wins instead, i.e. no preference for the Type I grid (the true beam sits between grid points or the port-to-element map differs). **No Type I signature.**
+- (c): the LS residual at 16 RB (0.18-0.35, other-grant control 0.38-0.54) is small only because H is rank 1; `ls_feasibility.py` on the 32-port H: per-element SNR about 6 dB (upper bound on noise), per-RB singular values^2 relative to noise x P: +10.4 / +0.3 / -3.5 / -7.2 dB.
+  **Usable rank is 1 for PRG 2, 4, 8 and 16 RB and 2 over the whole 217 RB; the identifiable fraction of an isotropic 32-dim W is 3-6 %.** One dominant path (66 % of the energy) and 4 closely spaced RX antennas make the direction of H(f) nearly constant.
+  W cannot be recovered per PRG on 923 [MEASURED, 923].
+- PRG granularity: the direction-coherence profile of section 415 is uninformative here (mean 0.956 for layer 0, 0.916 for layer 1, dip at rb mod 16 = 15 of only 0.02-0.03), because with a rank-1 H the direction of h_eff is the channel direction whatever the precoder is.
 
 ## 4. Verdict per cell and what is missing
 
-- **923: neither (c); (b) open.** (c) is excluded by the rank-1 channel. (b) needs decoded 923 grants: re-run `tools/csiclass/replay_sense.sh` with a working FO for the 0951 capture (the S10 recipe used FO -4836 on a different tile; -4800 fails on this capture), then `grants_dmrs.py` with `--nl 1`, `run_b.py` against `H923_r16`. Expect low power (rank 1).
+- **923: (c) neither, (b) no clear winner.** (c) is excluded by the rank-1 channel. (b): layer-wise scores beat random vectors only along the dominant channel direction, and the quantisation test (on-grid vs half-step grid) shows no Type I preference. What would settle it: a rank > 1 channel (the same cell from a position with scatterers, or more/wider-spaced RX antennas), or the port-to-element map of the gNB.
 - **415: neither.** Precoder granularity is 16 RB (measured), the CSI-RS is class-A-like but weakly structured and no Type I signature exists in 21 CRC-OK grants with a test that recovers a planted codeword; with 4 RX only about half of a 16-port W is observable per 16-RB PRG.
   The 16-RB change plus Nl up to 4 in a TDD cell point to subband or SRS-reciprocity precoding rather than Type I PMI [INFERRED]. Missing: rank 2-4 evidence (layer separation of the DM-RS), the cell's own 16-port element order, UL SRS to test reciprocity.
 - **508: neither.** No multi-port CSI-RS found, almost no traffic.
@@ -119,12 +127,12 @@ H comes from the CSI-RS occasion nearest in time (|lag| up to 80 slots = 40 ms f
 ## 5. Files
 
 `tools/csiclass/`: `map_coh.py` (blind map), `csilib.py` (slotter, despread), `extract_h.py` (port channels), `class_test.py`, `stability.py` (class A/B), `ls_feasibility.py` (c), `codebook_match.py` (Type I rank 1/2, self-test 10/10),
-`grants_dmrs.py`, `run_b.py`, `power_check.py`, `prg_profile.py`, `dmrs_scan.py`, `replay_sense.sh`. Scratch (not committed): `.superpowers/tmp/` (H*.npz, coherence maps, replay outputs `rep_p415`).
+`grants_dmrs.py`, `run_b.py`, `run_b_coh.py`, `run_b_grid.py`, `power_check.py`, `prg_profile.py`, `dmrs_scan.py`, `replay_sense.sh`. Scratch (not committed): `.superpowers/tmp/` (H*.npz, coherence maps, replay outputs `rep_p415`).
 Rerun order for a capture: `map_coh.py` -> look at the map -> `extract_h.py --id --ns --j0 --period --symbols --kbars` -> `class_test.py`, `ls_feasibility.py`; replay -> `grants_dmrs.py` -> `run_b.py`, `prg_profile.py`.
 
 ## 6. Concerns
 
 - 415 resource row/CDM type (16-port cdm2 vs cdm4) and element order are not determined; the 415 class and (b) results depend on that guess (the planted-codeword control assumes the same).
 - Channel lag between CSI-RS (period 160 slots) and grants up to 40 ms; the control suggests 415's H is stable over 160 ms, 923's is not (20 ms, noise-limited).
-- 923 DM-RS side is missing (replay did not sync / still queued). Do not read the 923 row of the verdict table as a negative for (b).
+- 923: the replay needed FO -4832 to sync (the -4800 first attempt failed); the 923 channel is rank 1, so (b) there has little power by construction; the planted-codeword control with the 20 ms-old H recovered only 3/12.
 - Evidence is one 4 s capture per cell, one time of day; no OTA low-load data.
