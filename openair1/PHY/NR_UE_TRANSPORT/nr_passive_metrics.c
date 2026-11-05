@@ -44,6 +44,7 @@ __attribute__((weak)) void nr_csirs_disc_get_metrics(nr_csirs_disc_metrics_t *m)
 __attribute__((weak)) void nr_srs_passive_metrics(uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *,uint64_t *);
 __attribute__((weak)) void nr_srs_passive_periodic_metrics(nr_ptrack_counters_t *, uint64_t *);
 __attribute__((weak)) void nr_srs_passive_gate_metrics(uint64_t *, uint64_t *);
+__attribute__((weak)) void nr_srs_passive_gate_hist(uint64_t *, uint64_t *);
 __attribute__((weak)) uint64_t nr_pdcch_blind_inline_drop_epoch(void);
 __attribute__((weak)) uint32_t nr_cfg_epoch_current(void);
 __attribute__((weak)) uint32_t nr_cfg_epoch_identity_gen(void);
@@ -170,6 +171,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
       &m->srs_pregate_skip,&m->srs_backoff_skip,&m->srs_budget_skip,&m->srs_idle_resets);
   if(nr_srs_passive_periodic_metrics) nr_srs_passive_periodic_metrics(&m->periodic[NR_PTRACK_SRS],&m->srs_audits);
   if(nr_srs_passive_gate_metrics) nr_srs_passive_gate_metrics(&m->srs_gate_open_unexplained,&m->srs_gate_open_pusch);
+  if(nr_srs_passive_gate_hist) nr_srs_passive_gate_hist(m->srs_gate_hist,m->srs_gate_det);
   m->pci = nr_cell_idx() == 0 ? atomic_load_explicit(&nr_passive_metrics_pci, memory_order_relaxed)
                                : atomic_load_explicit(&nr_passive_metrics_pci_slot_cells[nr_cell_idx()], memory_order_relaxed);
   const nr_passive_acq_snapshot_t a = nr_passive_acq_snapshot();
@@ -314,6 +316,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     nr_sense_stats_t sense;
     nr_sense_stats(&sense);
     m->sense_recon_skip = sense.recon_skip;
+    memcpy(m->srs_snr_hist, sense.srs_snr_hist, sizeof m->srs_snr_hist);
     for (int source = 0; source < NR_SENSE_SRC_COUNT; ++source) {
       m->sense_cfr_drop += sense.cfr_dropped[source];
       m->sense_cfr_drop_src[source] = sense.cfr_dropped[source];

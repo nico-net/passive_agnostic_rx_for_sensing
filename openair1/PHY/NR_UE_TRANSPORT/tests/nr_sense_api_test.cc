@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -441,5 +442,66 @@ TEST_F(QRing, CostPerRecord)
       nr_sense_close();
     }
     printf("S3_COST %-30s n_re=%6d push legacy=%7.1f us sensing=%7.1f us (delta %+6.1f us) | writer quality %7.1f us/frame\n", sh.name, n, push_us[0], push_us[1], push_us[1]-push_us[0], writer_us[1]);
+  }
+}
+
+/* Defect 2026-11-05 (OTA 923, 40 SRS records, all valid_cfr_prbs 0): an UL CFR in the DL frame carries the transmitter's timing advance as a phase ramp (TA 1606 samples at
+ * N = 4096 is 2.46 rad per subcarrier); the per-PRB constant+slope fit could not follow it (residual ~1 at ANY SNR). Synthetic SRS CFR through the real writer quality path: pilots every
+ * comb-th RE (noise variance nv, the producer's LS scale), the other REs interpolated from the two neighbouring pilots, a 2-tap channel, a common timing ramp, partial bandwidth at first_prb > 0. */
+TEST_F(QRing, SrsQualityWithTimingRamp)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  open(8);
+  const float nv = 1e-3f;
+  uint64_t rng = 88172645463325252ull;
+  auto gauss = [&] { double u = 0; for (int i = 0; i < 12; i++) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; u += (rng >> 11) * (1.0 / 9007199254740992.0); } return float(u - 6); };
+  for (int comb : {2, 4}) for (double snr : {6.0, 12.0, 20.0}) for (double ta : {0.0, 1606.0, -900.0}) {
+    const int first = 20, nprb = 40, nk = nprb * 12, nant = 4;
+    std::vector<uint16_t> kk; std::vector<uint8_t> ll; std::vector<float> v(2 * (size_t)nant * nk);
+    for (int i = 0; i < nk; i++) { kk.push_back(12 * first + i); ll.push_back(12); }
+    for (int a = 0; a < nant; a++) {
+      std::vector<std::complex<float>> h(nk);
+      for (int i = 0; i < nk; i++) { /* pilot REs only; unit-power channel scaled to the SNR */
+        const double th = 2 * M_PI * 3 * i / 4096.0 + 0.9 * a;
+        std::complex<float> h0 = std::complex<float>(1.f, 0.f) + 0.4f * std::complex<float>(cosf(th), sinf(th));
+        h[i] = h0 * float(std::sqrt(nv * std::pow(10.0, snr / 10.0) / std::norm(h0)));
+      }
+      std::vector<std::complex<float>> e(nk);
+      for (int i = 0; i < nk; i++) e[i] = ((i - 1) % comb == 0) ? h[i] + std::sqrt(nv / 2) * std::complex<float>(gauss(), gauss()) : 0.f;
+      for (int i = 0; i < nk; i++) {
+        std::complex<float> x;
+        if ((i - 1) % comb == 0) x = e[i];
+        else { int a0 = i - ((i - 1) % comb + comb) % comb, a1 = a0 + comb; if (a1 >= nk) a1 = a0; x = 0.5f * (e[a0] + e[a1]); }
+        const double ph = 2 * M_PI * ta * (12 * first + i) / 4096.0;
+        x *= std::complex<float>(cosf(ph), sinf(ph));
+        v[2 * ((size_t)a * nk + i)] = x.real(); v[2 * ((size_t)a * nk + i) + 1] = x.imag();
+      }
+    }
+    nr_sense_quality_t q;
+    const uint64_t id = nr_sense_push_cfr(NR_SENSE_SRC_SRS, nant, v.data(), nk, nk, kk.data(), ll.data(), 7, 0.857f, nv, 0, 0, nullptr);
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(wait_q(id, &q));
+    SCOPED_TRACE(testing::Message() << "comb " << comb << " snr " << snr << " ta " << ta);
+    EXPECT_EQ(q.first_prb, first);
+    EXPECT_EQ(q.allocated_prbs, nprb);
+    if (snr >= 12) EXPECT_EQ(q.valid_cfr_prbs, nprb);
+    else EXPECT_GE(q.valid_cfr_prbs, nprb * 9 / 10) << "6 dB is 3 dB above the per-PRB threshold: a few PRBs fluctuate under it";
+    EXPECT_NEAR(q.snr_db_p50, snr, 2.5) << "measured SNR follows the injected one (interpolated REs average two pilots' noise: a small positive bias)";
+  }
+  /* no evidence, no valid PRB: a noise-only record (same noise, no channel) and a 0 dB one are not valid */
+  for (double snr : {-100.0, 0.0}) {
+    const int nk = 480, nant = 4; std::vector<uint16_t> kk; std::vector<uint8_t> ll; std::vector<float> v(2 * (size_t)nant * nk);
+    for (int i = 0; i < nk; i++) { kk.push_back(240 + i); ll.push_back(12); }
+    for (int a = 0; a < nant; a++) for (int i = 0; i < nk; i++) {
+      const float s = float(std::sqrt(nv * std::pow(10.0, snr / 10.0)));
+      const double ph = 2 * M_PI * 1606.0 * (240 + i) / 4096.0;
+      std::complex<float> x = std::complex<float>(s, 0.f) + std::sqrt(nv / 2) * std::complex<float>(gauss(), gauss());
+      x *= std::complex<float>(cosf(ph), sinf(ph));
+      v[2 * ((size_t)a * nk + i)] = x.real(); v[2 * ((size_t)a * nk + i) + 1] = x.imag();
+    }
+    nr_sense_quality_t q;
+    const uint64_t id = nr_sense_push_cfr(NR_SENSE_SRC_SRS, nant, v.data(), nk, nk, kk.data(), ll.data(), 8, 0.857f, nv, 0, 0, nullptr);
+    ASSERT_TRUE(wait_q(id, &q));
+    EXPECT_EQ(q.valid_cfr_prbs, 0) << "snr " << snr;
   }
 }

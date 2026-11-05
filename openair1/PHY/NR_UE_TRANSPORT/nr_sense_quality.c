@@ -106,6 +106,30 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
   }
   q->estimated_usable_prbs = q->allocated_prbs; /* shortcut: usable = allocated until producers report rate-matched PRBs */
 
+  /* UL record expressed in the DL frame (nr_sense_ul_to_dl): H carries the transmitter's timing advance as a phase ramp of up to ~pi per subcarrier, which a per-PRB
+   * constant+slope fit in the complex domain cannot follow (residual ~1 whatever the SNR). The ramp is one common delay: its per-subcarrier phase step is the argument of the
+   * lag-1 correlation of the record's adjacent REs (same symbol, summed over antennas and REs: independent of the antenna phases, unbiased by noise). Inside a PRB the fit sees
+   * H derotated by that step; powers and the SNR are untouched, and a PRB without signal still fails the SNR test. */
+  float tw_r[12], tw_i[12];
+  for (int x = 0; x < 12; x++)
+    tw_r[x] = 1.f, tw_i[x] = 0.f;
+  if (flags & NR_SENSE_Q_UL_DELAY) {
+    double cr = 0, ci = 0;
+    for (int a = 0; a < n_ant; a++) {
+      const float *h = iq + 2 * (size_t)a * ant_stride;
+      for (int i = 0; i + 1 < n_re; i++) {
+        if (k_abs[i + 1] != k_abs[i] + 1 || l_sym[i + 1] != l_sym[i])
+          continue;
+        cr += (double)h[2 * i + 2] * h[2 * i] + (double)h[2 * i + 3] * h[2 * i + 1];
+        ci += (double)h[2 * i + 3] * h[2 * i] - (double)h[2 * i + 2] * h[2 * i + 1];
+      }
+    }
+    if (cr != 0 || ci != 0) {
+      const double phi = atan2(ci, cr);
+      for (int x = 0; x < 12; x++)
+        tw_r[x] = (float)cos(phi * (x - 5.5)), tw_i[x] = (float)-sin(phi * (x - 5.5));
+    }
+  }
   double pwr[NR_SENSE_MAX_PRB] = {0}, sse[NR_SENSE_MAX_PRB] = {0}, sig[NR_SENSE_MAX_PRB] = {0};
   for (int a = 0; a < n_ant; a++) {
     double n[NR_SENSE_MAX_PRB] = {0}, sx[NR_SENSE_MAX_PRB] = {0}, sxx[NR_SENSE_MAX_PRB] = {0};
@@ -120,6 +144,10 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
       pwr[p] += e;
       if (l_sym[i] != best[p])
         continue;
+      const int kx = k_abs[i] % 12;
+      const double dr = hr * tw_r[kx] - hi * tw_i[kx];
+      hi = hr * tw_i[kx] + hi * tw_r[kx];
+      hr = dr;
       double x = (k_abs[i] % 12) - 5.5;
       n[p]++, sx[p] += x, sxx[p] += x * x, shr[p] += hr, shi[p] += hi;
       sxhr[p] += x * hr, sxhi[p] += x * hi, shh[p] += e;

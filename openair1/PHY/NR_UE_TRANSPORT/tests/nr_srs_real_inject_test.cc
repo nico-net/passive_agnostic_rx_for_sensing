@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,8 @@ extern "C" {
 #include "nr_srs_blind.h"
 #include "nr_sense_api.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
+#include "nr_sense_unit.h"
 void srs_test_init(void);
 bool srs_test_generate(const nr_srs_grid_t *, const nr_srs_candidate_t *, int16_t *);
 int __wrap_nr_isac_source_enabled(int source) { return source == NR_ISAC_SRC_SRS; }
@@ -111,11 +114,21 @@ struct Bed {
 };
 
 struct Cfg { const char *name; int comb, comb_off, start_symbol, n_symbols, start_rb, nb_rb, group, cs, period, slot; };
-struct Out { unsigned records, confirmed; double snr_db; nr_ptrack_counters_t pc; uint64_t dropped, gate_unexpl, gate_pusch, budget; double cpu_ms; };
+struct Out { unsigned records, confirmed; double snr_db; std::vector<int> vprb; std::vector<double> p50; nr_ptrack_counters_t pc; uint64_t dropped, gate_unexpl, gate_pusch, budget; double cpu_ms; };
 
 /* noise (mean |FFT bin|^2 per antenna) of the capture in bins [k0,k0+n) measured on `count` uplink symbols of slots 8/9 */
 double capture_noise(const Capture &cap, int k0, int n_bins, int count)
 {
+  if (g_white) { /* the white ring below (std 18 per component) in the same FFT convention */
+    c16_t body[N] __attribute__((aligned(32))), spec[N] __attribute__((aligned(32)));
+    double acc = 0; int used = 0;
+    for (int p = 0; p < 8; p++) {
+      for (int i = 0; i < N; i++) body[i] = c16_t{(int16_t)lrint(g_rng.next() * 18), (int16_t)lrint(g_rng.next() * 18)};
+      dft(get_dft(N), (int16_t *)body, (int16_t *)spec, 1);
+      for (int k = 0; k < n_bins; k++) { const c16_t &v = spec[(k0 + k) % N]; acc += (double)v.r * v.r + (double)v.i * v.i; used++; }
+    }
+    return acc / used;
+  }
   double acc = 0; int used = 0;
   c16_t body[N] __attribute__((aligned(32))), spec[N] __attribute__((aligned(32)));
   for (int p = 0; p < count; p++) {
@@ -141,6 +154,10 @@ Out run(const Capture &cap, const Cfg &c, double snr_db, int stall_us)
   int fd = mkstemp(path); close(fd);
   std::string cfr = std::string(path) + ".cfr";
   nr_sense_cfg_t cfg{path, cfr.c_str(), nullptr, 64, 217 * 12, 256, 4};
+  if (g_white) { /* the writer computes the per-PRB quality only in sensing mode, and a sensing unit is enabled per (cell, rnti) */
+    nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+    nr_sense_unit_set_enabled(0, 0, NR_UNIT_SRS, true);
+  }
   nr_sense_open(&cfg);
   nr_srs_passive_start(&bed.ue);
   nr_srs_candidate_t cand{};
@@ -167,6 +184,8 @@ Out run(const Capture &cap, const Cfg &c, double snr_db, int stall_us)
   const NR_DL_FRAME_PARMS *fp = &bed.ue.frame_parms;
   const int adv = 25600 * fp->samples_per_subframe / (4096 * 480);
   const long frame = fp->samples_per_frame;
+  std::vector<c16_t> wbase[NANT]; /* white ring: generated once, copied per slot */
+  if (g_white) for (int a = 0; a < NANT; a++) { wbase[a].resize(frame); for (auto &v : wbase[a]) v = c16_t{(int16_t)lrint(g_rng.next() * 18), (int16_t)lrint(g_rng.next() * 18)}; }
   uint64_t b_dr, d1, d2, d3, d4, us0;
   nr_srs_passive_metrics(&us0, &b_dr, &d1, &d2, &d3, &d4);
   g_stall_us = stall_us;
@@ -179,11 +198,11 @@ Out run(const Capture &cap, const Cfg &c, double snr_db, int stall_us)
     for (long q = prev - 1; q <= prev + 1; q++) {
       if (q < 0) continue;
       long file0 = g_slot0 + q * SLOT;
-      if ((size_t)(file0 + SLOT) > cap.samples) goto done;
+      if (!g_white && (size_t)(file0 + SLOT) > cap.samples) goto done;
       for (int a = 0; a < NANT; a++)
         for (int i = 0; i < SLOT; i++) {
           long ri = ((q % 20) * SLOT + i) % frame;
-          bed.buf[a][ri] = g_white ? c16_t{(int16_t)lrint(g_rng.next() * 18), (int16_t)lrint(g_rng.next() * 18)}
+          bed.buf[a][ri] = g_white ? wbase[a][ri]
                                     : c16_t{cap.rx[a][2 * (file0 + i)], cap.rx[a][2 * (file0 + i) + 1]};
         }
     }
@@ -213,11 +232,14 @@ done:
   o.dropped = dr - b_dr; o.budget = bu; o.cpu_ms = us1 / 1000.0;
   nr_srs_passive_stop();
   nr_sense_close();
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
   std::ifstream in(path); std::string line;
   while (std::getline(in, line)) {
     if (line.find("\"source\":\"srs\"") == std::string::npos) continue;
     o.records++;
     if (line.find("\"confirmed\":true") != std::string::npos) o.confirmed++;
+    auto num = [&](const char *key, double dflt) { size_t i = line.find(key); if (i == std::string::npos) return dflt; i += strlen(key); return line.compare(i, 4, "null") ? atof(line.c_str() + i) : dflt; };
+    o.vprb.push_back((int)num("\"valid_cfr_prbs\":", -1)); o.p50.push_back(num("\"snr_db_p50\":", NAN));
   }
   unlink(path); unlink(cfr.c_str());
   return o;
@@ -228,7 +250,7 @@ class RealInject : public testing::Test {
  protected:
   static Capture cap;
   static bool ok;
-  static void SetUpTestSuite() { srs_test_init(); ok = !g_capture.empty() && g_slot0 >= 0 && cap.open(g_capture); }
+  static void SetUpTestSuite() { srs_test_init(); ok = g_white || (!g_capture.empty() && g_slot0 >= 0 && cap.open(g_capture)); }
 };
 Capture RealInject::cap;
 bool RealInject::ok = false;
@@ -273,6 +295,24 @@ int main(int argc, char **argv)
   int n = (int)rest.size();
   testing::InitGoogleTest(&n, rest.data());
   return RUN_ALL_TESTS();
+}
+
+/* Quality path of the SRS record (white noise, no capture): per-RE SNR in vs the record's valid PRBs and snr_db_p50. */
+TEST_F(RealInject, QualityProbe)
+{
+  if (!g_white) GTEST_SKIP() << "--white only";
+  const Cfg cfgs[] = {{"comb4 216RB 1sym p20", 4, 3, 12, 1, 0, 216, 23, 5, 20, 9}, {"comb2 96RB 2sym p20", 2, 0, 12, 2, 20, 96, 17, 3, 20, 9}};
+  for (const Cfg &c : cfgs) for (double snr : {0.0, 10.0, 20.0}) {
+    Out o = run(cap, c, snr, 0);
+    std::vector<int> v = o.vprb; std::sort(v.begin(), v.end());
+    printf("Q %s snr %+.0f: records %zu valid_prbs median %d ; p50 first %.2f\n", c.name, snr, v.size(), v.empty() ? -9 : v[v.size() / 2], o.p50.empty() ? NAN : o.p50[0]);
+    if (snr >= 10) { /* whole chain (detect, estimate, export, writer quality): the record carries the SNR it was injected at */
+      ASSERT_GE(v.size(), 10u);
+      EXPECT_EQ(v[v.size() / 2], c.nb_rb) << c.name << " " << snr;
+      std::vector<double> p = o.p50; std::sort(p.begin(), p.end());
+      EXPECT_NEAR(p[p.size() / 2], snr, 3.0) << c.name << " " << snr;
+    }
+  }
 }
 
 /* The capture alone (no SRS): the real uplink traffic of the cell must neither open the gate nor starve the queue. */

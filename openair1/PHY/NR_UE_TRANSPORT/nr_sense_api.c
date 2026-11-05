@@ -209,7 +209,7 @@ static void frame_quality(const uint8_t *p, nr_sense_quality_t *q, bool *ok)
   const uint16_t *k=(const uint16_t *)(p+FRAME_HEADER);
   const uint8_t *l=p+FRAME_HEADER+2*(size_t)keep;
   const float *iq=(const float *)(p+((FRAME_HEADER+3*(size_t)keep+3)&~(size_t)3));
-  nr_sense_quality_compute_ex(n_ant,iq,(int)keep,(int)keep,k,l,noise,p[16]==NR_SENSE_SRC_CSIRS?NR_SENSE_Q_SPARSE:0u,q);
+  nr_sense_quality_compute_ex(n_ant,iq,(int)keep,(int)keep,k,l,noise,p[16]==NR_SENSE_SRC_CSIRS?NR_SENSE_Q_SPARSE:p[16]==NR_SENSE_SRC_SRS?NR_SENSE_Q_UL_DELAY:0u,q);
   *ok=true;
 #else
   (void)p; (void)q; *ok=false;
@@ -283,6 +283,11 @@ static void *run_writer(void *arg)
         if (job->meta.q_valid) { /* per-unit view of the record (sensing mode only: the call is a no-op otherwise) */
           const int us=nr_sense_unit_of_src(job->src);
           if (us>=0) nr_sense_unit_cfr((nr_unit_src_t)us,(uint16_t)job->meta.rnti,job->meta.q.valid_cfr_prbs,job->meta.q.snr_db_p50,nr_sense_now_ns());
+        }
+        if (job->src==NR_SENSE_SRC_SRS && job->meta.q_valid) { /* diagnostic: SRS records by measured SNR */
+          const nr_sense_quality_t *sq=&job->meta.q; const float p=sq->snr_db_p50;
+          const int b=!sq->valid_cfr_prbs || !(p==p) ? 0 : p<6?1:p<10?2:p<15?3:p<20?4:p<30?5:6;
+          pthread_mutex_lock(&mu); stats.srs_snr_hist[job->meta.srs_confirmed?1:0][b]++; pthread_mutex_unlock(&mu);
         }
         length=nr_sense_rs_to_json(job->src,&job->meta,job->frame_id,line,RECORD_BYTES-1);
         if (length>0) { line[length]='\n'; record_lengths[at]=(uint32_t)length+1; }

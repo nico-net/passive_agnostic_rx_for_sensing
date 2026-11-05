@@ -232,6 +232,17 @@ int nr_passive_metrics_to_json(const nr_passive_metrics_t *m, char *buf, size_t 
                   tr->e3_scored, tr->e3_hyps, tr->e3_ns, tr->e3_phys_solved, tr->e3_fam_accept, tr->e3_fam_tried, tr->e3_reopen_score, tr->e3_reopen_e1,
                   tr->e3_deferred, tr->e3_skip, tr->e3_qm_calls, tr->e3_qm_deferred, tr->e3_qm_ns, tr->e3_trunc);
   }
+  if (m->has_sense_sched && t > 0 && (size_t)t < sizeof(tail)) { /* SRS detection vs SNR diagnostic: sensing mode only */
+    t += snprintf(tail + t, sizeof(tail) - (size_t)t, ",\"srs_gate_hist\":[");
+    for (int i = 0; i < 7 && t > 0 && (size_t)t < sizeof(tail); i++) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "%s%" PRIu64, i ? "," : "", m->srs_gate_hist[i]);
+    if (t > 0 && (size_t)t < sizeof(tail)) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "],\"srs_gate_det\":[");
+    for (int i = 0; i < 7 && t > 0 && (size_t)t < sizeof(tail); i++) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "%s%" PRIu64, i ? "," : "", m->srs_gate_det[i]);
+    for (int c = 0; c < 2; c++) {
+      if (t > 0 && (size_t)t < sizeof(tail)) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "],\"srs_snr_hist_%s\":[", c ? "confirmed" : "unconfirmed");
+      for (int i = 0; i < 7 && t > 0 && (size_t)t < sizeof(tail); i++) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "%s%" PRIu64, i ? "," : "", m->srs_snr_hist[c][i]);
+    }
+    if (t > 0 && (size_t)t < sizeof(tail)) t += snprintf(tail + t, sizeof(tail) - (size_t)t, "]");
+  }
   if (m->has_sense_sched && t > 0 && (size_t)t < sizeof(tail))
     t += snprintf(tail + t, sizeof(tail) - (size_t)t,
                   ",\"sense_units_enabled\":%" PRIu64 ",\"sense_violations\":%" PRIu64 ",\"sense_disabled_skips\":%" PRIu64

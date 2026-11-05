@@ -64,6 +64,7 @@ typedef struct {
   nr_srs_idle_t idle;
   bool stop;
   _Atomic uint64_t gate_unexplained, gate_pusch;
+  _Atomic uint64_t gate_bin[NR_SRS_GATE_BINS], gate_det[NR_SRS_GATE_BINS]; /* diagnostic: gate statistic of every evaluated eligible slot / those of the open bins that exported a record */
   bool leased; /* worker thread only: holds the float lease */
   unsigned head, tail, count;
   PHY_VARS_NR_UE *owner;
@@ -188,12 +189,18 @@ static void process_srs(srs_job_t *job)
    * period are all examined; noise and non-comb UL traffic stop here. The old 1-in-interval backoff aliased with the occasions (an SRS is up to 640 slots apart, the interval
    * decayed in tens of slots) and is no longer applied to the gate. */
   bool td_hit=false;
+  int gbin=-1;
   if(blind && !ndue) {
     /* SRS sits in the last 6 symbols (TS 38.211 6.4.1.4.1: l0 in 8..13, already the mask); a comb-2 PUSCH DM-RS is the same signature, so symbols that a known PUSCH grant
      * explains (its DM-RS symbols) are kept out of the gate and a gate that opens only on them is counted apart and does not start a scan. */
     const uint16_t explained=nr_srs_grant_symbols(sr.search,job->meta.abs_slot)&job->mask;
     const uint16_t open_mask=job->mask&~explained;
-    if(open_mask) td_hit=nr_srs_td_comb_gate(N,sr.grid.n_ant,open_mask,(const int16_t *)(job->raw+SRS_MARGIN),win,NULL);
+    if(open_mask) {
+      double gstat=0;
+      td_hit=nr_srs_td_comb_gate(N,sr.grid.n_ant,open_mask,(const int16_t *)(job->raw+SRS_MARGIN),win,&gstat);
+      gbin=nr_srs_gate_bin(gstat);
+      atomic_fetch_add_explicit(&sr.gate_bin[gbin],1,memory_order_relaxed);
+    }
     if(td_hit) atomic_fetch_add(&sr.gate_unexplained,1);
     else if(explained && nr_srs_td_comb_gate(N,sr.grid.n_ant,explained,(const int16_t *)(job->raw+SRS_MARGIN),win,NULL)) atomic_fetch_add(&sr.gate_pusch,1);
     if(!td_hit) {
@@ -313,6 +320,7 @@ static void process_srs(srs_job_t *job)
     }
   }
   srs_budget_checkpoint(&cpu_begin);
+  if(td_hit && nseen) atomic_fetch_add_explicit(&sr.gate_det[gbin],1,memory_order_relaxed);
   if(did_gate && !tracking && !any_comb && !budget_exhausted) {
     sr.idle.pregate_skip++;
     if(scanned && !budget_exhausted) nr_srs_idle_result(&sr.idle,false);
@@ -394,6 +402,7 @@ void nr_srs_passive_start(PHY_VARS_NR_UE *ue)
   atomic_store(&sr.pregate_skip,0);atomic_store(&sr.backoff_skip,0);
   atomic_store(&sr.budget_skip,0);atomic_store(&sr.idle_resets,0);
   sr.leased=false;atomic_store(&sr.gate_unexplained,0);atomic_store(&sr.gate_pusch,0);
+  for(int i=0;i<NR_SRS_GATE_BINS;i++) {atomic_store(&sr.gate_bin[i],0);atomic_store(&sr.gate_det[i],0);}
   atomic_store(&sr.per_predicted,0);atomic_store(&sr.per_hit,0);atomic_store(&sr.per_miss,0);atomic_store(&sr.per_demoted,0);
   atomic_store(&sr.per_confirmed,0);atomic_store(&sr.per_audit_hit,0);atomic_store(&sr.per_audits,0);sr.audit_tick=sr.audits=sr.scan_rot=0;
   sr.slots_per_subframe=fp->slots_per_subframe;
@@ -527,6 +536,10 @@ void nr_srs_passive_metrics(uint64_t *us,uint64_t *dropped,uint64_t *pregate,uin
   *us=atomic_load(&sr.elapsed_us);*dropped=atomic_load(&sr.dropped);
   *pregate=atomic_load(&sr.pregate_skip);*backoff=atomic_load(&sr.backoff_skip);
   *budget=atomic_load(&sr.budget_skip);*resets=atomic_load(&sr.idle_resets);
+}
+void nr_srs_passive_gate_hist(uint64_t bin[NR_SRS_GATE_BINS],uint64_t det[NR_SRS_GATE_BINS])
+{
+  for(int i=0;i<NR_SRS_GATE_BINS;i++) {bin[i]=atomic_load(&sr.gate_bin[i]);det[i]=atomic_load(&sr.gate_det[i]);}
 }
 void nr_srs_passive_gate_metrics(uint64_t *unexplained,uint64_t *pusch)
 {

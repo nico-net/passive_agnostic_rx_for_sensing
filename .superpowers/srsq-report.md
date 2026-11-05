@@ -1,0 +1,12 @@
+# srsq report (twomodes/srsq, DGX aarch64)
+Root cause [MEASURED DGX, white-noise injection through the real SRS chain + writer]: nr_sense_quality.c per-PRB fit (const+slope, complex domain) cannot follow the timing-advance phase ramp
+that nr_sense_ul_to_dl leaves in SRS H (TA ~1606 samples at N=4096 = 2.46 rad/subcarrier): residual ratio 0.98 at ANY SNR (SNR itself came out right, 20.7 dB at 20 dB injected), so r<=0.25 failed for every PRB.
+noise_var scale was fine (not the CSI-RS problem). snr_db null is by design (producer DM-RS SNR, never set for SRS); the SNR fields are snr_db_p50/p10.
+Fix: NR_SENSE_Q_UL_DELAY flag (SRS only): common phase step = arg of lag-1 RE correlation of the record, fit sees H derotated inside each PRB; power/SNR/thresholds untouched.
+Tests: QRing.SrsQualityWithTimingRamp (comb 2/4, 6/12/20 dB, TA 0/1606/-900, first_prb 20, 40 PRB, noise-only and 0 dB invalid); mutation (flag removed) -> 24 failures. RealInject.QualityProbe (whole chain, white): valid 216/96 PRB, p50 10.6/20.8, 10.1/20.5 dB at 10/20 dB injected; 0 dB invalid.
+Diagnostics (sensing-mode metrics JSON only): srs_gate_hist/srs_gate_det (gate statistic bins [0,3)[3,6)[6,9] skipped, (9,12](12,18](18,30]>30 opened; det = slots with >=1 exported record), srs_snr_hist_confirmed/unconfirmed (no-valid,[3,6),[6,10),[10,15),[15,20),[20,30),>=30).
+Counters: sense_prod_count_srs counts worker jobs (85207 in OTA run), sense_cfr_exported_srs counts records (40). "sequence hopping v=1 unsupported" is a single start-up warning (2 lines in that run.log); per-occasion hopping is not counted (a hopping occasion would simply be an opened-gate/no-detection slot).
+Replay raw_pci923_4s_1102_0951 (sensing mode, FROZEN env, speed 0.25): 1 SRS record, valid_cfr_prbs 7 of 8 PRB, snr_db_p50 4.46, gate_hist [222,44,3,2,4,0,0] det [0,0,0,0,1,0,0], 6 opens. n=1: no SNR-dependence conclusion possible.
+ctest: 397 run, 19 fail: known set + test_iq_chan_soak5, test_nr_gpu_pass_geo, test_nr_gpu_pass (GPU/soak under shared load, not examined on baseline) ; no sense/srs/metrics test fails. static_audit --check rc 0. Frozen gate clean.
+rfsim: no bed produces SRS (s7/s9 cfg list srs but no SRS transmitter); not run. Legacy rfsim gate not run (no code outside sensing gating; metrics JSON additions are inside has_sense_sched).
+Concern: pusch_dmrs records in the same OTA run are also 4000/4000 valid_cfr_prbs=0 (likely same TA ramp; not touched).

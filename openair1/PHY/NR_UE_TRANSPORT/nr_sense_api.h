@@ -70,6 +70,7 @@ typedef struct {
   uint64_t dci_generated, dci_persisted, dci_lost; /* traffic-mode DCI records: reached the ring / written / dropped (ring full, no sink, format or write failure) */
   uint64_t async_queued[NR_SENSE_SRC_COUNT], async_dropped[NR_SENSE_SRC_COUNT]; /* producer work handed to its background worker / shed because the worker was saturated (never run on the decode thread) */
   uint64_t recon_skip; /* data-aided recon shed because the daBg backlog was >= half the pool (recon_conf null, validity unchanged) */
+  uint64_t srs_snr_hist[2][7]; /* SRS records formatted with quality, by confirmed and snr_db_p50 bin: [no valid PRB] [3,6) [6,10) [10,15) [15,20) [20,30) >=30 dB */
   uint64_t q_computed, q_miss; /* sensing mode: frames whose quality the writer computed / RS records formatted without quality because the frame was overwritten, unavailable or never queued */
 } nr_sense_stats_t;
 /* A producer that moves its work off the decode-critical thread reports each hand-off: queued = 1 taken by the worker, 0 = dropped (counted per source, no lock, any thread of the cell). */
