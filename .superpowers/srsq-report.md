@@ -10,3 +10,21 @@ Replay raw_pci923_4s_1102_0951 (sensing mode, FROZEN env, speed 0.25): 1 SRS rec
 ctest: 397 run, 19 fail: known set + test_iq_chan_soak5, test_nr_gpu_pass_geo, test_nr_gpu_pass (GPU/soak under shared load, not examined on baseline) ; no sense/srs/metrics test fails. static_audit --check rc 0. Frozen gate clean.
 rfsim: no bed produces SRS (s7/s9 cfg list srs but no SRS transmitter); not run. Legacy rfsim gate not run (no code outside sensing gating; metrics JSON additions are inside has_sense_sched).
 Concern: pusch_dmrs records in the same OTA run are also 4000/4000 valid_cfr_prbs=0 (likely same TA ramp; not touched).
+
+# Extension (commits 600e2df65e, 670a5df892)
+## PUSCH cause
+OTA smS1S923_1_070731: 25182 pusch_dmrs records, valid_cfr_prbs 0 in all, ta_applied_samples 1600 in 20259 (same ramp: 2.46 rad/subcarrier), producer snr_db max +1.2 dB over 24687 records (median about -12 dB):
+most blind PUSCH grants carry no signal, so the all-invalid there is a mix of the ramp and absent signal; pusch_data was not exported (0 records), PRACH pushes no CFR (frame_id 0), so neither is affected.
+Replay (sensing mode, raw_pci923_tim_12s_tile3, FROZEN env, speed 0.25) pusch_dmrs: parent 649 records, 0 with a valid PRB (0/71639 PRBs); this branch 912 records, 30 with valid PRBs (64/70522 PRBs = 0.09 %, snr_db_p50 median 4.0, p10 3.2, p90 7.0, resid median -18 dB).
+Caveat: most of those grants have producer snr_db -5..-27 dB; the 0.09 % pass rate is of the order of a noise-only false-pass rate, so those PUSCH valid PRBs are NOT evidence of signal. The flag is one condition in nr_sense_api.c frame_quality (revert = drop two terms).
+## Estimator
+Phase step = arg(sum h[i+d] conj h[i]) / d over consecutive REs of a symbol at the record's commonest RE spacing d (1 dense, 2 DM-RS type 1 / SRS comb 2, 4 comb 4); type 2 pairs give d = 1; only used per PRB (12-entry table), so aliasing of the step by 2pi/d does not matter at the present REs.
+Tests (QRing.*, real writer path, nr_sense_api_test.cc): SrsQualityWithTimingRamp; UlSourcesQualityWithTimingRamp (dense, type 1 add_pos 2, type 2 pairs add_pos 1, PUSCH_DMRS and PUSCH_DATA, 0/3/6/12/20 dB, TA 0/1600/-700, first_prb 33); UlPhaseStepUnbiasedAtLowSnr (same noisy record with/without ramp, 0/2/4/6 dB, TA 1600/-1100/300: valid PRBs within 2 of 24 and p50 within 1.5 dB). All pass.
+Mutations: no derotation -> 139 failures; spacing forced to 1 -> 52 failures; PUSCH sources removed from the flag -> 92 failures (UlSources test); SRS flag removed -> 24 failures.
+## Replays (sensing mode, 4 RX, speed 0.25, parent a0a1a4a466 vs this branch)
+raw_pci415_4s_1102_0951: SRS parent 26 records, 0 valid (0/208 PRB); branch 29 records, all valid (231/232 PRB), snr_db_p50 median 16.2 (p10 9.1, p90 18.6), resid_db median -22.8. Gate stat hist (branch) [419,105,31,18,24,1,0], det [0,0,0,12,17,0,0]: slots whose gate opened at (9,12] exported a record in 12 of 18, at (12,18] in 17 of 24 (7 + 7 opened slots without a record: occasions the searcher did not confirm; includes hopping/non-SRS comb signals).
+raw_pci923_4s_1102_0951: SRS parent 1 record 0 valid (0/8); branch 1 record 7/8 valid, p50 5.0 dB. No PUSCH records in either 4 s capture (pusch_try 0); pusch_data none in any replay.
+## Final checks
+ctest -j4 (this tree, 397 tests): 17 fail = known set only (7 uci Not Run, ra0_qam64/256, pusch_ul_disc, nr_td_sim_test, ssb_rate_match_prod, gpu_pass_cells, dft_test, ldpc_cuda_pool_cpu, modulation) plus test_nr_spin_handoff, a standalone pthread timing test that links none of this code and passes 3/3 when run alone; the first full run's extras (iq_chan_soak5, gpu_pass_geo, gpu_pass) passed in the second run (load flakes). Parent not built with tests (a0a1a4a466 ctest not run).
+static_audit --check rc 0; frozen gate clean.
+Legacy byte-identity: all changes are behind nr_isac_mode()==SENSING (quality/histogram in the writer only when q_valid), has_sense_sched (metrics JSON) or are atomics not printed. Verified: legacy-mode replay (no sensing) parent vs branch, ISAC_METRICS key set 282 keys identical, no sensing output files; golden metrics ctests pass. Values are replay timing dependent, so a byte diff of a whole run is not possible; no decode/legacy code path was edited.
