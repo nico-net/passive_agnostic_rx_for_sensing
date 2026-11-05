@@ -124,6 +124,7 @@ void nr_isac_pdsch_data_aided_async_prepare(int cell);
 /// Before the RX fence (queue start): the cell's job pool (8 jobs, TB + snapshot buffers prefaulted), the worker arm and the worker's own scratch (built and prefaulted on the worker). Without it every grant is shed.
 void nr_isac_pdsch_data_aided_async_init(const PHY_VARS_NR_UE *ue);
 /// queued, shed (pool busy / queue full / geometry), finished by the worker, consumer-thread microseconds freed (worker run time of the queued grants minus the consumer's snapshot time): cumulative, this cell
+int nr_isac_pdsch_data_aided_workers(void); /* daBg workers of the calling cell (0 = not running) */
 void nr_isac_pdsch_data_aided_async_counts(uint64_t *queued, uint64_t *dropped, uint64_t *done, uint64_t *saved_us);
 
 /// Submissions refused because the decode's G differed from the tap's RE model (see decode_G above).

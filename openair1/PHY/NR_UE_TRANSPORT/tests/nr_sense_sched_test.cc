@@ -21,7 +21,7 @@ struct H {
     in.min_prb = 128;
     in.now_ns = NOW;
     in.res[NR_RES_POOL].cap_ns = pool;
-    in.res[NR_RES_QUEUE_DL].cap_ns = in.res[NR_RES_QUEUE_UL].cap_ns = in.res[NR_RES_SENSE_RING].cap_ns = 1e9f; /* GPU absent (0) unless a test sets it */
+    in.res[NR_RES_QUEUE_DL].cap_ns = in.res[NR_RES_QUEUE_UL].cap_ns = in.res[NR_RES_SENSE_RING].cap_ns = in.res[NR_RES_DA].cap_ns = 1e9f; /* GPU absent (0) unless a test sets it */
   }
   /* defaults: disabled, with cost history cpu, productive (wb 10 Hz, ratio 0.8, 200 PRBs), valid just now */
   nr_sense_unit_view_t &add(int c, uint16_t rnti, float cpu = 25, nr_unit_src_t s = NR_UNIT_PDSCH_DMRS)
@@ -363,7 +363,7 @@ TEST(Sched, PerCellRingAndQueuesAreNotSharedAcrossCells)
     h.in.cell_res[c][NR_RES_SENSE_RING] = {1000.f, 0.f};
   }
   h.in.cell_res[0][NR_RES_SENSE_RING].base_p99_ns = 1000.f; /* cell 0's ring dropped records: no headroom */
-  h.add(0, 1, 5); h.add(1, 2, 5);
+  h.add(0, 1, 5).ring_p99_ns = 5; h.add(1, 2, 5).ring_p99_ns = 5; /* the writer cost is the ring demand */
   h.steps(3);
   EXPECT_FALSE(h.en(0, 1));
   EXPECT_TRUE(h.en(1, 2));
@@ -407,4 +407,34 @@ TEST(Sched, UnitThatCannotStayOnIsProbedWithBackoffNotEveryFewDecisions)
   }
   EXPECT_GE(enables, 2);   /* it is probed again */
   EXPECT_LE(enables, 5);   /* ... with a growing gap: a fixed ~7-decision cycle would give 11 */
+}
+
+TEST(Sched, DemandGoesToTheResourceTheUnitConsumes)
+{
+  /* a data-aided unit: large daBg CPU (pool + DA), small writer cost (ring). Pool budget 600, ring budget 60, DA budget 240 (cap 400). */
+  H h(1, 1000);
+  h.in.res[NR_RES_SENSE_RING].cap_ns = 100;
+  h.in.res[NR_RES_DA].cap_ns = 400;
+  auto &u = h.add(0, 1, 400, NR_UNIT_PDSCH_DATA); /* cpu 400: far above the ring budget */
+  u.ring_p99_ns = 1; u.da_p99_ns = 200;
+  h.steps(3);
+  EXPECT_TRUE(h.en(0, 1, NR_UNIT_PDSCH_DATA)); /* admitted: the ring is charged its writer cost, not the CPU */
+  /* a unit whose daBg CPU exceeds the DA budget is shed */
+  H g(1, 1000);
+  g.in.res[NR_RES_SENSE_RING].cap_ns = 100;
+  g.in.res[NR_RES_DA].cap_ns = 400;
+  auto &w = g.add(0, 1, 400, NR_UNIT_PDSCH_DATA);
+  w.ring_p99_ns = 1; w.da_p99_ns = 300; w.enabled = true;
+  g.steps(3);
+  EXPECT_FALSE(g.en(0, 1, NR_UNIT_PDSCH_DATA));
+  EXPECT_EQ(g.out.binding, NR_RES_DA);
+  /* the DA budget is per cell: the same load in two cells fits where one cell would not */
+  H k(2, 1e6f);
+  k.in.cell_res_set[0] = k.in.cell_res_set[1] = true;
+  for (int c = 0; c < 2; c++) { memcpy(k.in.cell_res[c], k.in.res, sizeof k.in.res); k.in.cell_res[c][NR_RES_DA] = {400.f, 0.f}; }
+  k.add(0, 1, 10, NR_UNIT_PDSCH_DATA).da_p99_ns = 200; k.add(0, 2, 10, NR_UNIT_PDSCH_DATA).da_p99_ns = 200;
+  k.add(1, 3, 10, NR_UNIT_PDSCH_DATA).da_p99_ns = 200;
+  k.steps(4);
+  EXPECT_EQ(k.nen(0), 1); /* 2 x 200 > 240 in cell 0 */
+  EXPECT_EQ(k.nen(1), 1);
 }

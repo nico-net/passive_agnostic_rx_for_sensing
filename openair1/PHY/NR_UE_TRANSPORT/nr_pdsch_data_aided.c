@@ -831,8 +831,11 @@ static void da_run(void *arg)
   nr_isac_abs_slot_override = 0;
   const uint64_t t1 = da_now_ns();
   if (unit_c0)
-    nr_sense_unit_job(NR_UNIT_PDSCH_DATA, j->rnti, nr_sense_unit_cpu_ns() - unit_c0, t0 - j->t_enq_ns, t1 - j->t_enq_ns > NR_UNIT_LATE_NS,
-                      (uint16_t)j->fa.num_rbs, t1);
+  {
+    const uint64_t cpu_da = nr_sense_unit_cpu_ns() - unit_c0;
+    nr_sense_unit_job(NR_UNIT_PDSCH_DATA, j->rnti, cpu_da, 0 /* the daBg queue wait is the DA resource's own (violation path on a shed); QUEUE_DL is the decode queue */, t1 - j->t_enq_ns > NR_UNIT_LATE_NS, (uint16_t)j->fa.num_rbs, t1);
+    nr_sense_unit_cost_da(NR_UNIT_PDSCH_DATA, j->rnti, cpu_da, t1); /* the daBg worker CPU is the unit's DA demand (it is also pool CPU: the worker leases a pool token) */
+  }
   atomic_fetch_add(&P->run_ns, t1 - t0);
   const uint64_t n = atomic_fetch_add(&P->done, 1) + 1;
   if (n == 1 || n % 2000 == 0) {
@@ -843,6 +846,9 @@ static void da_run(void *arg)
   }
   __atomic_fetch_or(&P->free_mask, 1u << j->idx, __ATOMIC_RELEASE);
 }
+
+/* daBg workers of the calling thread's cell (0 before the pool is up): the capacity the DA resource of the sensing scheduler is built from */
+int nr_isac_pdsch_data_aided_workers(void) { return atomic_load_explicit(&g_da.ready, memory_order_acquire) ? g_da_qs.n : 0; }
 
 static int da_shed(_Atomic uint64_t *why, uint16_t rnti)
 {

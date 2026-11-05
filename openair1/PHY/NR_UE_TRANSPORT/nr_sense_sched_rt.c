@@ -19,8 +19,9 @@ __attribute__((weak)) void nr_pool_stats(nr_pool_t *, nr_pool_stats_t *out);
 __attribute__((weak)) int nr_pool_size(const nr_pool_t *);
 __attribute__((weak)) int nr_passive_metrics_pci_of(int cell);
 __attribute__((weak)) int nr_gpu_pass_active(void);
+__attribute__((weak)) int nr_isac_pdsch_data_aided_workers(void);
 
-static const char *const k_res_name[NR_RES_N] = {"pool", "queue_dl", "queue_ul", "gpu", "sense_ring"};
+static const char *const k_res_name[NR_RES_N] = {"pool", "queue_dl", "queue_ul", "gpu", "sense_ring", "da"};
 const char *nr_sense_res_name(int r) { return (unsigned)r < NR_RES_N ? k_res_name[r] : "?"; }
 
 /* Process-wide: there is one scheduler thread (it serves every cell). The state is touched by that thread (or by a test calling step() alone). */
@@ -97,12 +98,14 @@ static bool sample_prod(nr_sense_sched_sample_t *o, uint64_t now_ns)
   }
   g_prev.no_sample = 0;
   const int prev_cell = nr_cell_idx();
+  int da_workers[NR_SENSE_CELLS] = {0};
   const bool primed = g_prev.primed && now_ns > g_prev.t_ns;
   for (int k = 0; k < n; k++) {
     o->pci[k] = nr_passive_metrics_pci_of ? nr_passive_metrics_pci_of(k) : -1;
     nr_cell_bind(k);
     nr_sense_stats_t st;
     nr_sense_stats(&st);
+    da_workers[k] = nr_isac_pdsch_data_aided_workers ? nr_isac_pdsch_data_aided_workers() : 0;
     nr_cell_bind(prev_cell);
     if (primed) o->ring_drops[k] = st.rec_dropped >= g_prev.rec_dropped[k] ? st.rec_dropped - g_prev.rec_dropped[k] : 0;
     g_prev.rec_dropped[k] = st.rec_dropped;
@@ -116,9 +119,11 @@ static bool sample_prod(nr_sense_sched_sample_t *o, uint64_t now_ns)
   o->res[NR_RES_QUEUE_UL] = (nr_sense_res_t){.cap_ns = (float)NR_UNIT_LATE_NS, .base_p99_ns = 0.f};
   o->res[NR_RES_GPU] = (nr_sense_res_t){.cap_ns = (nr_gpu_pass_active && nr_gpu_pass_active()) ? (float)SENSE_BUCKET_NS : 0.f, .base_p99_ns = 0.f};
   o->res[NR_RES_SENSE_RING] = (nr_sense_res_t){.cap_ns = (float)SENSE_BUCKET_NS, .base_p99_ns = 0.f};
-  for (int k = 0; k < n; k++) { /* the per-cell resources (queues, ring) of each cell */
+  o->res[NR_RES_DA] = (nr_sense_res_t){.cap_ns = (float)SENSE_BUCKET_NS, .base_p99_ns = 0.f};
+  for (int k = 0; k < n; k++) { /* the per-cell resources (queues, ring, DA) of each cell */
     o->cell_res_set[k] = true;
     memcpy(o->cell_res[k], o->res, sizeof o->res);
+    o->cell_res[k][NR_RES_DA].cap_ns = (float)((da_workers[k] > 1 ? da_workers[k] : 1) * (double)SENSE_BUCKET_NS); /* workers x one bucket (the headroom is applied by the decision) */
     if (o->ring_drops[k]) o->cell_res[k][NR_RES_SENSE_RING].base_p99_ns = (float)SENSE_BUCKET_NS;
   }
   return true;
@@ -213,10 +218,10 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
     u[0] = 0;
     for (int i = 0; i < in->n_units[c] && i < 8 && w < (int)sizeof u - 96; i++) {
       const nr_sense_unit_view_t *v = &in->units[c][i];
-      w += snprintf(u + w, sizeof u - (size_t)w, "%s%u/%s:%s wb=%.1f ratio=%.2f cpu99=%.2f skips=%u viol=%u", i ? " | " : "", (unsigned)v->rnti, sn[v->src], v->enabled ? "ON" : "off",
-                    v->wb_rate_hz, v->valid_ratio, v->cpu_p99_ns * 1e-6, v->skips, v->violations);
+      w += snprintf(u + w, sizeof u - (size_t)w, "%s%u/%s:%s wb=%.1f ratio=%.2f cpu99=%.2f ring99=%.2f da99=%.2f wait99=%.2f skips=%u viol=%u", i ? " | " : "", (unsigned)v->rnti, sn[v->src], v->enabled ? "ON" : "off",
+                    v->wb_rate_hz, v->valid_ratio, v->cpu_p99_ns * 1e-6, v->ring_p99_ns * 1e-6, v->da_p99_ns * 1e-6, v->wait_p99_ns * 1e-6, v->skips, v->violations);
     }
-    LOG_A(PHY, "SENSING: SENSE_UNITS cell=%d pci=%d n=%d %s\n", c, sm->pci[c], in->n_units[c], u);
+    LOG_A(PHY, "SENSING: SENSE_UNITS cell=%d pci=%d da_cap_ms=%.0f ring_cap_ms=%.0f n=%d %s\n", c, sm->pci[c], sm->cell_res[c][NR_RES_DA].cap_ns * 1e-6, sm->cell_res[c][NR_RES_SENSE_RING].cap_ns * 1e-6, in->n_units[c], u);
   }
 }
 

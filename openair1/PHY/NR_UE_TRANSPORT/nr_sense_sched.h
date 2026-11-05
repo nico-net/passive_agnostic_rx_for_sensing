@@ -34,8 +34,9 @@ extern "C" {
  * base_p99_ns = its baseline wait p99, both in ns. cap_ns <= 0 means the resource does not exist on this host (GPU on x86) and is not constrained;
  * for every other resource cap_ns <= 0 (or NaN) is invalid input: no unit using it is admitted and out->bad_cap counts it. */
 typedef struct { float cap_ns, base_p99_ns; } nr_sense_res_t;
-typedef enum { NR_RES_POOL = 0, NR_RES_QUEUE_DL, NR_RES_QUEUE_UL, NR_RES_GPU, NR_RES_SENSE_RING, NR_RES_N } nr_res_id_t;
-/* Resources a unit uses (demand): POOL and SENSE_RING by every unit (cpu_p99_ns; the ring is a proxy: the writer cost is not attributed per unit),
+typedef enum { NR_RES_POOL = 0, NR_RES_QUEUE_DL, NR_RES_QUEUE_UL, NR_RES_GPU, NR_RES_SENSE_RING, NR_RES_DA, NR_RES_N } nr_res_id_t;
+/* Resources a unit uses (demand): POOL by every unit (cpu_p99_ns, the CPU of pool-leased threads), SENSE_RING by every unit (ring_p99_ns: its writer cost, record formatting + quality),
+ * DA (per cell: the daBg workers, cap = workers x one bucket) by PDSCH_DATA (da_p99_ns: its daBg CPU),
  * GPU by PDSCH_DATA (cpu_p99_ns as the proxy of the launch/wait time: the GPU time per unit is not in the view), QUEUE_DL by PDSCH_DATA and QUEUE_UL by SRS
  * (wait_p99_ns; waits do not add, the queue is charged the maximum over the admitted units). DM-RS units are inline (no queue). */
 
@@ -43,7 +44,7 @@ typedef struct {
   int n_cells; int pci[NR_SENSE_CELLS];
   const nr_sense_unit_view_t *units[NR_SENSE_CELLS]; int n_units[NR_SENSE_CELLS]; /* per cell, from nr_sense_unit_snapshot (max 256 per cell, 2048 in all are considered) */
   nr_sense_res_t res[NR_RES_N];
-  /* per-cell override of the per-cell resources (NR_RES_QUEUE_DL, NR_RES_QUEUE_UL, NR_RES_SENSE_RING): used for cell c when cell_res_set[c], else res[] applies to every cell.
+  /* per-cell override of the per-cell resources (NR_RES_QUEUE_DL, NR_RES_QUEUE_UL, NR_RES_SENSE_RING, NR_RES_DA): used for cell c when cell_res_set[c], else res[] applies to every cell.
    * POOL and GPU are shared by all cells and always come from res[]. */
   nr_sense_res_t cell_res[NR_SENSE_CELLS][NR_RES_N]; bool cell_res_set[NR_SENSE_CELLS];
   int min_prb; uint64_t now_ns;
@@ -58,7 +59,7 @@ typedef struct {
   uint64_t last_pci_valid_wb_ns[NR_SENSE_CELLS];
   uint64_t pci_elig_since[NR_SENSE_CELLS]; bool pci_was_elig[NR_SENSE_CELLS], pci_seen[NR_SENSE_CELLS]; /* the age of a PCI/unit does not accumulate while it is ineligible */
   uint64_t elig_since[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; bool was_elig[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
-  float mem_cpu[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], mem_wait[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* last measured p99 demand while enabled, decayed while the unit is off (SENSE_COST_MEM_DECAY per decision) */
+  float mem[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N][4]; /* cpu, wait, ring, da */ /* last measured p99 demand while enabled, decayed while the unit is off (SENSE_COST_MEM_DECAY per decision) */
   uint8_t shed_n[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], run_n[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* consecutive sheds (re-probe back-off) / decisions enabled and wanted */
   uint8_t holdoff[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* decisions a violation-removed unit must still wait before it can be enabled */
   bool known[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];     /* below: the violation baseline of the previous decision (re-baselined when the row generation changes) */

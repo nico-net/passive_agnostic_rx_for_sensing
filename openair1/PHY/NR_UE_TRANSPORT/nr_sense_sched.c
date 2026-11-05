@@ -19,13 +19,13 @@ static bool uses(nr_unit_src_t s, int r)
 {
   switch (r) {
     case NR_RES_POOL: case NR_RES_SENSE_RING: return true;
-    case NR_RES_GPU: case NR_RES_QUEUE_DL: return s == NR_UNIT_PDSCH_DATA;
+    case NR_RES_GPU: case NR_RES_QUEUE_DL: case NR_RES_DA: return s == NR_UNIT_PDSCH_DATA;
     case NR_RES_QUEUE_UL: return s == NR_UNIT_SRS;
   }
   return false;
 }
 static bool is_queue(int r) { return r == NR_RES_QUEUE_DL || r == NR_RES_QUEUE_UL; }
-static bool per_cell(int r) { return r == NR_RES_QUEUE_DL || r == NR_RES_QUEUE_UL || r == NR_RES_SENSE_RING; }
+static bool per_cell(int r) { return r == NR_RES_QUEUE_DL || r == NR_RES_QUEUE_UL || r == NR_RES_SENSE_RING || r == NR_RES_DA; }
 /* the use of the resources as one candidate of cell c sees them: shared ones summed over all cells, per-cell ones of its own cell */
 typedef struct { double sh[NR_RES_N], pc[NR_SENSE_CELLS][NR_RES_N]; } use_t;
 static void eff_use(const use_t *u, int c, double *out) { for (int r = 0; r < NR_RES_N; r++) out[r] = per_cell(r) ? u->pc[c][r] : u->sh[r]; }
@@ -178,7 +178,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       bool any = false;
       for (int s = 0; s < NR_UNIT_SRC_N; s++) {
         if (present[c][sl][s]) { any = true; continue; }
-        st->known[c][sl][s] = false; st->was_elig[c][sl][s] = false; st->elig_since[c][sl][s] = 0; st->holdoff[c][sl][s] = 0; st->mem_cpu[c][sl][s] = st->mem_wait[c][sl][s] = 0; st->shed_n[c][sl][s] = st->run_n[c][sl][s] = 0; st->enabled[c][sl][s] = false; st->streak[c][sl][s] = 0; st->gen[c][sl][s] = 0; st->viol[c][sl][s] = 0;
+        st->known[c][sl][s] = false; st->was_elig[c][sl][s] = false; st->elig_since[c][sl][s] = 0; st->holdoff[c][sl][s] = 0; memset(st->mem[c][sl][s], 0, sizeof st->mem[c][sl][s]); st->shed_n[c][sl][s] = st->run_n[c][sl][s] = 0; st->enabled[c][sl][s] = false; st->streak[c][sl][s] = 0; st->gen[c][sl][s] = 0; st->viol[c][sl][s] = 0;
       }
       if (!any && sl > 0) st->rnti[c][sl] = 0;
     }
@@ -188,20 +188,21 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
     cand_t *k = &C[i];
     const nr_sense_unit_view_t *v = k->v;
     k->cold = !k->enabled && v->cpu_p99_ns <= 0.f && v->wait_p99_ns <= 0.f;
-    double cpu = v->cpu_p99_ns, wait = v->wait_p99_ns;
-    float *mc = &st->mem_cpu[k->cell][k->slot][v->src], *mw = &st->mem_wait[k->cell][k->slot][v->src];
-    if (k->enabled && (v->cpu_p99_ns > 0.f || v->wait_p99_ns > 0.f)) { *mc = v->cpu_p99_ns; *mw = v->wait_p99_ns; } /* remember what it costs while it runs */
+    /* demand per resource: POOL = CPU of pool-leased threads, QUEUE = wait, SENSE_RING = writer cost, DA = daBg CPU. A unit with no history is charged what it cost while it last ran
+     * (decayed) and at least the largest value of its source in the cell. */
+    double d[4] = {v->cpu_p99_ns, v->wait_p99_ns, v->ring_p99_ns, v->da_p99_ns};
+    float *mm = st->mem[k->cell][k->slot][v->src];
+    if (k->enabled && (d[0] > 0 || d[1] > 0 || d[2] > 0 || d[3] > 0)) for (int q = 0; q < 4; q++) mm[q] = (float)d[q]; /* remember what it costs while it runs */
     if (k->cold) {
-      if (*mc > cpu) cpu = *mc;
-      if (*mw > wait) wait = *mw;
-      *mc *= SENSE_COST_MEM_DECAY; *mw *= SENSE_COST_MEM_DECAY;
+      for (int q = 0; q < 4; q++) { if (mm[q] > d[q]) d[q] = mm[q]; mm[q] *= SENSE_COST_MEM_DECAY; }
       for (int j = 0; j < n; j++)
         if (C[j].cell == k->cell && C[j].v->src == v->src) {
-          if (C[j].v->cpu_p99_ns > cpu) cpu = C[j].v->cpu_p99_ns;
-          if (C[j].v->wait_p99_ns > wait) wait = C[j].v->wait_p99_ns;
+          const nr_sense_unit_view_t *o = C[j].v;
+          const double od[4] = {o->cpu_p99_ns, o->wait_p99_ns, o->ring_p99_ns, o->da_p99_ns};
+          for (int q = 0; q < 4; q++) if (od[q] > d[q]) d[q] = od[q];
         }
     }
-    for (int r = 0; r < NR_RES_N; r++) k->dem[r] = !uses(v->src, r) ? 0.0 : is_queue(r) ? wait : cpu;
+    for (int r = 0; r < NR_RES_N; r++) k->dem[r] = !uses(v->src, r) ? 0.0 : r == NR_RES_POOL ? d[0] : is_queue(r) ? d[1] : r == NR_RES_SENSE_RING ? d[2] : r == NR_RES_DA ? d[3] : d[0]; /* GPU: cpu proxy */
   }
 
   /* violations act at once: the lowest-value enabled unit of the violating unit's group goes now (one removal per group per decision) */

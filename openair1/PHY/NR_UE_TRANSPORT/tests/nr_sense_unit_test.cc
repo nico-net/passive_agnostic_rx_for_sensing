@@ -377,3 +377,19 @@ TEST_F(Unit, RatioInitialisedByFirstRecord)
   ASSERT_GE(snap(0, tb(4), vw), 1);
   EXPECT_GT(vw[0].valid_ratio, 0.9f); /* follows the records, not an average from 0 */
 }
+
+TEST_F(Unit, RingAndDaCostStreamsAreSeparatePerUnit)
+{
+  nr_sense_unit_job(NR_UNIT_PDSCH_DATA, 5, 80 * MS, 0, false, 200, tb(1)); /* pool CPU */
+  nr_sense_unit_cost_da(NR_UNIT_PDSCH_DATA, 5, 70 * MS, tb(1));
+  nr_sense_unit_cost_ring(NR_UNIT_PDSCH_DATA, 5, 2 * MS, tb(1));
+  nr_sense_unit_cost_ring(NR_UNIT_PDSCH_DATA, 99, 5 * MS, tb(1)); /* no row: not attributed, no row opened */
+  nr_sense_unit_view_t v[8];
+  ASSERT_EQ(snap(0, tb(100), v), 1);
+  EXPECT_FLOAT_EQ(v[0].cpu_max_ns, 80.f * MS);
+  EXPECT_FLOAT_EQ(v[0].da_p99_ns, 0.f);   /* one busy bucket of 320 is not the p99 (nearest rank) ... */
+  for (int k = 0; k < 320; k++) { nr_sense_unit_cost_da(NR_UNIT_PDSCH_DATA, 5, 3 * MS, tb(10 + k)); nr_sense_unit_cost_ring(NR_UNIT_PDSCH_DATA, 5, MS / 2, tb(10 + k)); }
+  ASSERT_EQ(snap(0, tb(331), v), 1);
+  EXPECT_FLOAT_EQ(v[0].da_p99_ns, 3.f * MS);    /* ... a steady one is */
+  EXPECT_FLOAT_EQ(v[0].ring_p99_ns, 0.5f * MS);
+}

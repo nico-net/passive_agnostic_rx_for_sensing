@@ -28,6 +28,7 @@ typedef struct {
 } ubucket_t;
 typedef struct {
   ubucket_t bk[NBS];
+  _Atomic uint64_t rg[NBS], dq[NBS]; /* writer (ring) cost and daBg cost per bucket: tag(24) | ns(40), as word A of bk */
   _Atomic uint64_t last_msg_ns, last_valid_wb_ns, last_cfr_ns, first_ns;
   _Atomic uint32_t late, viol, skips, live, disabled, est_last, n_cfr, valid_bits, snr_bits, pend_w;
 } unit_t;
@@ -51,6 +52,8 @@ static inline int32_t tag_diff(uint32_t a, uint32_t b) { return (int32_t)((a - b
 static void reset_unit(unit_t *u)
 {
   for (int i = 0; i < NBS; i++) {
+    atomic_store_explicit(&u->rg[i], 0, memory_order_relaxed);
+    atomic_store_explicit(&u->dq[i], 0, memory_order_relaxed);
     atomic_store_explicit(&u->bk[i].a, 0, memory_order_relaxed);
     atomic_store_explicit(&u->bk[i].b, 0, memory_order_relaxed);
   }
@@ -165,6 +168,24 @@ word_b:
   }
 }
 
+/* add ns to the bucket word of t_ns in a tag|ns stream (same rules as word A of bucket_add: add when the tag matches, replace an older one, drop a late writer) */
+static void stream_add(_Atomic uint64_t *arr, uint64_t t_ns, uint64_t ns)
+{
+  if (!ns) return;
+  const uint64_t bidx = t_ns / SENSE_BUCKET_NS;
+  _Atomic uint64_t *wd = &arr[bidx % NBS];
+  const uint32_t tag = tag_of(bidx);
+  if (ns > CPU_MASK) ns = CPU_MASK;
+  uint64_t w = atomic_load_explicit(wd, memory_order_relaxed), n;
+  do {
+    const int32_t d = tag_diff(tag, (uint32_t)(w >> 40));
+    if (w && d < 0) return;
+    uint64_t c = (w && d == 0) ? (w & CPU_MASK) + ns : ns;
+    if (c > CPU_MASK) c = CPU_MASK;
+    n = ((uint64_t)tag << 40) | c;
+  } while (!atomic_compare_exchange_weak_explicit(wd, &w, n, memory_order_relaxed, memory_order_relaxed));
+}
+
 static inline uint64_t now_ns(void)
 {
   struct timespec t;
@@ -270,6 +291,17 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
     while (o < t_ns && !atomic_compare_exchange_weak_explicit(&u->last_valid_wb_ns, &o, t_ns, memory_order_relaxed, memory_order_relaxed)) {}
   }
 }
+
+static void cost_stream(nr_unit_src_t s, uint16_t rnti, uint64_t ns, uint64_t t_ns, bool ring)
+{
+  if ((unsigned)s >= NR_UNIT_SRC_N || nr_isac_mode() != NR_ISAC_MODE_SENSING || !ns) return;
+  unit_tab_t *T = tab_of(nr_cell_idx());
+  int r;
+  unit_t *u = unit_get(T, s, unit_rnti(s, rnti), false, t_ns, &r); /* never opens a row: the cost of a unit without history is not attributed */
+  if (u) stream_add(ring ? u->rg : u->dq, t_ns, ns);
+}
+void nr_sense_unit_cost_ring(nr_unit_src_t s, uint16_t rnti, uint64_t ns, uint64_t t_ns) { cost_stream(s, rnti, ns, t_ns, true); }
+void nr_sense_unit_cost_da(nr_unit_src_t s, uint16_t rnti, uint64_t ns, uint64_t t_ns) { cost_stream(s, rnti, ns, t_ns, false); }
 
 void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti)
 {
@@ -450,7 +482,7 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
       unit_t *u = &T->u[r][s];
       if (!atomic_load_explicit(&u->live, memory_order_relaxed))
         continue;
-      uint64_t cpu[NB], wt[NB];
+      uint64_t cpu[NB], wt[NB], rgn[NB], dqn[NB];
       int nw = 0;
       uint64_t msgs = 0, wbs = 0;
       for (int i = 0; i < NB; i++) {
@@ -458,6 +490,8 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
         const ubucket_t *bk = &u->bk[b % NBS];
         const uint64_t a = atomic_load_explicit(&bk->a, memory_order_relaxed), w = atomic_load_explicit(&bk->b, memory_order_relaxed);
         cpu[i] = (a >> 40) == tag_of(b) ? (a & CPU_MASK) : 0;
+        { const uint64_t x = atomic_load_explicit(&u->rg[b % NBS], memory_order_relaxed), y = atomic_load_explicit(&u->dq[b % NBS], memory_order_relaxed);
+          rgn[i] = (x >> 40) == tag_of(b) ? (x & CPU_MASK) : 0; dqn[i] = (y >> 40) == tag_of(b) ? (y & CPU_MASK) : 0; }
         if ((w >> 40) == tag_of(b)) {
           msgs += (w >> 10) & CNT_MAX;
           wbs += w & CNT_MAX;
@@ -466,6 +500,8 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
         }
       }
       qsort(cpu, NB, sizeof cpu[0], cmp_u64);
+      qsort(rgn, NB, sizeof rgn[0], cmp_u64);
+      qsort(dqn, NB, sizeof dqn[0], cmp_u64);
       qsort(wt, (size_t)nw, sizeof wt[0], cmp_u64);
       const uint64_t first = atomic_load_explicit(&u->first_ns, memory_order_relaxed);
       double win_s = (double)NB * (double)SENSE_BUCKET_NS * 1e-9; /* a unit younger than the window is divided by its age (at least one bucket) */
@@ -479,6 +515,8 @@ int nr_sense_unit_snapshot_at(int cell, uint64_t now, nr_sense_unit_view_t *out,
       v->cpu_p95_ns = (float)nrank(cpu, NB, 95);
       v->cpu_p99_ns = (float)nrank(cpu, NB, 99);
       v->cpu_max_ns = (float)cpu[NB - 1];
+      v->ring_p99_ns = (float)nrank(rgn, NB, 99);
+      v->da_p99_ns = (float)nrank(dqn, NB, 99);
       v->gen = g0;
       v->last_cfr_ns = atomic_load_explicit(&u->last_cfr_ns, memory_order_relaxed);
       v->n_cfr = atomic_load_explicit(&u->n_cfr, memory_order_relaxed);

@@ -104,7 +104,7 @@ NR_CELL_STATIC(rs_job_t *, rs_jobs)
 NR_CELL_STATIC(nr_sense_dci_rec_t *, dci_jobs)
 #define dci_jobs NR_CELL_REF(dci_jobs)
 /* S3: quality of the CFR frames still addressable by id, slot = frame_id % frame_cap, id 0 = empty. SENSING mode only; guarded by mu. */
-typedef struct { uint64_t id; bool ok; nr_sense_quality_t q; } qslot_t;
+typedef struct { uint64_t id; bool ok; uint32_t qwork_ns; nr_sense_quality_t q; } qslot_t; /* qwork_ns: the writer time that computed this frame's quality (charged to the record's unit) */
 NR_CELL_STATIC(qslot_t *, qring)
 #define qring NR_CELL_REF(qring)
 NR_CELL_STATIC(uint32_t, qcap)
@@ -217,7 +217,7 @@ static void frame_quality(const uint8_t *p, nr_sense_quality_t *q, bool *ok)
 }
 /* Fill job->meta.q from the quality ring. 1 = settled (q_valid set, or definitively unavailable); 0 = the frame is still queued: format later.
  * Caller does not hold mu. */
-static int job_quality(rs_job_t *job, bool may_wait)
+static int job_quality(rs_job_t *job, bool may_wait, uint32_t *qcost)
 {
   nr_sense_rs_meta_t *m=&job->meta;
   m->q_valid=false;
@@ -225,7 +225,7 @@ static int job_quality(rs_job_t *job, bool may_wait)
   nr_sense_quality_t q; int r=1;
   pthread_mutex_lock(&mu);
   const qslot_t *s=qring && qcap ? &qring[job->frame_id%qcap] : NULL;
-  if (s && s->id==job->frame_id && s->ok) q=s->q, m->q_valid=true;
+  if (s && s->id==job->frame_id && s->ok) q=s->q, m->q_valid=true, *qcost=s->qwork_ns;
   else if (may_wait && frame_count && s && s->id<job->frame_id) r=0;
   else stats.q_miss++;
   pthread_mutex_unlock(&mu);
@@ -278,7 +278,8 @@ static void *run_writer(void *arg)
         } else {
         rs_job_t *job=&rs_jobs[at];
         char *line=records+(size_t)at*RECORD_BYTES;
-        if (!job_quality(job,i>0) ) { count=i; break; }   /* frame still queued: stop the batch, the frame stream runs next */
+        uint32_t qcost=0;
+        if (!job_quality(job,i>0,&qcost) ) { count=i; break; }   /* frame still queued: stop the batch, the frame stream runs next */
         if (job->meta.q_valid) { /* per-unit view of the record (sensing mode only: the call is a no-op otherwise) */
           const int us=nr_sense_unit_of_src(job->src);
           if (us>=0) nr_sense_unit_cfr((nr_unit_src_t)us,(uint16_t)job->meta.rnti,job->meta.q.valid_cfr_prbs,job->meta.q.snr_db_p50,nr_sense_now_ns());
@@ -286,7 +287,11 @@ static void *run_writer(void *arg)
         length=nr_sense_rs_to_json(job->src,&job->meta,job->frame_id,line,RECORD_BYTES-1);
         if (length>0) { line[length]='\n'; record_lengths[at]=(uint32_t)length+1; }
         else { record_lengths[at]=0; format_drops++; }
-        nr_sense_cost_add(NR_SENSE_COST_REC,job->src,nr_sense_now_ns()-t_rec);
+        { /* the unit pays its writer cost: this record's formatting + the quality computed for its frame (SENSE_RING demand, not the unit's whole CPU) */
+          const uint64_t t_now=nr_sense_now_ns(); const int us=nr_sense_unit_of_src(job->src);
+          nr_sense_cost_add(NR_SENSE_COST_REC,job->src,t_now-t_rec);
+          if (us>=0) nr_sense_unit_cost_ring((nr_unit_src_t)us,(uint16_t)job->meta.rnti,(t_now-t_rec)+qcost,t_now);
+        }
         record_binary[at]=0;
         }
       }
@@ -294,13 +299,14 @@ static void *run_writer(void *arg)
                             : (void *)(records+(size_t)at*RECORD_BYTES);
       vec[i].iov_len=frame ? frame_lengths[at] : record_lengths[at];
     }
-    nr_sense_quality_t fq[16]; uint64_t fid[16]; bool fok[16]; uint32_t fn=0;
+    nr_sense_quality_t fq[16]; uint64_t fid[16]; bool fok[16]; uint32_t fcost[16]; uint32_t fn=0;
     if (frame && nr_isac_mode()==NR_ISAC_MODE_SENSING) {
       for (uint32_t i=0;i<count;i++) {
         const uint8_t *p=frames+(size_t)((frame_head+i)%frame_cap)*frame_stride;
         const uint64_t t_q=nr_sense_now_ns();
         memcpy(&fid[fn],p+8,8);
         frame_quality(p,&fq[fn],&fok[fn]);
+        fcost[fn]=(uint32_t)(nr_sense_now_ns()-t_q);
         nr_sense_cost_add(NR_SENSE_COST_REC,(nr_sense_src_t)(p[16]<NR_SENSE_SRC_COUNT?p[16]:0),nr_sense_now_ns()-t_q);
         fn++;
       }
@@ -333,7 +339,7 @@ static void *run_writer(void *arg)
 #ifdef NR_SENSE_HAVE_ZMQ
     if (zmq_failed) stats.zmq_drops++;
 #endif
-    for (uint32_t i=0;i<fn;i++) if (qring && qcap) { qslot_t *qs=&qring[fid[i]%qcap]; qs->id=fid[i]; qs->ok=fok[i]; if (fok[i]) { qs->q=fq[i]; stats.q_computed++; } }
+    for (uint32_t i=0;i<fn;i++) if (qring && qcap) { qslot_t *qs=&qring[fid[i]%qcap]; qs->id=fid[i]; qs->ok=fok[i]; qs->qwork_ns=fcost[i]; if (fok[i]) { qs->q=fq[i]; stats.q_computed++; } }
     last_frame=frame;
     atomic_fetch_add(&written_items,count);
     if (frame) { frame_head=(frame_head+count)%frame_cap; frame_count-=count; }

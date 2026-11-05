@@ -26,6 +26,9 @@ typedef enum { NR_UNIT_PDSCH_DMRS = 0, NR_UNIT_PDSCH_DATA, NR_UNIT_PUSCH_DMRS, N
 /* One job of unit (s, rnti): thread CPU, enqueue-to-start wait, late flag. est_usable_prbs > 0 counts the job as one message of the unit (rate, wideband rate);
  * 0 attributes cost only (a second stage of an already counted message). t_ns = CLOCK_MONOTONIC ns (nr_sense_now_ns) at the job's end. */
 void nr_sense_unit_job(nr_unit_src_t s, uint16_t rnti, uint64_t cpu_ns, uint64_t wait_ns, bool late, uint16_t est_usable_prbs, uint64_t t_ns);
+/* Cost-only attribution to a resource other than the pool: the sense writer's time for a record of the unit (SENSE_RING) and the daBg worker CPU of a data-aided message (DA). Never opens a row. */
+void nr_sense_unit_cost_ring(nr_unit_src_t s, uint16_t rnti, uint64_t ns, uint64_t t_ns);
+void nr_sense_unit_cost_da(nr_unit_src_t s, uint16_t rnti, uint64_t ns, uint64_t t_ns);
 /* One exported CFR record of the unit (from the sense writer's emit_rs). */
 void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, float snr_db, uint64_t t_ns);
 void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti); /* a drop inside an ENABLED unit (counted only then); never opens a row. A drop of a disabled unit is not a violation */
@@ -62,6 +65,7 @@ uint64_t nr_sense_unit_unattributed_ns(int cell);
 typedef struct {
   uint16_t rnti; nr_unit_src_t src; bool enabled;
   float cpu_p95_ns, cpu_p99_ns;        /* per 50 ms bucket demand over the last SENSE_WIN_DECISIONS decisions (nearest-rank, idle buckets count as 0; p99 ignores the 3 busiest buckets of 320) */
+  float ring_p99_ns, da_p99_ns;         /* p99 per 50 ms bucket of the unit's writer (record formatting + quality) cost and of its daBg worker CPU: the demand on SENSE_RING and on DA */
   float cpu_max_ns;                    /* the busiest of those buckets (burst) */
   float wait_p99_ns; uint32_t late, violations, skips; /* wait: per-bucket maximum, p99 over the buckets that saw a job; counters are cumulative since the row was created (re-baseline when gen changes) */
   float rate_hz, wb_rate_hz;           /* messages / those with est_usable >= min_prb, per second over min(16 s, now - first_ns) (at least one bucket) */
