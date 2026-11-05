@@ -625,6 +625,36 @@ static void nr_scan_ssb(void *arg)
                 ssbInfo->nidCell, ssbInfo->ssbIndex);
           ssbInfo->syncRes.cell_detected = false;
         }
+        if (ssbInfo->syncRes.cell_detected && ssbInfo->priorValid) {
+          /* RX_RECOVER re-sync of a cell that was locked: the tracked CFO (prior) disambiguates the SSS phase wrap. PBCH CRC cannot (it passes at a
+           * 0.46 SCS error); an estimate beyond half a period from the prior is re-evaluated at the alias nearest to it: the SSB is compensated by
+           * the full estimate and the PBCH decoded again; the alias is kept only if its CRC passes, else the measurement stands. */
+          const int period = nr_sss_cfo_period_hz((int)fp->subcarrier_spacing);
+          const int k = nr_cfo_alias_k(ssbInfo->freqOffset, ssbInfo->priorHz, period);
+          if (k != 0) {
+            const int sss_hz = search_params.sss_res.freq_offset + k * period;
+            const int ssb_off = search_params.pss_res.pos - search_params.nb_prefix_samples;
+            const int win = 4 * (fp->ofdm_symbol_size + fp->nb_prefix_samples);
+            c16_t *wx[fp->nb_antennas_rx];
+            for (int i = 0; i < fp->nb_antennas_rx; i++)
+              wx[i] = search_params.rxdata[i] + ssb_off;
+            compensate_freq_offset(wx, fp->nb_antennas_rx, win, sss_hz, search_params.sampling_rate);
+            do_time_to_freq(&search_params, ssb_off);
+            int hfb = 0, ssbi = 0, symo = 0;
+            fapiPbch_t pr = {0};
+            const bool ok = nr_pbch_detection(ssbInfo->proc, ssbInfo->fp, ssbInfo->nidCell, 1, ssbInfo->gscnInfo.ssbFirstSC, &hfb, &ssbi, &symo,
+                                              &pr, rxdataF);
+            LOG_W(NR_PHY, "SENSING: RESYNC_CFO_ALIAS pci=%d measured=%d prior=%d period=%d k=%d -> %d pbch=%s\n", ssbInfo->nidCell,
+                  ssbInfo->freqOffset, ssbInfo->priorHz, period, k, ssbInfo->freqOffset + k * period, ok ? "crc_ok (alias taken)" : "crc_fail (kept)");
+            if (ok) {
+              ssbInfo->freqOffset += k * period;
+              ssbInfo->halfFrameBit = hfb;
+              ssbInfo->ssbIndex = ssbi;
+              ssbInfo->symbolOffset = symo;
+              ssbInfo->pbchResult = pr;
+            }
+          }
+        }
         if (!ssbInfo->syncRes.cell_detected)
           LOG_I(NR_PHY,
                 "SENSING: SCAN_PBCH_FAIL gscn=%d ssb_sc=%d ssb_ref=%.0f frame=%d pci=%d pss_peak=%d pss_avg=%d "
@@ -660,6 +690,9 @@ static void nr_scan_ssb(void *arg)
 
 /* Absolute sample index of the first sample of the capture being scanned (UE_synch sets it before each search, -1 when
  * unknown). Lets the PSS accumulator folds PSS profiles of successive captures on the cell's 20 ms grid. */
+/* RX_RECOVER re-sync only (UE_synch sets and clears them): the tracked CFO in the units of the estimate (relative to the radio's current tuning), see nr_cfo_alias_k */
+__thread int nr_initial_sync_prior_valid = 0;
+__thread int nr_initial_sync_prior_hz = 0;
 __thread int64_t nr_initial_sync_capture_start = -1; /* per thread = per cell: set and read on the cell's sync actor (UE_synch) */
 
 /* (passive only, WEAKSYNC 2026-10-11): align the receiver RB grid to the cell's CRB grid. CORESET#0, PDCCH
@@ -868,7 +901,9 @@ static nr_initial_sync_t nr_initial_sync_impl(UE_nr_rxtx_proc_t *proc,
                                     .nFrames = scan_nframes,
                                     .foFlag = ue->UE_fo_compensation,
                                     .freqOffset = (auto_acquire || escalate) ? coarse_offset : ue->initial_fo,
-                                    .targetNidCell = ue->target_Nid_cell};
+                                    .targetNidCell = ue->target_Nid_cell,
+                                    .priorValid = nr_initial_sync_prior_valid,
+                                    .priorHz = nr_initial_sync_prior_hz};
       ssbInfo->pssWindowCenter = pss_window_center;
       ssbInfo->pssWindowRadius = pss_window_radius;
       ssbInfo->pssWindowFrame = one_frame ? 0 : pss_window_frame;

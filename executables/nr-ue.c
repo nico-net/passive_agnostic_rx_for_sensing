@@ -277,7 +277,11 @@ static void UE_synch(void *arg) {
     ret = sl_nr_slss_search(UE, &syncD->proc, SL_NR_SSB_REPETITION_IN_FRAMES);
   } else {
     nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
+    extern __thread int nr_initial_sync_prior_valid, nr_initial_sync_prior_hz;
     if (syncD->fast_pss_position >= 0) {
+      /* a lock existed: the estimate is relative to the radio's current tuning (cont_fo_comp: the tracked total), so the tracked CFO is 0 (resp. that total) in its units */
+      nr_initial_sync_prior_valid = 1;
+      nr_initial_sync_prior_hz = get_nrUE_params()->cont_fo_comp ? (int)(UE->dl_Doppler_shift + UE->freq_offset) : 0;
       LOG_I(PHY, "SENSING: RX_RECOVER fast PSS/SSS pci=%d ssb_sc=%d frame=%d expected_pos=%d radius=%d\n",
             UE->target_Nid_cell, syncD->gscnInfo[0].ssbFirstSC, syncD->fast_pss_frame, syncD->fast_pss_position,
             syncD->fast_pss_radius);
@@ -319,6 +323,7 @@ static void UE_synch(void *arg) {
       ret = nr_initial_sync(&syncD->proc, UE, 2, syncD->gscnInfo, syncD->numGscn);
       nr_initial_sync_capture_start = -1;
     }
+    nr_initial_sync_prior_valid = 0;
   }
 
   if (want_pci >= 0 && ret.cell_detected && fp->Nid_cell != want_pci) {

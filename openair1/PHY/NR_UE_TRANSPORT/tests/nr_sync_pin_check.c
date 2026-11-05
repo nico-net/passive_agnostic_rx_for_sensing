@@ -327,6 +327,50 @@ static void cfo_escalation(int pci, int cfo_hz)
   free(cap);
 }
 
+/* RX_RECOVER re-sync CFO alias (2026-11-05 OTA, cell 923: -13802 / -14282 Hz for a true ~+200 Hz). The estimate is PSS (half-symbol phase) + SSS residual (phase over the PSS-SSS spacing,
+ * wraps at +-scs/4.3); a PSS error beyond that wrap returns the truth minus one period (13953 Hz). The capture here is already at the radio's tuning (true residual `cfo_hz`, prior 0).
+ * Checks, on the production estimators at several PSS strengths: whenever the raw estimate is a period off, nr_cfo_alias_k with the prior 0 returns it to the truth (+-400 Hz);
+ * the alias occurs at least once (the test is sensitive); an estimate already near the prior gets k = 0; no prior leaves nothing to resolve (the caller only runs it with one). */
+static void resync_alias(int pci)
+{
+  const int period = nr_sss_cfo_period_hz(30000);
+  CHECK(period > 13900 && period < 14000, "period %d", period);
+  NR_DL_FRAME_PARMS fp;
+  make_fp(&fp);
+  const double fs = fp.samples_per_subframe * 1000.0;
+  const int s0 = 60000, true_hz = 200;
+  int n_total = 0, n_wrapped = 0;
+  /* pss_err_hz: extra rotation of the PSS symbol only = the PSS stage reads true + pss_err_hz; a PSS error beyond +-scs/4.3 leaves the SSS stage a residual past its wrap */
+  for (int pss_err_hz = -11000; pss_err_hz <= 11000; pss_err_hz += 2200) {
+    c16_t *cap = make_capture(pci, -1, 4.0, 0, s0, 0);
+    for (int i = 0; i < fp.samples_per_frame; i++) {
+      const double a = 2.0 * M_PI * (true_hz + (i >= s0 && i < s0 + CP + FFT ? pss_err_hz : 0)) * (double)i / fs;
+      const c16_t c = cap[i];
+      cap[i].r = (int16_t)lrint(c.r * cos(a) - c.i * sin(a));
+      cap[i].i = (int16_t)lrint(c.r * sin(a) + c.i * cos(a));
+    }
+    const lock_t l = search(cap, pci);
+    free(cap);
+    if (!l.found)
+      continue;
+    n_total++;
+    const int est = l.fo_pss + l.fo_sss, k = nr_cfo_alias_k(est, 0, period), res = est + k * period;
+    printf("  PSS stage error %6d Hz: pss %6d sss %6d est %6d -> k %d -> %d\n", pss_err_hz, l.fo_pss, l.fo_sss, est, k, res);
+    CHECK(abs(res) <= period / 2, "resolved %d is not within half a period of the prior", res);
+    /* the PSS-symbol-only rotation is a crude emulation (other errors are not clean aliases); where the raw estimate IS one period off the truth, the resolution must restore it */
+    if (abs(est - (true_hz - period)) <= 900 || abs(est - (true_hz + period)) <= 900) {
+      n_wrapped++;
+      CHECK(k != 0 && abs(res - true_hz) <= 900, "pss_err %d: est %d (pss %d sss %d) k %d -> %d, truth %d", pss_err_hz, est, l.fo_pss, l.fo_sss, k, res, true_hz);
+    }
+  }
+  CHECK(n_total >= 8, "locks %d", n_total);
+  CHECK(n_wrapped >= 2, "no PSS error reproduced the alias (the test would not detect a missing resolution)");
+  CHECK(nr_cfo_alias_k(151, 0, period) == 0 && nr_cfo_alias_k(-6900, 0, period) == 0, "near the prior: k must be 0");
+  CHECK(nr_cfo_alias_k(-13802, 0, period) == 1 && nr_cfo_alias_k(-14282, 0, period) == 1 && nr_cfo_alias_k(14161, 0, period) == -1, "E1B/A1B OTA values");
+  CHECK(nr_cfo_alias_k(-13802, 248, period) == 1 && nr_cfo_alias_k(-13802 + period, 248, period) == 0, "prior 248 picks +151");
+  CHECK(nr_cfo_alias_k(5000, 0, 0) == 0, "degenerate period");
+}
+
 /* A3: two cells both accepted by the blind pass (weaker one 4 dB down): the pass keeps both, strongest SSS metric first, both PCIs reported, and the second can be selected */
 static void inventory(int strong, int weak)
 {
@@ -390,6 +434,7 @@ int main(void)
   cfo_escalation(415, 40000);
   cfo_escalation(403, -47000);
   cfo_escalation(415, 9000);
+  resync_alias(415);
   registry();
   if (failures) {
     printf("test_nr_sync_pin: %d FAILURES\n", failures);

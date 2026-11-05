@@ -515,6 +515,8 @@ typedef struct {
   int ssbOffset;
   int nidCell;
   int freqOffset;
+  bool priorValid; /* RX_RECOVER re-sync: the tracked CFO (priorHz, in the units of freqOffset) disambiguates the SSS alias */
+  int priorHz;
   nr_initial_sync_t syncRes;
   fapiPbch_t pbchResult;
   int pssCorrPeakPower;

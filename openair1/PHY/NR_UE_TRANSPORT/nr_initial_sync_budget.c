@@ -17,6 +17,14 @@ int nr_initial_sync_scan_batch(size_t bytes_per_gscn, size_t len_thr, long scrat
   return (int)(max_by_mem < max_by_thread ? max_by_mem : max_by_thread);
 }
 
+int nr_cfo_alias_k(int est_hz, int prior_hz, int period_hz)
+{
+  if (period_hz <= 0)
+    return 0;
+  const double q = (double)(prior_hz - est_hz) / period_hz;
+  return (int)(q < 0 ? q - 0.5 : q + 0.5);
+}
+
 int nr_acq_cfo_ladder(int centre_hz, int scs_hz, int limit_hz, int *out, int max)
 {
   int n = 0;
