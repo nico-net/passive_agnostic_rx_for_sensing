@@ -934,7 +934,7 @@ static void mpci_cell_sensing_session(int k)
 static void mpci_stop_cell_sensing(int k)
 {
   (void)k;
-  nr_sense_sched_stop(); /* SENSING mode scheduler thread (S7): idempotent; stopped before the first cell closes its session */
+  nr_sense_sched_stop(); /* idempotent: normally already stopped right after the radio release */
   nr_prach_passive_flush();
   nr_srs_passive_stop();
   nr_isac_stop();
@@ -1700,6 +1700,7 @@ int main(int argc, char **argv)
   nr_shutdown_request(0);
   nr_shutdown_wait_radio();
   nr_shutdown_step("radio_released_before_worker_joins");
+  nr_sense_sched_stop(); /* SENSING scheduler (S7): no more decisions once the radio is gone, before any consumer or the pool stops (idempotent; also called below) */
   if (g_feed_obj) { /* G6: the radio is released: the reader has left on its failed read; stop the channelizer, final counters */
     iq_feed_stop(g_feed_obj);
     mpci_feed_log();

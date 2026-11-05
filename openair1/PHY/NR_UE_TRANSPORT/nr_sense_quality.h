@@ -34,6 +34,13 @@ typedef struct {
  * iq antenna-major complex float pairs, ant_stride in complex RE (as nr_sense_push_cfr). Pure, no allocation,
  * O(n_ant * n_re). Every computation is per PRB: nothing fits/smooths/correlates across a PRG boundary. At most 8
  * antennas are used. */
+/* Sparse sources (CSI-RS: 1 RE per PRB, one or few symbols; DM-RS of a precoded PDSCH/PUSCH is NOT sparse in this sense): a PRB is valid with >= 1 RE when the producer's noise estimate
+ * (noise_var > 0 required) gives SNR >= NR_SENSE_PRB_SNR_MIN_DB; no local fit, no residual (resid_db NAN). With >= 2 symbols sharing subcarriers the record's symbol consistency
+ * must reach NR_SENSE_SPARSE_SYM_MIN, else the record has no valid PRB. */
+#define NR_SENSE_Q_SPARSE 1u
+#define NR_SENSE_SPARSE_SYM_MIN 0.5f /* general bound (half the coherent amplitude), not tuned on any cell */
+void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
+                                 const uint8_t *l_sym, float noise_var, unsigned flags, nr_sense_quality_t *q);
 void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
                               const uint8_t *l_sym, float noise_var, nr_sense_quality_t *q);
 /* Spec 4(d): AND the producer's per-PRB reconstruction pass mask (bit = ABSOLUTE PRB k/12, 1 = pass; a PRB without a verdict is 0) into

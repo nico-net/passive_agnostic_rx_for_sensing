@@ -1965,6 +1965,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   uint16_t prb[NR_PRB_SET_MAX];
   bool gapped = false;
   const bool fdra_unresolved = g->fdra_candidate_count != 0;
+  int pusch_dmrs_en0 = -1; /* the unit state read once for want_est (-1: not read); the extraction below follows that read (spec: no estimate-less record, I3) */
   if (g->ra_type0) {
     const int n = nr_ra_type0_prbs(g->rbg_bitmap, g->rbg_bwp_start, g->bwp_size,
                                   g->rbg_size, prb, NR_PRB_SET_MAX);
@@ -2147,7 +2148,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           in.gate_on = !pg.transform_precoding && !nr_ul_layout_is_probe(g) && !nr_ul_layout_is_trial(g) && nr_snr_gate_applies(false, true, pg.rv, true) && isfinite(rq_);
           in.gate_thr_db = in.gate_on ? (float)(rq_ - nr_snr_gate_margin_db(1)) : 0.f;
         }
-        in.want_est = nr_srs_passive_enabled() || (nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS) && nr_sense_unit_enabled(NR_UNIT_PUSCH_DMRS, g->rnti)); /* the unit gate is counted once, at the extraction below */
+        in.want_est = nr_srs_passive_enabled() || (pusch_dmrs_en0 = (nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS) && nr_sense_unit_enabled(NR_UNIT_PUSCH_DMRS, g->rnti)) ? 1 : 0); /* latched: the extraction below uses this read, not a second one */
         int ul_go_ = in.tbs_bits && in.bg && in.keep != -2; /* -2: the per-branch measurement is not decided (too few grants, or a mixed set): the CPU path measures per grant */
         if (ul_go_ && !ul_shadow) { /* per-path choice (nr_gpu_path.h): SHARED -> the pass (no change); DISCRETE -> alternating trial, then GPU or CPU */
           int pst_ = nr_gpu_path_state(NR_GPU_PATH_PASS_UL);
@@ -2547,8 +2548,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * before submission would destroy exactly that. */
   /* SENSING mode unit gate (spec 5.6): a disabled (RNTI, PUSCH_DMRS) unit gets no DM-RS extraction and no hand-off, counted as a disabled skip once per grant. The PUSCH-attributed
    * SRS events (nr_srs_passive_pusch) are not part of this unit: they keep running when only this unit is off. */
-  const bool pusch_dmrs_on = !t_solver_probe && !gapped && !fdra_unresolved && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)
-                             && nr_sense_unit_gate(NR_UNIT_PUSCH_DMRS, g->rnti, (uint16_t)g->num_rb);
+  const bool pusch_dmrs_cand = !t_solver_probe && !gapped && !fdra_unresolved && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS);
+  /* pusch_dmrs_en0 == 1: estimated for this unit, extract; == 0: not estimated, so even if enabled meanwhile this grant is skipped (counted by the gate when still off) */
+  const bool pusch_dmrs_gate = pusch_dmrs_cand && (pusch_dmrs_en0 == 1 || nr_sense_unit_gate(NR_UNIT_PUSCH_DMRS, g->rnti, (uint16_t)g->num_rb));
+  const bool pusch_dmrs_on = pusch_dmrs_gate && pusch_dmrs_en0 != 0;
   if (!t_solver_probe && !gapped && !fdra_unresolved && (nr_srs_passive_enabled() || pusch_dmrs_on)) {
     const uint32_t nof_ant_cfr = (uint32_t)nant;
     const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;

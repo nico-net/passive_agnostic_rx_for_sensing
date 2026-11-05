@@ -209,7 +209,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     return;
   /* SENSING mode unit gate (spec 5.6): a disabled (RNTI, PDSCH_DATA) unit is skipped before any work and counted as a disabled skip. The daBg worker re-enters here with a
    * message that was admitted when the unit was enabled: it is finished, never re-gated. */
-  if (!da_on_worker && !nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, rnti, (uint16_t)freq_alloc->num_rbs))
+  if (!da_on_worker && !nr_sense_unit_gate_deferred(NR_UNIT_PDSCH_DATA, rnti, (uint16_t)freq_alloc->num_rbs)) /* called under g_phase2_mu by the monitor: the skip is booked after its unlock */
     return;
 
   /* MULTI-LAYER (Nl = 2..4): Ĥ[k] = Y[k]/X[k] is a SCALAR division and is only valid when one modulation symbol is transmitted

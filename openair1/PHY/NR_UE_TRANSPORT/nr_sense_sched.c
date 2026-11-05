@@ -25,6 +25,17 @@ static bool uses(nr_unit_src_t s, int r)
   return false;
 }
 static bool is_queue(int r) { return r == NR_RES_QUEUE_DL || r == NR_RES_QUEUE_UL; }
+static bool per_cell(int r) { return r == NR_RES_QUEUE_DL || r == NR_RES_QUEUE_UL || r == NR_RES_SENSE_RING; }
+/* the use of the resources as one candidate of cell c sees them: shared ones summed over all cells, per-cell ones of its own cell */
+typedef struct { double sh[NR_RES_N], pc[NR_SENSE_CELLS][NR_RES_N]; } use_t;
+static void eff_use(const use_t *u, int c, double *out) { for (int r = 0; r < NR_RES_N; r++) out[r] = per_cell(r) ? u->pc[c][r] : u->sh[r]; }
+static void add_use_c(use_t *u, int c, const double *dem)
+{
+  for (int r = 0; r < NR_RES_N; r++) {
+    double *x = per_cell(r) ? &u->pc[c][r] : &u->sh[r];
+    *x = is_queue(r) ? (dem[r] > *x ? dem[r] : *x) : *x + dem[r];
+  }
+}
 /* the group a violation is charged to: the unit's own queue (per cell), else the shared pool (all cells) */
 static int group_of(nr_unit_src_t s) { return s == NR_UNIT_PDSCH_DATA ? NR_RES_QUEUE_DL : s == NR_UNIT_SRS ? NR_RES_QUEUE_UL : NR_RES_POOL; }
 
@@ -77,11 +88,6 @@ static bool fits(const double *use, const double *dem, const double *budget, nr_
   }
   return ok;
 }
-static void add_use(double *use, const double *dem)
-{
-  for (int r = 0; r < NR_RES_N; r++)
-    use[r] = is_queue(r) ? (dem[r] > use[r] ? dem[r] : use[r]) : use[r] + dem[r];
-}
 
 /* slot of an RNTI in a cell: slot 0 is rnti 0 (the per-cell SRS unit); -1 when the state is full */
 static int slot_of(nr_sense_sched_state_t *st, int c, uint16_t rnti)
@@ -104,13 +110,15 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
   bool present[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
   memset(present, 0, sizeof present);
   const int nc = in->n_cells < NR_SENSE_CELLS ? in->n_cells : NR_SENSE_CELLS;
-  double budget[NR_RES_N];
-  for (int r = 0; r < NR_RES_N; r++) {
-    const double av = (double)in->res[r].cap_ns - (double)in->res[r].base_p99_ns;
-    if (r == NR_RES_GPU && !(in->res[r].cap_ns > 0.f)) budget[r] = -1.0; /* absent */
-    else if (!(in->res[r].cap_ns > 0.f)) { budget[r] = -2.0; out->bad_cap++; } /* invalid */
-    else budget[r] = av > 0 ? av * (1.0 - SENSE_HEADROOM) : 0.0;
-  }
+  double budget[NR_SENSE_CELLS][NR_RES_N];
+  for (int c = 0; c < nc; c++)
+    for (int r = 0; r < NR_RES_N; r++) {
+      const nr_sense_res_t *rs = per_cell(r) && in->cell_res_set[c] ? &in->cell_res[c][r] : &in->res[r];
+      const double av = (double)rs->cap_ns - (double)rs->base_p99_ns;
+      if (r == NR_RES_GPU && !(rs->cap_ns > 0.f)) budget[c][r] = -1.0; /* absent */
+      else if (!(rs->cap_ns > 0.f)) { budget[c][r] = -2.0; if (c == 0 || per_cell(r)) out->bad_cap++; } /* invalid (a shared one is counted once) */
+      else budget[c][r] = av > 0 ? av * (1.0 - SENSE_HEADROOM) : 0.0;
+    }
 
   for (int c = 0; c < nc; c++) {
     /* PCI level: last valid wideband CFR of any unit of the cell, kept in the state because units come and go */
@@ -170,7 +178,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       bool any = false;
       for (int s = 0; s < NR_UNIT_SRC_N; s++) {
         if (present[c][sl][s]) { any = true; continue; }
-        st->known[c][sl][s] = false; st->was_elig[c][sl][s] = false; st->elig_since[c][sl][s] = 0; st->holdoff[c][sl][s] = 0; st->enabled[c][sl][s] = false; st->streak[c][sl][s] = 0; st->gen[c][sl][s] = 0; st->viol[c][sl][s] = 0;
+        st->known[c][sl][s] = false; st->was_elig[c][sl][s] = false; st->elig_since[c][sl][s] = 0; st->holdoff[c][sl][s] = 0; st->mem_cpu[c][sl][s] = st->mem_wait[c][sl][s] = 0; st->shed_n[c][sl][s] = st->run_n[c][sl][s] = 0; st->enabled[c][sl][s] = false; st->streak[c][sl][s] = 0; st->gen[c][sl][s] = 0; st->viol[c][sl][s] = 0;
       }
       if (!any && sl > 0) st->rnti[c][sl] = 0;
     }
@@ -181,7 +189,12 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
     const nr_sense_unit_view_t *v = k->v;
     k->cold = !k->enabled && v->cpu_p99_ns <= 0.f && v->wait_p99_ns <= 0.f;
     double cpu = v->cpu_p99_ns, wait = v->wait_p99_ns;
+    float *mc = &st->mem_cpu[k->cell][k->slot][v->src], *mw = &st->mem_wait[k->cell][k->slot][v->src];
+    if (k->enabled && (v->cpu_p99_ns > 0.f || v->wait_p99_ns > 0.f)) { *mc = v->cpu_p99_ns; *mw = v->wait_p99_ns; } /* remember what it costs while it runs */
     if (k->cold) {
+      if (*mc > cpu) cpu = *mc;
+      if (*mw > wait) wait = *mw;
+      *mc *= SENSE_COST_MEM_DECAY; *mw *= SENSE_COST_MEM_DECAY;
       for (int j = 0; j < n; j++)
         if (C[j].cell == k->cell && C[j].v->src == v->src) {
           if (C[j].v->cpu_p99_ns > cpu) cpu = C[j].v->cpu_p99_ns;
@@ -218,15 +231,18 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
   qsort(C, (size_t)n, sizeof C[0], cmp_rank);
 
   /* admission in rank order against every resource; at most one unit with no history per decision */
-  double use[NR_RES_N] = {0};
+  use_t use;
+  memset(&use, 0, sizeof use);
   bool rejected = false, cold_taken = false;
   for (int i = 0; i < n; i++) {
     cand_t *k = &C[i];
     if (!k->elig || k->val <= 0 || k->removed) continue;
     if (k->cold && cold_taken) continue;
     int over = NR_RES_POOL;
-    if (fits(use, k->dem, budget, k->v->src, &over)) {
-      add_use(use, k->dem);
+    double eu[NR_RES_N];
+    eff_use(&use, k->cell, eu);
+    if (fits(eu, k->dem, budget[k->cell], k->v->src, &over)) {
+      add_use_c(&use, k->cell, k->dem);
       k->want = true;
       if (out->n_admitted < NR_SENSE_ADMIT_LOG)
         out->admitted[out->n_admitted] = (nr_sense_admit_t){.cell = k->cell, .rnti = k->v->rnti, .src = k->v->src, .val = (float)k->val};
@@ -240,31 +256,50 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
   }
   if (!rejected) {
     double best = -1;
-    for (int r = 0; r < NR_RES_N; r++)
-      if (budget[r] > 0 && use[r] / budget[r] > best) { best = use[r] / budget[r]; out->binding = (nr_res_id_t)r; }
+    for (int c = 0; c < nc; c++) {
+      double eu[NR_RES_N];
+      eff_use(&use, c, eu);
+      for (int r = 0; r < NR_RES_N; r++)
+        if (budget[c][r] > 0 && eu[r] / budget[c][r] > best) { best = eu[r] / budget[c][r]; out->binding = (nr_res_id_t)r; }
+    }
   }
 
   /* changes: a streak of SENSE_CONFIRM agreeing decisions; disables first (any number), then enables (at most SENSE_MAX_ENABLES, only if they fit
    * next to the units that stay on, so a pending disable never lets the set exceed the headroom) */
-  double now_use[NR_RES_N] = {0};
+  use_t now_use;
+  memset(&now_use, 0, sizeof now_use);
   for (int i = 0; i < n; i++) {
     cand_t *k = &C[i];
     if (k->removed) continue;
     uint8_t *sk = &st->streak[k->cell][k->slot][k->v->src];
-    if (k->want == k->enabled) { *sk = 0; continue; }
+    uint8_t *shed = &st->shed_n[k->cell][k->slot][k->v->src], *run = &st->run_n[k->cell][k->slot][k->v->src];
+    if (k->want == k->enabled) {
+      *sk = 0;
+      if (k->enabled && k->want && *run < 255 && ++*run >= SENSE_REPROBE_OK) *shed = 0; /* it has held: the back-off restarts */
+      continue;
+    }
     if (*sk < 255) (*sk)++;
     if (!k->enabled || *sk < SENSE_CONFIRM) continue;
     k->enabled = false; *sk = 0; out->disables++;
     st->enabled[k->cell][k->slot][k->v->src] = false;
+    { /* re-probe back-off: a unit that cannot stay on is not tried again at once (a steady overload would otherwise cycle on / off every few decisions) */
+      unsigned hold = (unsigned)SENSE_REPROBE_BASE << (*shed < 5 ? *shed : 5);
+      if (hold > SENSE_REPROBE_MAX) hold = SENSE_REPROBE_MAX;
+      if (*shed < 255) (*shed)++;
+      if (hold > st->holdoff[k->cell][k->slot][k->v->src]) st->holdoff[k->cell][k->slot][k->v->src] = (uint8_t)hold;
+      *run = 0;
+    }
   }
   for (int i = 0; i < n; i++)
-    if (C[i].enabled) add_use(now_use, C[i].dem);
+    if (C[i].enabled) add_use_c(&now_use, C[i].cell, C[i].dem);
   for (int i = 0; i < n; i++) {
     cand_t *k = &C[i];
     if (k->removed || k->enabled || !k->want || k->holdoff) continue;
     uint8_t *sk = &st->streak[k->cell][k->slot][k->v->src];
-    if (*sk < SENSE_CONFIRM || out->enables >= SENSE_MAX_ENABLES || !fits(now_use, k->dem, budget, k->v->src, NULL)) continue;
-    add_use(now_use, k->dem);
+    double eu[NR_RES_N];
+    eff_use(&now_use, k->cell, eu);
+    if (*sk < SENSE_CONFIRM || out->enables >= SENSE_MAX_ENABLES || !fits(eu, k->dem, budget[k->cell], k->v->src, NULL)) continue;
+    add_use_c(&now_use, k->cell, k->dem);
     k->enabled = true; *sk = 0; out->enables++;
     st->enabled[k->cell][k->slot][k->v->src] = true;
   }

@@ -24,6 +24,13 @@ static float pick(float *v, int n, int num, int den)
 void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
                               const uint8_t *l_sym, float noise_var, nr_sense_quality_t *q)
 {
+  nr_sense_quality_compute_ex(n_ant, iq, ant_stride, n_re, k_abs, l_sym, noise_var, 0, q);
+}
+
+void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
+                                 const uint8_t *l_sym, float noise_var, unsigned flags, nr_sense_quality_t *q)
+{
+  const bool sparse = (flags & NR_SENSE_Q_SPARSE) != 0;
   memset(q, 0, sizeof(*q));
   q->snr_db_p50 = q->snr_db_p10 = q->resid_db = q->sym_consist = q->recon_conf = NAN;
   if (n_ant < 1 || n_re < 1 || !iq || !k_abs || !l_sym)
@@ -96,12 +103,15 @@ void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_
   float snr[NR_SENSE_MAX_PRB], res[NR_SENSE_MAX_PRB];
   int nv = 0;
   for (int p = 0; p < NR_SENSE_MAX_PRB; p++) {
-    if (tot[p] < 3 || cnt[p][best[p]] < 3 || !(sig[p] > 0) || !isfinite(pwr[p]) || !isfinite(sse[p]))
+    if (sparse) { /* one RE per PRB is enough: there is no local fit, so the producer's noise estimate is required and the residual test is not applied */
+      if (tot[p] < 1 || !isfinite(pwr[p]) || !(pwr[p] > 0) || !(noise_var > 0))
+        continue;
+    } else if (tot[p] < 3 || cnt[p][best[p]] < 3 || !(sig[p] > 0) || !isfinite(pwr[p]) || !isfinite(sse[p]))
       continue;
     const double mean_pwr = pwr[p] / ((double)tot[p] * n_ant);
     /* noise of this PRB: the producer's estimate; none (<= 0 or NaN) -> the PRB's own local-fit residual. The fit removes one complex constant and one
      * complex slope from cnt REs per antenna, so for white noise E[sse] = (cnt - 2) n_ant noise_var. */
-    double npw = noise_var > 0 ? noise_var : sse[p] / ((double)(cnt[p][best[p]] - 2) * n_ant);
+    double npw = noise_var > 0 ? noise_var : sse[p] / ((double)(cnt[p][best[p]] - 2) * n_ant); /* (sparse: noise_var > 0 here) */
     /* floor: no receiver sees an effective SNR above ~30 dB (NR_SENSE_RECON_IMPL_LOSS: transmitter EVM, phase noise, ADC), so a noise estimate
      * below that fraction of the PRB power (a noiseless simulation gives exactly 0) is raised to it: high SNR, never "invalid" */
     if (npw < NR_SENSE_RECON_IMPL_LOSS * mean_pwr)
@@ -111,7 +121,7 @@ void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_
     /* channel SNR (spec 4.2a): E[mean|H|^2] = S + N, so subtract the noise; no signal left -> -100 dB (invalid) */
     double sp = mean_pwr - npw;
     float s = sp > 0 ? (float)(10.0 * log10(sp / npw)) : -100.0f;
-    float r = (float)(sse[p] / sig[p]);
+    float r = sparse ? 0.f : (float)(sse[p] / sig[p]);
     if (s >= NR_SENSE_PRB_SNR_MIN_DB && r <= NR_SENSE_PRB_RESID_MAX) {
       q->valid_mask[p >> 3] |= (uint8_t)(1u << (p & 7));
       snr[nv] = s;
@@ -123,7 +133,7 @@ void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_
     q->snr_db_p10 = pick(snr, nv, 1, 10);
     q->snr_db_p50 = pick(snr, nv, 1, 2);
     float m = pick(res, nv, 1, 2);
-    q->resid_db = 10.0f * log10f(m > 1e-12f ? m : 1e-12f);
+    q->resid_db = sparse ? NAN : 10.0f * log10f(m > 1e-12f ? m : 1e-12f);
   }
 
   /* symbol consistency: two most populated symbols, over shared k, per-antenna complex correlation */
@@ -158,6 +168,12 @@ void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_
   }
   if (pa > 0 && pb > 0)
     q->sym_consist = (float)(sqrt(cr * cr + ci * ci) / sqrt(pa * pb));
+  /* sparse source with two or more symbols: a failed symbol consistency invalidates the record's PRBs (nothing else checks them) */
+  if (sparse && q->sym_consist == q->sym_consist && q->sym_consist < NR_SENSE_SPARSE_SYM_MIN) {
+    memset(q->valid_mask, 0, sizeof q->valid_mask);
+    q->valid_cfr_prbs = 0;
+    q->snr_db_p10 = q->snr_db_p50 = NAN;
+  }
 }
 
 void nr_sense_quality_apply_recon(nr_sense_quality_t *q, const uint8_t recon_ok_abs[(NR_SENSE_MAX_PRB + 7) / 8])

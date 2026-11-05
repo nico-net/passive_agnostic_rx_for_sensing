@@ -3309,7 +3309,10 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	59	sample_prod::ps	func_static	
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	137	nr_sense_sched_step::in	func_static	nr_sense_sched_in_t	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): process-wide state, touched by that thread only (tests call step() alone)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	148	nr_sense_sched_step::out	func_static	nr_sense_sched_out_t	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): process-wide state, touched by that thread only (tests call step() alone)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	162	sched_log::sn	func_static	const char *const[NR_UNIT_SRC_N]	CONST	CELLFEAT	constant name table
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	50	protected_total::ps	func_static	nr_pool_stats_t	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): scratch copy of the pool statistics, scheduler thread only
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	39	unit_tab	file_static	unit_tab_t [converted]	PER_CELL	CELLFEAT	per-cell sensing unit table (64 RNTI rows x 4 sources x 320 buckets of 50 ms): lock-free atomics written by any thread of the cell, rows created under a try-lock, read by the cell's scheduler thread
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	375	tl_pend	tls	struct {}[PEND_N]	TLS	CELLFEAT	per-thread queue of unit-gate skips taken under a long lock, booked by the same thread after the unlock
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	376	tl_pend_n	tls	int	TLS	CELLFEAT	per-thread fill of tl_pend
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	53	srs_lock	file_static	pthread_mutex_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	82	sr_state	file_static	srs_state_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	209	process_srs::offsets	func_static	const int[]	CONST	CELLFEAT	auto

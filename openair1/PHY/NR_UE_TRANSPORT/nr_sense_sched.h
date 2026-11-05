@@ -22,6 +22,10 @@
 extern "C" {
 #endif
 
+#define SENSE_COST_MEM_DECAY 0.9f       /* a disabled unit whose cost history has left the window is charged its last measured cost, x0.9 per decision (half after ~7 decisions = ~26 s), then it is probed again */
+#define SENSE_REPROBE_BASE 4             /* a unit shed by the streak (resources / eligibility) is not enabled again for 4 decisions, doubling at each consecutive shed up to ... */
+#define SENSE_REPROBE_MAX 64             /* ... 64 decisions (~4 min); the count restarts after SENSE_REPROBE_OK decisions enabled and wanted */
+#define SENSE_REPROBE_OK 8
 #define SENSE_VIOL_HOLDOFF 2 /* decisions a unit removed for a violation stays off after the removal decision */
 #define NR_SENSE_CELLS 8
 #define NR_SENSE_SLOTS 64 /* RNTI slots per cell in the state: slot 0 is the per-cell SRS unit (rnti 0), 1..63 hold the other RNTIs */
@@ -39,6 +43,9 @@ typedef struct {
   int n_cells; int pci[NR_SENSE_CELLS];
   const nr_sense_unit_view_t *units[NR_SENSE_CELLS]; int n_units[NR_SENSE_CELLS]; /* per cell, from nr_sense_unit_snapshot (max 256 per cell, 2048 in all are considered) */
   nr_sense_res_t res[NR_RES_N];
+  /* per-cell override of the per-cell resources (NR_RES_QUEUE_DL, NR_RES_QUEUE_UL, NR_RES_SENSE_RING): used for cell c when cell_res_set[c], else res[] applies to every cell.
+   * POOL and GPU are shared by all cells and always come from res[]. */
+  nr_sense_res_t cell_res[NR_SENSE_CELLS][NR_RES_N]; bool cell_res_set[NR_SENSE_CELLS];
   int min_prb; uint64_t now_ns;
 } nr_sense_sched_in_t;
 
@@ -51,6 +58,8 @@ typedef struct {
   uint64_t last_pci_valid_wb_ns[NR_SENSE_CELLS];
   uint64_t pci_elig_since[NR_SENSE_CELLS]; bool pci_was_elig[NR_SENSE_CELLS], pci_seen[NR_SENSE_CELLS]; /* the age of a PCI/unit does not accumulate while it is ineligible */
   uint64_t elig_since[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; bool was_elig[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
+  float mem_cpu[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], mem_wait[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* last measured p99 demand while enabled, decayed while the unit is off (SENSE_COST_MEM_DECAY per decision) */
+  uint8_t shed_n[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], run_n[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* consecutive sheds (re-probe back-off) / decisions enabled and wanted */
   uint8_t holdoff[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* decisions a violation-removed unit must still wait before it can be enabled */
   bool known[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];     /* below: the violation baseline of the previous decision (re-baselined when the row generation changes) */
   uint32_t gen[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], viol[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];

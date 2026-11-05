@@ -265,3 +265,19 @@ TEST_F(Sched, StartIsANoopOutsideSensingAndStopIsSafe)
   nr_sense_sched_stop();
   EXPECT_EQ(stats().decisions, 1u); /* exactly the first step: the next one is SENSE_DECIDE_NS later */
 }
+
+TEST_F(Sched, OfferedGrantsWeightTheNextSkip)
+{
+  EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x4701, 200)); /* nothing offered: one message */
+  struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+  const uint64_t now = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec + 2 * B; /* one fixed time for both snapshots */
+  nr_sense_unit_view_t a[8], b[8];
+  ASSERT_EQ(nr_sense_unit_snapshot_at(0, now, a, 8), 1);
+  ASSERT_GT(a[0].wb_rate_hz, 0.f);
+  nr_sense_unit_offer(NR_UNIT_PDSCH_DATA, 0x4701, 32); /* the policy let one check decode through for 32 grants */
+  nr_sense_unit_offer(NR_UNIT_PDSCH_DATA, 0x9999, 32); /* no row: no effect */
+  EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x4701, 200));
+  ASSERT_EQ(nr_sense_unit_snapshot_at(0, now, b, 8), 1);
+  EXPECT_NEAR(b[0].wb_rate_hz / a[0].wb_rate_hz, 33.f, 0.5f); /* 1 + 32 messages */
+  EXPECT_EQ(b[0].skips, 2u); /* still one skip per gated message */
+}

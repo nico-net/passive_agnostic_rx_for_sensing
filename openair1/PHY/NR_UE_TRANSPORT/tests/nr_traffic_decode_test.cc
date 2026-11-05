@@ -3,6 +3,8 @@
 extern "C" {
 #include "nr_traffic_decode.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
+#include "nr_sense_unit.h"
+#include "common/utils/nr_cell.h"
 #include "nr_pdcch_blind_monitor.h"
 }
 namespace {
@@ -73,15 +75,29 @@ TEST(TrafficDecode, DirectionsAreIndependent)
   EXPECT_FALSE(nr_traffic_decode_result(1, 0x10a, 0, 15.f, false));
   EXPECT_TRUE(nr_traffic_decode_result(0, 0x10a, 0, 15.f, false));
 }
-TEST(TrafficDecode, SensingModeDecodesEveryGrant)
+TEST(TrafficDecode, SensingEnabledUnitDecodesEveryGrantDisabledFollowsPolicyPlusSample)
 {
-  /* plan S7: in SENSING every grant is decoded to the end (the unit gate acts on the CFR tap, not on the decode) */
   nr_isac_mode_set(NR_ISAC_MODE_SENSING);
-  for (nr_layout_state_t ls : {NR_LAYOUT_FIXED, NR_LAYOUT_CANDIDATE, NR_LAYOUT_UNSOLVED, NR_LAYOUT_SOLVED})
-    for (int i = 0; i < 40; i++) {
-      EXPECT_TRUE(nr_traffic_decode_wanted(0, 0x10b, C, ls, false, S + i, false)) << ls << " " << i;
-      EXPECT_TRUE(nr_traffic_decode_wanted(1, 0x10b, C, ls, true, S + i, false)) << ls << " " << i;
-    }
+  nr_sense_unit_reset(0);
+  nr_cell_bind(0);
+  /* a disabled unit (no row): FIXED layout is not decoded by the traffic policy; one grant in 32 is a sampled check decode */
+  int n = 0;
+  for (int i = 0; i < 64; i++) n += nr_traffic_decode_wanted(0, 0x2001, C, NR_LAYOUT_FIXED, false, S + i, false);
+  EXPECT_EQ(n, 2);
+  /* enabled: every grant, whatever the layout state */
+  nr_sense_unit_set_enabled(0, 0x2001, NR_UNIT_PDSCH_DATA, true);
+  for (nr_layout_state_t ls : {NR_LAYOUT_FIXED, NR_LAYOUT_CANDIDATE, NR_LAYOUT_UNSOLVED})
+    for (int i = 0; i < 40; i++) EXPECT_TRUE(nr_traffic_decode_wanted(0, 0x2001, C, ls, false, S + i, false));
+  /* UL follows PUSCH_DMRS of the RNTI: still disabled there, the policy decodes while the UL table is not learned */
+  EXPECT_TRUE(nr_traffic_decode_wanted(1, 0x2001, C, NR_LAYOUT_SOLVED, false, S, false));
+  int u = 0;
+  for (int i = 0; i < 64; i++) {
+    const bool w = nr_traffic_decode_wanted(1, 0x2001, C, NR_LAYOUT_SOLVED, true, S + i, false);
+    u += w;
+    if (w) nr_traffic_decode_result(1, 0x2001, 0, 20.f, true); /* the decode's verdict resets the policy's counter */
+  }
+  EXPECT_LE(u, 3); /* 1 policy check per 32 grants and 1 sample per 32 (they may coincide) */
+  EXPECT_GE(u, 2);
+  nr_sense_unit_reset(0);
   nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
-  EXPECT_FALSE(nr_traffic_decode_wanted(0, 0x10c, C, NR_LAYOUT_FIXED, false, S, false)); /* the traffic policy is unchanged outside the sensing mode */
 }

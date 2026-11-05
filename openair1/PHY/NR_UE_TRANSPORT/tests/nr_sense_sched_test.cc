@@ -352,3 +352,59 @@ TEST(Sched, UnitProducingInvalidCfrsStaysOff)
     if (i >= 1) EXPECT_FALSE(h.en(0, 1)) << i;
   }
 }
+
+TEST(Sched, PerCellRingAndQueuesAreNotSharedAcrossCells)
+{
+  /* a ring without headroom in cell 0 must not stop an enable in cell 1; the pool stays shared */
+  H h(2, 1000);
+  h.in.cell_res_set[0] = h.in.cell_res_set[1] = true;
+  for (int c = 0; c < 2; c++) {
+    memcpy(h.in.cell_res[c], h.in.res, sizeof h.in.res);
+    h.in.cell_res[c][NR_RES_SENSE_RING] = {1000.f, 0.f};
+  }
+  h.in.cell_res[0][NR_RES_SENSE_RING].base_p99_ns = 1000.f; /* cell 0's ring dropped records: no headroom */
+  h.add(0, 1, 5); h.add(1, 2, 5);
+  h.steps(3);
+  EXPECT_FALSE(h.en(0, 1));
+  EXPECT_TRUE(h.en(1, 2));
+  /* the per-cell queue budget is per cell: the same waits in two cells both fit a budget one cell alone would exhaust */
+  H g(2, 1e6f);
+  g.in.cell_res_set[0] = g.in.cell_res_set[1] = true;
+  for (int c = 0; c < 2; c++) { memcpy(g.in.cell_res[c], g.in.res, sizeof g.in.res); g.in.cell_res[c][NR_RES_QUEUE_DL] = {40.f, 0.f}; } /* budget 24 each */
+  g.add(0, 1, 5, NR_UNIT_PDSCH_DATA).wait_p99_ns = 20; g.add(1, 2, 5, NR_UNIT_PDSCH_DATA).wait_p99_ns = 20;
+  g.steps(3);
+  EXPECT_EQ(g.nen(0) + g.nen(1), 2);
+}
+
+TEST(Sched, CostMemoryStopsAnEnableDisableCycleOnASteadyLoad)
+{
+  H h(1, 100); /* pool budget 60 */
+  auto &u = h.add(0, 1, 80); /* costs 80 while it runs: more than the budget */
+  u.enabled = true;
+  h.steps(3);
+  EXPECT_FALSE(h.en(0, 1)); /* shed after the streak */
+  auto *p = h.find(0, 1);
+  p->cpu_p99_ns = p->cpu_p95_ns = p->cpu_max_ns = 0; /* its cost has left the 16 s window */
+  h.steps(2);
+  EXPECT_FALSE(h.en(0, 1)); /* without the memory this cold unit (demand 0) would be enabled after the streak */
+  h.steps(12);
+  EXPECT_TRUE(h.en(0, 1)); /* the memory decays: it is probed again */
+}
+
+TEST(Sched, UnitThatCannotStayOnIsProbedWithBackoffNotEveryFewDecisions)
+{
+  H h(1, 100); /* pool budget 60; the unit costs 80 whenever it runs and nothing while off (its cost leaves the window) */
+  h.add(0, 1, 0);
+  int enables = 0;
+  bool was = false;
+  for (int d = 0; d < 80; d++) {
+    auto *u = h.find(0, 1);
+    u->cpu_p99_ns = u->cpu_p95_ns = u->cpu_max_ns = u->enabled ? 80.f : 0.f;
+    h.step();
+    const bool now = h.en(0, 1);
+    if (now && !was) enables++;
+    was = now;
+  }
+  EXPECT_GE(enables, 2);   /* it is probed again */
+  EXPECT_LE(enables, 5);   /* ... with a growing gap: a fixed ~7-decision cycle would give 11 */
+}

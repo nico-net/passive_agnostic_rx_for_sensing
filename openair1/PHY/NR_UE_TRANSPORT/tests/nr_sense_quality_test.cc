@@ -496,3 +496,64 @@ TEST(SenseReconConf, OneMismatchAtHighSnrDoesNotFailThePrb)
   EXPECT_FALSE(okbit(e, 3));
   for (int p = 0; p < 10; p++) if (p != 3) EXPECT_TRUE(okbit(e, p)) << p;
 }
+
+/* CSI-RS-like input: ONE RE per PRB (subcarrier 1 of each PRB, one symbol), 4 antennas, flat channel of power 4 and noise 0.25 */
+static Cfr make_sparse(int nprb, float amp, bool two_symbols, float phase_sym2 = 0.f)
+{
+  Cfr c;
+  for (int s = 0; s < (two_symbols ? 2 : 1); s++)
+    for (int p = 0; p < nprb; p++) {
+      c.k.push_back(12 * p + 1);
+      c.l.push_back(5 + s);
+    }
+  c.n_re = c.k.size();
+  c.iq.resize(2 * c.n_ant * c.n_re);
+  for (int a = 0; a < c.n_ant; a++)
+    for (int i = 0; i < c.n_re; i++) {
+      const float ph = 0.3f * a + (c.l[i] == 6 ? phase_sym2 : 0.f);
+      c.iq[2 * (a * c.n_re + i)] = amp * std::cos(ph);
+      c.iq[2 * (a * c.n_re + i) + 1] = amp * std::sin(ph);
+    }
+  return c;
+}
+TEST(SenseQuality, SparseSourceOneRePerPrbIsValidWithAnEstimate)
+{
+  Cfr c = make_sparse(106, 2.f, false);
+  nr_sense_quality_t q, qd;
+  nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 0.25f, NR_SENSE_Q_SPARSE, &q);
+  EXPECT_EQ(q.valid_cfr_prbs, 106);
+  EXPECT_TRUE(std::isnan(q.resid_db)); /* no local fit */
+  EXPECT_GT(q.snr_db_p50, 3.f);
+  /* the dense rule still invalidates the same input (tot < 3): the sparse flag is what makes it valid */
+  nr_sense_quality_compute(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 0.25f, &qd);
+  EXPECT_EQ(qd.valid_cfr_prbs, 0);
+}
+TEST(SenseQuality, SparseSourceNeedsANoiseEstimateAndSnr)
+{
+  Cfr c = make_sparse(50, 2.f, false);
+  nr_sense_quality_t q;
+  nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 0.f, NR_SENSE_Q_SPARSE, &q);
+  EXPECT_EQ(q.valid_cfr_prbs, 0); /* nothing to judge the SNR with: not valid */
+  nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 4.f, NR_SENSE_Q_SPARSE, &q);
+  EXPECT_EQ(q.valid_cfr_prbs, 0); /* |H|^2 = noise: SNR 0 dB < 3 dB */
+}
+TEST(SenseQuality, SparseSourceSymbolConsistencyDecidesWithTwoSymbols)
+{
+  nr_sense_quality_t q;
+  Cfr ok = make_sparse(40, 2.f, true, 0.1f);
+  nr_sense_quality_compute_ex(ok.n_ant, ok.iq.data(), ok.n_re, ok.n_re, ok.k.data(), ok.l.data(), 0.25f, NR_SENSE_Q_SPARSE, &q);
+  EXPECT_EQ(q.valid_cfr_prbs, 40);
+  EXPECT_GT(q.sym_consist, 0.9f);
+  /* the second symbol decorrelated by pi (anti-phase, the correlation magnitude stays 1): use an unrelated per-PRB phase instead */
+  Cfr bad = make_sparse(40, 2.f, true);
+  for (int i = 0; i < bad.n_re; i++)
+    if (bad.l[i] == 6)
+      for (int a = 0; a < bad.n_ant; a++) {
+        const float ph = 1.7f * float((i * 37) % 11) + 0.9f * a;
+        bad.iq[2 * (a * bad.n_re + i)] = 2.f * std::cos(ph);
+        bad.iq[2 * (a * bad.n_re + i) + 1] = 2.f * std::sin(ph);
+      }
+  nr_sense_quality_compute_ex(bad.n_ant, bad.iq.data(), bad.n_re, bad.n_re, bad.k.data(), bad.l.data(), 0.25f, NR_SENSE_Q_SPARSE, &q);
+  EXPECT_LT(q.sym_consist, NR_SENSE_SPARSE_SYM_MIN);
+  EXPECT_EQ(q.valid_cfr_prbs, 0);
+}

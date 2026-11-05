@@ -441,8 +441,8 @@ void nr_srs_passive_capture(PHY_VARS_NR_UE *ue,int frame,int slot,uint64_t abs_s
   }
   if(!mask) {pthread_mutex_unlock(&srs_lock);return;}
   /* SENSING mode unit gate (spec 5.6): the per-cell SRS unit disabled = no capture, no worker job; the UL slot counts as a disabled skip of one sense_min_prb message. A job already
-   * queued is finished by the worker (never re-gated). Lock-free, taken under srs_lock for microseconds only. */
-  if(!nr_sense_unit_gate(NR_UNIT_SRS,0,0)) {pthread_mutex_unlock(&srs_lock);return;}
+   * queued is finished by the worker (never re-gated). Only the read-only check runs under srs_lock. */
+  if(!nr_sense_unit_gate_deferred(NR_UNIT_SRS,0,0)) {pthread_mutex_unlock(&srs_lock);nr_sense_unit_flush_pending();return;} /* the skip is booked after the unlock */
   /* Only slots that carry UL symbols are eligible, so only they can be lost to a full queue (before: the full-queue test ran first and counted every slot of the frame). */
   if(sr.count==SRS_DEPTH) {atomic_fetch_add(&sr.dropped,1);nr_sense_unit_violation(NR_UNIT_SRS,0);pthread_mutex_unlock(&srs_lock);return;}
   /* The slot at `head` belongs to this thread until it is published (the worker only reads [tail, tail+count)); the 470 KB copy must not hold the lock: the event posters

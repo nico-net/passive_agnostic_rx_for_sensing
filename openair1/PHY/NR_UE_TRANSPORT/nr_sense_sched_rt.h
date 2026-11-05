@@ -26,6 +26,7 @@ void nr_sense_sched_step(uint64_t now_ns);
 typedef struct {
   int n_cells; int pci[NR_SENSE_CELLS];
   nr_sense_res_t res[NR_RES_N];
+  nr_sense_res_t cell_res[NR_SENSE_CELLS][NR_RES_N]; bool cell_res_set[NR_SENSE_CELLS]; /* per-cell queues and ring (nr_sense_sched_in_t.cell_res) */
   uint64_t ring_drops[NR_SENSE_CELLS]; /* records lost on the sense ring since the previous sample (informational; it also removes the ring's headroom) */
 } nr_sense_sched_sample_t;
 void nr_sense_sched_set_sampler(bool (*fn)(nr_sense_sched_sample_t *out, uint64_t now_ns));

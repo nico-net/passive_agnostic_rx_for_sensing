@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /* Sensing-mode scheduler thread (plan Task S7). See nr_sense_sched_rt.h. */
 #include "nr_sense_sched_rt.h"
 #include "nr_sense_api.h"
@@ -5,6 +6,7 @@
 #include "common/utils/nr_core_pool.h"
 #include "common/utils/LOG/log.h"
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -31,22 +33,55 @@ static pthread_t g_thread;
 static _Atomic int g_running; /* 1 = the thread exists and has not been joined */
 static _Atomic int g_stop;
 
-/* Production sampler state: cumulative counters of the previous sample (process-wide, thread only). */
+/* Production sampler state (process-wide, scheduler thread only). */
 static struct {
-  uint64_t t_ns, hold[NR_POOL_MAX_CELLS], unattr[NR_SENSE_CELLS], rec_dropped[NR_SENSE_CELLS];
-  bool primed;
+  uint64_t t_ns, rec_dropped[NR_SENSE_CELLS]; bool primed; /* decision to decision */
+  uint64_t sub_t_ns, sub_hold, sub_unattr; double sub_max; bool sub_have; /* 500 ms sub-windows within the decision period */
+  int no_sample;                                           /* consecutive periods without a pool sample (M3) */
 } g_prev;
 
-static void sched_log(uint64_t now_ns, const nr_sense_sched_sample_t *sm, const nr_sense_sched_out_t *out);
+static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample_t *sm, const nr_sense_sched_out_t *out);
 
-/* POOL: cap = pool tokens x one bucket (ns of token time per 50 ms); base = the protected work of the window. VERIFIED fields of nr_pool_stats_t:
- * hold_ns_cell_cls[cell][class] (cumulative token-time per cell and class). Protected classes: SCAN, RETRY (solver), DISC, HOUSE; DECODE and SENSE are the units' own
- * cost (S5 attributes it) and are not in the base. Cost-only calls without a row (nr_sense_unit_unattributed_ns) stay in the base, as S5 documents.
- * The base is the MEAN token-time rate of the last period, not a p99 (no per-bucket history of the pool exists): a documented shortcut.
- * QUEUE_DL/UL: cap = the late threshold (NR_UNIT_LATE_NS, the DECSLOW/RECOV late notion), base 0: the per-unit wait p99 is the demand and no queue-wide wait histogram
- * is available to the scheduler. GPU: cap = one bucket when the GPU pass is up, else 0 (absent); base 0: the GPU time per unit is not measured (cpu proxy in S6).
- * SENSE_RING: cap = one bucket (the writer thread); base 0, or the whole cap when records were lost on the ring in the period (no headroom: nothing new is enabled
- * and enabled units go after the streak). */
+/* Protected work of all cells up to now (token-time ns of SCAN, RETRY(solver), DISC, HOUSE per nr_pool_stats_t.hold_ns_cell_cls, plus the cost-only calls without a unit row). */
+static bool protected_total(uint64_t *hold, uint64_t *unattr)
+{
+  nr_pool_t *pool = (nr_pool_site && nr_pool_stats && nr_pool_size) ? nr_pool_site() : NULL;
+  if (!pool) return false;
+  static nr_pool_stats_t ps; /* ~16 KB: static, scheduler thread only */
+  nr_pool_stats(pool, &ps);
+  int n = nr_cell_count();
+  if (n > NR_SENSE_CELLS) n = NR_SENSE_CELLS;
+  uint64_t h = 0, u = 0;
+  for (int k = 0; k < n; k++) {
+    for (int c = 0; c < NR_POOL_NPRIO; c++)
+      if (c == NR_POOL_SCAN || c == NR_POOL_RETRY || c == NR_POOL_DISC || c == NR_POOL_HOUSE) h += ps.hold_ns_cell_cls[k][c];
+    u += nr_sense_unit_unattributed_ns(k);
+  }
+  *hold = h; *unattr = u;
+  return true;
+}
+
+/* One 500 ms sub-window of the pool baseline: the rate (token-time ns per 50 ms bucket) over the time since the previous tick; the period keeps the MAXIMUM, the closest
+ * thing to the spec's p99 over 50 ms buckets that the cumulative pool counters allow. */
+static void sub_tick(uint64_t now_ns)
+{
+  uint64_t h, u;
+  if (!protected_total(&h, &u)) return;
+  if (g_prev.sub_t_ns && now_ns > g_prev.sub_t_ns) {
+    const double dt = (double)(now_ns - g_prev.sub_t_ns);
+    const double d = (double)(h >= g_prev.sub_hold ? h - g_prev.sub_hold : 0) + (double)(u >= g_prev.sub_unattr ? u - g_prev.sub_unattr : 0);
+    const double rate = d / (dt / (double)SENSE_BUCKET_NS);
+    if (!g_prev.sub_have || rate > g_prev.sub_max) g_prev.sub_max = rate;
+    g_prev.sub_have = true;
+  }
+  g_prev.sub_t_ns = now_ns; g_prev.sub_hold = h; g_prev.sub_unattr = u;
+}
+
+/* POOL: cap = pool tokens x one bucket (ns of token time per 50 ms); base = the largest 500 ms sub-window rate of the protected classes in the period (see sub_tick).
+ * QUEUE_DL/UL: cap = the late threshold (NR_UNIT_LATE_NS), base 0 = UNMEASURED: no queue-wide wait statistic is exposed (the PDSCH/PUSCH queues keep per-job BTIM stages and
+ * cumulative counters only; the daBg wait histogram is the units' own queue); the per-unit wait p99 is the demand. GPU: cap = one bucket when the GPU pass is up, else 0 (absent);
+ * base 0 = UNMEASURED: no pacer refusal or GPU busy counter is exposed (nr_gpu_pass_dl_cell_counters gives calls and host refusals per cell, not time). SENSE_RING (per cell):
+ * cap = one bucket (the writer), base = the whole cap when records were lost on that cell's ring in the period. */
 static bool sample_prod(nr_sense_sched_sample_t *o, uint64_t now_ns)
 {
   memset(o, 0, sizeof *o);
@@ -54,43 +89,38 @@ static bool sample_prod(nr_sense_sched_sample_t *o, uint64_t now_ns)
   if (n < 1) return false;
   if (n > NR_SENSE_CELLS) n = NR_SENSE_CELLS;
   o->n_cells = n;
+  sub_tick(now_ns);
   nr_pool_t *pool = (nr_pool_site && nr_pool_stats && nr_pool_size) ? nr_pool_site() : NULL;
-  if (!pool) return false;
-  static nr_pool_stats_t ps; /* ~16 KB: static, thread only */
-  nr_pool_stats(pool, &ps);
+  if (!pool) {
+    if (++g_prev.no_sample == 3) LOG_E(PHY, "SENSING: SENSE_SCHED has no pool sample (nr_pool_site unavailable): no unit can be enabled\n");
+    return false;
+  }
+  g_prev.no_sample = 0;
   const int prev_cell = nr_cell_idx();
-  double hold_delta = 0, unattr_delta = 0;
-  uint64_t drops_any = 0;
   const bool primed = g_prev.primed && now_ns > g_prev.t_ns;
-  const double dt = primed ? (double)(now_ns - g_prev.t_ns) : 1.0;
   for (int k = 0; k < n; k++) {
     o->pci[k] = nr_passive_metrics_pci_of ? nr_passive_metrics_pci_of(k) : -1;
-    uint64_t h = 0;
-    for (int c = 0; c < NR_POOL_NPRIO; c++)
-      if (c == NR_POOL_SCAN || c == NR_POOL_RETRY || c == NR_POOL_DISC || c == NR_POOL_HOUSE) h += ps.hold_ns_cell_cls[k][c];
-    const uint64_t ua = nr_sense_unit_unattributed_ns(k);
     nr_cell_bind(k);
     nr_sense_stats_t st;
     nr_sense_stats(&st);
     nr_cell_bind(prev_cell);
-    if (primed) {
-      hold_delta += (double)(h >= g_prev.hold[k] ? h - g_prev.hold[k] : 0);
-      unattr_delta += (double)(ua >= g_prev.unattr[k] ? ua - g_prev.unattr[k] : 0);
-      o->ring_drops[k] = st.rec_dropped >= g_prev.rec_dropped[k] ? st.rec_dropped - g_prev.rec_dropped[k] : 0;
-      drops_any += o->ring_drops[k];
-    }
-    g_prev.hold[k] = h; g_prev.unattr[k] = ua; g_prev.rec_dropped[k] = st.rec_dropped;
+    if (primed) o->ring_drops[k] = st.rec_dropped >= g_prev.rec_dropped[k] ? st.rec_dropped - g_prev.rec_dropped[k] : 0;
+    g_prev.rec_dropped[k] = st.rec_dropped;
   }
-  const bool was_primed = primed;
   g_prev.t_ns = now_ns; g_prev.primed = true;
-  if (!was_primed) return false; /* the first period only primes the counters */
-  const double buckets = dt / (double)SENSE_BUCKET_NS;
+  if (!primed || !g_prev.sub_have) return false; /* the first period only primes the counters */
   const int tokens = nr_pool_size(pool);
-  o->res[NR_RES_POOL] = (nr_sense_res_t){.cap_ns = (float)((double)tokens * (double)SENSE_BUCKET_NS), .base_p99_ns = (float)((hold_delta + unattr_delta) / buckets)};
+  o->res[NR_RES_POOL] = (nr_sense_res_t){.cap_ns = (float)((double)tokens * (double)SENSE_BUCKET_NS), .base_p99_ns = (float)g_prev.sub_max};
+  g_prev.sub_have = false; g_prev.sub_max = 0;
   o->res[NR_RES_QUEUE_DL] = (nr_sense_res_t){.cap_ns = (float)NR_UNIT_LATE_NS, .base_p99_ns = 0.f};
   o->res[NR_RES_QUEUE_UL] = (nr_sense_res_t){.cap_ns = (float)NR_UNIT_LATE_NS, .base_p99_ns = 0.f};
   o->res[NR_RES_GPU] = (nr_sense_res_t){.cap_ns = (nr_gpu_pass_active && nr_gpu_pass_active()) ? (float)SENSE_BUCKET_NS : 0.f, .base_p99_ns = 0.f};
-  o->res[NR_RES_SENSE_RING] = (nr_sense_res_t){.cap_ns = (float)SENSE_BUCKET_NS, .base_p99_ns = drops_any ? (float)SENSE_BUCKET_NS : 0.f};
+  o->res[NR_RES_SENSE_RING] = (nr_sense_res_t){.cap_ns = (float)SENSE_BUCKET_NS, .base_p99_ns = 0.f};
+  for (int k = 0; k < n; k++) { /* the per-cell resources (queues, ring) of each cell */
+    o->cell_res_set[k] = true;
+    memcpy(o->cell_res[k], o->res, sizeof o->res);
+    if (o->ring_drops[k]) o->cell_res[k][NR_RES_SENSE_RING].base_p99_ns = (float)SENSE_BUCKET_NS;
+  }
   return true;
 }
 
@@ -143,6 +173,8 @@ void nr_sense_sched_step(uint64_t now_ns)
     in.units[c] = g_views[c];
   }
   memcpy(in.res, sm.res, sizeof in.res);
+  memcpy(in.cell_res, sm.cell_res, sizeof in.cell_res);
+  memcpy(in.cell_res_set, sm.cell_res_set, sizeof in.cell_res_set);
   in.min_prb = nr_isac_sense_min_prb();
   in.now_ns = now_ns;
   static nr_sense_sched_out_t out;
@@ -153,12 +185,11 @@ void nr_sense_sched_step(uint64_t now_ns)
   atomic_fetch_add(&g_disables, (uint64_t)out.disables);
   atomic_fetch_add(&g_bad_cap, (uint64_t)out.bad_cap);
   atomic_store(&g_binding, (int)out.binding);
-  if (!smp) sched_log(now_ns, &sm, &out); /* a test sampler runs without the log subsystem */
+  if (!smp) sched_log(&in, &sm, &out); /* a test sampler runs without the log subsystem */
 }
 
-static void sched_log(uint64_t now_ns, const nr_sense_sched_sample_t *sm, const nr_sense_sched_out_t *out)
+static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample_t *sm, const nr_sense_sched_out_t *out)
 {
-  (void)now_ns;
   static const char *const sn[NR_UNIT_SRC_N] = {"pdsch_dmrs", "pdsch_data", "pusch_dmrs", "srs"};
   char set[512];
   int w = 0;
@@ -172,23 +203,47 @@ static void sched_log(uint64_t now_ns, const nr_sense_sched_sample_t *sm, const 
     nr_sense_unit_cell_stats(c, &cs);
     viol += cs.violations; skips += cs.skips; en += cs.units_enabled; drops += sm->ring_drops[c];
   }
-  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s admitted=%d [%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f\n",
+  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s admitted=%d [%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_base=unmeasured gpu_base=unmeasured\n",
         (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), out->n_admitted, set, en,
         (unsigned long)viol, (unsigned long)skips, (unsigned long)drops, sm->res[NR_RES_POOL].cap_ns * 1e-6, sm->res[NR_RES_POOL].base_p99_ns * 1e-6); /* per 50 ms bucket */
+  /* the units behind the decision (the first 8 per cell): enabled flag, wideband rate, valid ratio, p99 CPU per bucket (ms), skips and violations since the row was created */
+  for (int c = 0; c < in->n_cells; c++) {
+    char u[640];
+    int w = 0;
+    u[0] = 0;
+    for (int i = 0; i < in->n_units[c] && i < 8 && w < (int)sizeof u - 96; i++) {
+      const nr_sense_unit_view_t *v = &in->units[c][i];
+      w += snprintf(u + w, sizeof u - (size_t)w, "%s%u/%s:%s wb=%.1f ratio=%.2f cpu99=%.2f skips=%u viol=%u", i ? " | " : "", (unsigned)v->rnti, sn[v->src], v->enabled ? "ON" : "off",
+                    v->wb_rate_hz, v->valid_ratio, v->cpu_p99_ns * 1e-6, v->skips, v->violations);
+    }
+    LOG_A(PHY, "SENSING: SENSE_UNITS cell=%d pci=%d n=%d %s\n", c, sm->pci[c], in->n_units[c], u);
+  }
 }
 
 static void *sched_main(void *arg)
 {
   (void)arg;
+  {
+    cpu_set_t all; /* ... and no fixed core: the creator's affinity is replaced by every CPU the process may use */
+    CPU_ZERO(&all);
+    for (int c = 0; c < CPU_SETSIZE; c++) CPU_SET(c, &all);
+    if (sched_setaffinity(0, sizeof all, &all) != 0) { /* the kernel refuses CPUs outside the cpuset: fall back to the process's own mask */
+      cpu_set_t pm;
+      if (sched_getaffinity(getpid(), sizeof pm, &pm) == 0) sched_setaffinity(0, sizeof pm, &pm);
+    }
+  }
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
-  uint64_t next = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; /* the first step primes the counters; the first decision is one period later */
+  uint64_t next = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec, sub_next = next + 500000000ull; /* the first step primes the counters; the first decision is one period later */
   while (!atomic_load(&g_stop)) {
     clock_gettime(CLOCK_MONOTONIC, &t);
     const uint64_t now = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
     if (now >= next) {
       nr_sense_sched_step(now);
       next = now + SENSE_DECIDE_NS;
+    } else if (now >= sub_next && !atomic_load(&g_sampler)) {
+      sub_tick(now);
+      sub_next = now + 500000000ull;
     }
     usleep(50000);
   }
@@ -202,7 +257,11 @@ void nr_sense_sched_start(void)
   atomic_store(&g_stop, 0);
   pthread_attr_t at;
   pthread_attr_init(&at);
-  pthread_attr_setstacksize(&at, 2u << 20); /* >= 1 MB: the decision's candidate table is ~250 KB on the stack */
+  pthread_attr_setstacksize(&at, 2u << 20);
+  struct sched_param sp = {.sched_priority = 0};
+  pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED); /* SCHED_OTHER whatever the creator runs as ... */
+  pthread_attr_setschedpolicy(&at, SCHED_OTHER);
+  pthread_attr_setschedparam(&at, &sp); /* >= 1 MB: the decision's candidate table is ~250 KB on the stack */
   if (pthread_create(&g_thread, &at, sched_main, NULL) != 0) {
     atomic_store(&g_running, 0);
     LOG_E(PHY, "SENSING: SENSE_SCHED thread not started\n");

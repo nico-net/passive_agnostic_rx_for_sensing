@@ -32,6 +32,7 @@ void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti); /* a drop inside a
 /* A message of a disabled unit, gated before work: counts as a (never produced) message with its usable PRBs, so a disabled unit keeps its (wideband) rate.
  * t_ns = nr_sense_now_ns(). Like job(), it opens a row only when est_usable_prbs >= sense_min_prb. */
 void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs, uint64_t t_ns);
+void nr_sense_unit_skip_w(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs, uint64_t t_ns, unsigned weight); /* the skip stands for `weight` messages (rate and wideband rate), one skip */
 /* The scheduler's switch. Creates the row. A row (RNTI) is created DISABLED in every source (S7): the scheduler enables it through its cold-unit path. */
 void nr_sense_unit_set_enabled(int cell, uint16_t rnti, nr_unit_src_t s, bool enabled);
 /* The gate of a unit (spec 5.6), lock-free, bounded (one scan of the 64 row keys), read by the cell of the calling thread. true = the work may run.
@@ -41,6 +42,12 @@ bool nr_sense_unit_enabled(nr_unit_src_t s, uint16_t rnti);
  * the usable PRBs of the message: it is what keeps the rate of a disabled unit and opens its row) and the caller must not start the work. SRS passes 0: a capture counts as
  * one message of sense_min_prb PRBs. */
 bool nr_sense_unit_gate(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs);
+/* The decode policy lets a check decode through for a disabled unit: it stands for `grants` grants of the RNTI. The next skip of the unit books them as its message weight. No row, no effect. */
+void nr_sense_unit_offer(nr_unit_src_t s, uint16_t rnti, unsigned grants);
+/* As nr_sense_unit_gate for a site under a long lock (g_phase2_mu): only the read-only check runs there. A false result queues the skip on the calling thread;
+ * nr_sense_unit_flush_pending() books the queued skips and must be called by the same thread after the unlock. */
+bool nr_sense_unit_gate_deferred(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs);
+void nr_sense_unit_flush_pending(void);
 /* Per-cell totals for the metrics (cumulative since start; survive row eviction). */
 typedef struct {
   uint64_t violations, skips;                 /* drops inside enabled units / messages gated off */

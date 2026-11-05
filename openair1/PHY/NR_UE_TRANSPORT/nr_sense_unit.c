@@ -29,7 +29,7 @@ typedef struct {
 typedef struct {
   ubucket_t bk[NBS];
   _Atomic uint64_t last_msg_ns, last_valid_wb_ns, last_cfr_ns, first_ns;
-  _Atomic uint32_t late, viol, skips, live, disabled, est_last, n_cfr, valid_bits, snr_bits;
+  _Atomic uint32_t late, viol, skips, live, disabled, est_last, n_cfr, valid_bits, snr_bits, pend_w;
 } unit_t;
 typedef struct {
   _Atomic uint32_t key[NR_UNIT_ROWS];
@@ -67,6 +67,7 @@ static void reset_unit(unit_t *u)
   atomic_store_explicit(&u->n_cfr, 0, memory_order_relaxed);
   atomic_store_explicit(&u->valid_bits, 0, memory_order_relaxed);
   atomic_store_explicit(&u->snr_bits, 0, memory_order_relaxed);
+  atomic_store_explicit(&u->pend_w, 0, memory_order_relaxed);
 }
 
 /* g0 (optional) receives the row generation read BEFORE the key: an eviction clears the key, then bumps the generation, so a writer that saw the key
@@ -272,6 +273,8 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
 
 void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti)
 {
+  if (nr_isac_mode() != NR_ISAC_MODE_SENSING)
+    return; /* legacy and traffic pay no clock read on a drop */
   unit_tab_t *T = tab_of(nr_cell_idx());
   rnti = unit_rnti(s, rnti);
   int r;
@@ -286,7 +289,9 @@ void nr_sense_unit_violation(nr_unit_src_t s, uint16_t rnti)
   atomic_fetch_add_explicit(&T->viol_total, 1, memory_order_relaxed);
 }
 
-void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs, uint64_t t_ns)
+void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs, uint64_t t_ns) { nr_sense_unit_skip_w(s, rnti, est_usable_prbs, t_ns, 1); }
+
+void nr_sense_unit_skip_w(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs, uint64_t t_ns, unsigned weight)
 {
   unit_tab_t *T = tab_of(nr_cell_idx());
   rnti = unit_rnti(s, rnti);
@@ -300,7 +305,8 @@ void nr_sense_unit_skip(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs
   /* a gated message is still a message of the unit: its (wideband) rate is what lets the scheduler value the unit while it is off */
   if (est_usable_prbs)
     atomic_store_explicit(&u->est_last, est_usable_prbs, memory_order_relaxed);
-  bucket_add(u, t_ns, 0, 0, est_usable_prbs ? 1 : 0, wideband_capable(est_usable_prbs) ? 1 : 0);
+  if (weight < 1) weight = 1;
+  bucket_add(u, t_ns, 0, 0, est_usable_prbs ? weight : 0, wideband_capable(est_usable_prbs) ? weight : 0);
 }
 
 void nr_sense_unit_set_enabled(int cell, uint16_t rnti, nr_unit_src_t s, bool enabled)
@@ -326,8 +332,31 @@ bool nr_sense_unit_enabled(nr_unit_src_t s, uint16_t rnti)
   if ((unsigned)s >= NR_UNIT_SRC_N || nr_isac_mode() != NR_ISAC_MODE_SENSING)
     return true;
   unit_tab_t *T = tab_of(nr_cell_idx());
+  const uint32_t k = (uint32_t)unit_rnti(s, rnti) + 1u;
+  for (int i = 0; i < NR_UNIT_ROWS; i++) /* keys only: the read needs no generation (a row evicted under us is a race of one message) */
+    if (atomic_load_explicit(&T->key[i], memory_order_acquire) == k)
+      return !atomic_load_explicit(&T->u[i][s].disabled, memory_order_relaxed);
+  return false;
+}
+
+/* The grants a gated message stands for: the decode policy offers them (nr_sense_unit_offer) when it lets a sampled / checked decode through for a disabled unit, the next skip of
+ * that unit takes them (1 when none were offered: every decoded TB then is one grant). So a disabled unit keeps a rate comparable to an enabled one's, whatever the sampling. */
+static unsigned take_weight(nr_unit_src_t s, uint16_t rnti)
+{
+  unit_tab_t *T = tab_of(nr_cell_idx());
   const int r = row_find(T, unit_rnti(s, rnti), NULL);
-  return r >= 0 && !atomic_load_explicit(&T->u[r][s].disabled, memory_order_relaxed);
+  if (r < 0) return 1;
+  const unsigned w = atomic_exchange_explicit(&T->u[r][s].pend_w, 0, memory_order_relaxed);
+  return w ? w : 1;
+}
+void nr_sense_unit_offer(nr_unit_src_t s, uint16_t rnti, unsigned grants)
+{
+  if ((unsigned)s >= NR_UNIT_SRC_N || nr_isac_mode() != NR_ISAC_MODE_SENSING || !grants)
+    return;
+  unit_tab_t *T = tab_of(nr_cell_idx());
+  const int r = row_find(T, unit_rnti(s, rnti), NULL); /* never opens a row */
+  if (r >= 0 && atomic_load_explicit(&T->u[r][s].pend_w, memory_order_relaxed) < 1023u)
+    atomic_fetch_add_explicit(&T->u[r][s].pend_w, grants, memory_order_relaxed);
 }
 
 bool nr_sense_unit_gate(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs)
@@ -336,7 +365,31 @@ bool nr_sense_unit_gate(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs
     return true;
   if (s == NR_UNIT_SRS && !est_usable_prbs)
     est_usable_prbs = (uint16_t)nr_isac_sense_min_prb();
-  nr_sense_unit_skip(s, rnti, est_usable_prbs, now_ns());
+  nr_sense_unit_skip_w(s, rnti, est_usable_prbs, now_ns(), take_weight(s, rnti));
+  return false;
+}
+
+/* Deferred accounting for a site that holds a long lock (g_phase2_mu): the read-only check runs there, the skip is queued per thread and booked by
+ * nr_sense_unit_flush_pending() after the unlock (also when the queue is full: then inline, rarely). */
+#define PEND_N 16
+static __thread struct { nr_unit_src_t s; uint16_t rnti, est; uint64_t t; } tl_pend[PEND_N];
+static __thread int tl_pend_n;
+void nr_sense_unit_flush_pending(void)
+{
+  for (int i = 0; i < tl_pend_n; i++)
+    nr_sense_unit_skip_w(tl_pend[i].s, tl_pend[i].rnti, tl_pend[i].est, tl_pend[i].t, take_weight(tl_pend[i].s, tl_pend[i].rnti));
+  tl_pend_n = 0;
+}
+bool nr_sense_unit_gate_deferred(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs)
+{
+  if (nr_sense_unit_enabled(s, rnti))
+    return true;
+  if (s == NR_UNIT_SRS && !est_usable_prbs)
+    est_usable_prbs = (uint16_t)nr_isac_sense_min_prb();
+  if (tl_pend_n == PEND_N)
+    nr_sense_unit_flush_pending();
+  tl_pend[tl_pend_n].s = s; tl_pend[tl_pend_n].rnti = rnti; tl_pend[tl_pend_n].est = est_usable_prbs; tl_pend[tl_pend_n].t = now_ns();
+  tl_pend_n++;
   return false;
 }
 

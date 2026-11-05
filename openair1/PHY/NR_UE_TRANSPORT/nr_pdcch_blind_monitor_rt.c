@@ -5319,6 +5319,7 @@ static void phase2_guard_release(phase2_guard_t *g)
 {
   if (g->held)
     nr_pdcch_blind_phase2_unlock();
+  nr_sense_unit_flush_pending(); /* the unit-gate skips queued under the lock (sensing mode) are booked here, outside it */
 }
 
 /* nr_pdcch_blind_monitor_run_occasion_one: runs one PDCCH scan pass (one CORESET geometry: CORESET#0, a bank entry, the discovered CORESET or the CSS0 pass) and returns when done.
@@ -8511,6 +8512,10 @@ constdiag_done:;
       if (cand_task[ti].ok) {
         NR_BLIND_CTR_INC(g_ul_accepts);
         bool ul_dec = true; /* traffic mode: a non-probe PUSCH decode of this grant is wanted */
+        if (nr_isac_mode() == NR_ISAC_MODE_SENSING) { /* sensing: all grants of an enabled PUSCH_DMRS unit, the traffic policy + a sampled check otherwise */
+          const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
+          ul_dec = traffic_decode_wanted(1, u->rnti, NR_BLIND_RNTI_CLASS_C, uls, nr_pusch_passive_ul_table_learned(u->rnti));
+        }
         if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
           const uint64_t tt0 = btim_now_ns();
           const nr_layout_state_t uls = nr_ul_layout_lock_enabled() && nr_ul_layout_is_tagged(u) ? NR_LAYOUT_SOLVED : NR_LAYOUT_UNSOLVED;
@@ -8658,6 +8663,8 @@ constdiag_done:;
                   (unsigned)ul00.start_symbol, (unsigned)ul00.num_symbols,
                   (unsigned)ul00.k2, (unsigned)ul00.mcs);
           bool ul00_dec = true;
+          if (nr_isac_mode() == NR_ISAC_MODE_SENSING)
+            ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti));
           if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
             const uint64_t tt0 = btim_now_ns();
             ul00_dec = traffic_decode_wanted(1, ul00.rnti, cand_task[ti].out.rnti_class, NR_LAYOUT_FIXED, nr_pusch_passive_ul_table_learned(ul00.rnti));
@@ -8842,6 +8849,12 @@ constdiag_done:;
       nr_cfg_epoch_note_si_modification(cfg_abs_slot, nr_cfg_epoch_si_period());
     NR_BLIND_CTR_INC(g_accepts);
     int tw = -1; /* traffic mode only: 1 = a non-probe decode of this DCI is wanted, 0 = suppressed (-1 in legacy mode: never read) */
+    if (nr_isac_mode() == NR_ISAC_MODE_SENSING) { /* sensing: all grants of an enabled PDSCH_DATA unit, the traffic policy + a sampled check otherwise */
+      const bool is10t = out.dci_format == NR_BLIND_DCI_FORMAT_1_0;
+      const bool slv = !is10t && nr_pdsch_solver_enabled() && cand_task[ti].dl_auto && g_dci11_state == 1 && g_dci11_resolver != NULL;
+      const nr_layout_state_t lst = is10t ? NR_LAYOUT_FIXED : slv ? nr_pdsch_solver_layout_state(out.rnti, NULL, NULL) : NR_LAYOUT_SOLVED;
+      tw = traffic_decode_wanted(0, out.rnti, out.rnti_class, lst, false) ? 1 : 0;
+    }
     if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) {
       const uint64_t tt0 = btim_now_ns();
       const bool is10t = out.dci_format == NR_BLIND_DCI_FORMAT_1_0;
@@ -10070,8 +10083,8 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
         run++;
       chest_alloc = set_bitmap_from_start_size(freq_alloc.prb_list[0], run);
     }
-    /* SENSING mode unit gate (spec 5.6): a disabled (RNTI, PDSCH_DMRS) unit gets no DM-RS tap: no extra chest, no extraction, no hand-off. Counted once per accepted grant as a disabled skip; with the tap off the grant is handled exactly as under sources = "pdsch_data". */
-    const bool dmrs_gate_g = dmrs_source >= 0 && nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, out.rnti, (uint16_t)chest_alloc.num_rbs);
+    /* SENSING mode unit gate (spec 5.6): a disabled (RNTI, PDSCH_DMRS) unit gets no DM-RS tap: no extra chest, no extraction, no hand-off. Counted once per accepted grant as a disabled skip (queued under g_phase2_mu, booked after the unlock); with the tap off the grant is handled exactly as under sources = "pdsch_data". */
+    const bool dmrs_gate_g = dmrs_source >= 0 && nr_sense_unit_gate_deferred(NR_UNIT_PDSCH_DMRS, out.rnti, (uint16_t)chest_alloc.num_rbs);
     const int dmrs_source_g = dmrs_gate_g ? dmrs_source : -1;
     const bool want_dmrs_g = dmrs_source_g >= 0;
 
