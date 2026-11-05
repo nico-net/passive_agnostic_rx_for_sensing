@@ -2634,6 +2634,24 @@ int nr_pdsch_solver_layout_evidence(uint16_t rnti)
   return ev;
 }
 
+bool nr_pdsch_solver_derive_inputs(uint16_t rnti, int tda, bool *crc, int *add_pos, int *table, int *S, int *L, bool *ov)
+{
+  bool ok = false;
+  pthread_mutex_lock(&g_mu);
+  const solver_rnti_t *r = slot_of(rnti, false, NULL);
+  if (r && r->solved && r->table >= 0 && tda >= 0 && tda < 16) {
+    ok = true;
+    *crc = !(r->phys && r->full_ok == 0);
+    *add_pos = r->add_pos; *table = r->table;
+    *S = r->S_by_tda[tda];
+    *L = r->S_by_tda[tda] < 0 ? -1 : r->L_by_tda[tda] > 0 ? r->L_by_tda[tda] : 14 - r->S_by_tda[tda];
+    *ov = false;
+    for (int i = 0; i < SOLVER_PHASES; i++) if (r->ov_S[i] >= 0) *ov = true;
+  }
+  pthread_mutex_unlock(&g_mu);
+  return ok;
+}
+
 bool nr_pdsch_solver_phys_unconfirmed(uint16_t rnti)
 {
   pthread_mutex_lock(&g_mu);

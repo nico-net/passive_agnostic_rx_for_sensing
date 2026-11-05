@@ -168,6 +168,8 @@ void nr_pusch_passive_stats_dump(void);
 
 /* traffic mode: the UL MCS table of this RNTI is learned (two consecutive CRC passes under one table, nr_ul_tbl_retry.h) */
 bool nr_pusch_passive_ul_table_learned(uint16_t rnti);
+/* the learned table of that RNTI (0..5, the index nr_get_Qm_ul takes), -1 while not learned (the same condition as above) */
+int nr_pusch_passive_ul_table(uint16_t rnti);
 #ifdef __cplusplus
 }
 #endif

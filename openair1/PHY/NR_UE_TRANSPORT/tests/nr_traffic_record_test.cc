@@ -176,6 +176,24 @@ TEST(TrafficRecord, CountersSplitByDirection)
   EXPECT_EQ(b.probe_decodes - a.probe_decodes, 3u); EXPECT_EQ(b.check_decodes - a.check_decodes, 3u);
   EXPECT_EQ(b.probe_skip - a.probe_skip, 1u); EXPECT_EQ(b.ul_decode_skip - a.ul_decode_skip, 1u);
 }
+TEST(TrafficRecord, DerivedFieldsNeverWithoutMcs)
+{
+  auto r=fixture(NR_LAYOUT_SOLVED);
+  r.layout_evidence=3; r.o.nl=2; r.o.qm=6; r.o.tbs=81976;
+  std::string d=json(r);
+  EXPECT_TRUE(has(d,"\"qm\":6")); EXPECT_TRUE(has(d,"\"nl\":2")); EXPECT_TRUE(has(d,"\"tbs\":81976"));
+  r.o.mcs=-1;   /* a record without an MCS has nothing to derive a modulation order or a block size from */
+  d=json(r);
+  EXPECT_TRUE(has(d,"\"qm\":null")); EXPECT_TRUE(has(d,"\"tbs\":null"));
+}
+TEST(TrafficRecord, DerivedFieldsNullOnCandidateLayout)
+{
+  auto r=fixture(NR_LAYOUT_CANDIDATE);
+  r.o.nl=2; r.o.qm=6; r.o.tbs=81976;
+  const std::string d=json(r);
+  EXPECT_TRUE(has(d,"\"qm\":null")); EXPECT_TRUE(has(d,"\"nl\":null")); EXPECT_TRUE(has(d,"\"tbs\":null"));
+}
+
 TEST(TrafficRecord, BitsUnavailablePrintsNull)
 {
   auto r=fixture(NR_LAYOUT_SOLVED); r.dci_len=0;

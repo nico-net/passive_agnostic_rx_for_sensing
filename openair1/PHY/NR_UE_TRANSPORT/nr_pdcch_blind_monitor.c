@@ -3848,6 +3848,28 @@ static const uint8_t g_table_7_3_2_3_3_4[58][14] = {
     {2,0,0,0,0,0,0,0,0,1,1,0,0,2},
 };
 
+/* Antenna-ports codepoint -> (CDM groups without data, port bitmask bit k = port 1000+k, DM-RS symbols 1/2) of a DL DCI 1_1 whose field is
+ * ap_bits wide under DM-RS type dmrs_type (0 = type 1, 1 = type 2): 4 = Table 7.3.1.2.2-1 (type 1, maxLength 1), 5 = -2 (type 1, maxLength 2) or
+ * -3 (type 2, maxLength 1), 6 = -4 (type 2, maxLength 2). false for any other (width, type) pair or a codepoint beyond the table: never a guess. */
+bool nr_pdcch_blind_dl_ap_lookup(int ap_bits, int dmrs_type, unsigned field, uint8_t *cdm, uint16_t *ports, int *nsym)
+{
+  const uint8_t *row;
+  int np, nrows, sym_col = -1;
+  if (ap_bits == 4 && dmrs_type == 0) { row = g_table_7_3_2_3_3_1[0]; np = 4; nrows = 12; }
+  else if (ap_bits == 5 && dmrs_type == 0) { row = g_table_7_3_2_3_3_2[0]; np = 8; nrows = 31; sym_col = 9; }
+  else if (ap_bits == 5 && dmrs_type == 1) { row = g_table_7_3_2_3_3_3[0]; np = 6; nrows = 24; }
+  else if (ap_bits == 6 && dmrs_type == 1) { row = g_table_7_3_2_3_3_4[0]; np = 12; nrows = 58; sym_col = 13; }
+  else return false;
+  if (field >= (unsigned)nrows) return false;
+  const int stride = np + 1 + (sym_col >= 0 ? 1 : 0);
+  row += (size_t)field * (size_t)stride;
+  *cdm = row[0];
+  *ports = 0;
+  for (int k = 0; k < np; k++) *ports |= (uint16_t)(row[1 + k] << k);
+  *nsym = sym_col >= 0 ? row[sym_col] : 1;
+  return true;
+}
+
 /// Consume a field from the right-aligned multi-word payload, MSB first.
 static uint32_t read_field(nr_dci_bits_t payload, int* pos, int nbits)
 {

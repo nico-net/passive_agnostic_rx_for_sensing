@@ -264,6 +264,10 @@ void nr_pdsch_solver_stats(nr_pdsch_solver_stats_t *s);
 /** What proved the RNTI's layout: NR_LAYOUT_EV_NONE (not solved), NR_LAYOUT_EV_PHYS (solved by DM-RS physics, no full TB passed yet) or NR_LAYOUT_EV_CRC.
  *  (NR_LAYOUT_EV_BITS is E1's and is never returned here.) */
 int nr_pdsch_solver_layout_evidence(uint16_t rnti);
+/** E7 (traffic mode): what the solver learnt for a solved RNTI, for the derived DCI fields. false unless the RNTI is solved with a learnt MCS table.
+ *  *crc = a full TB passed its CRC (not PHYS-only); *add_pos / *table = learnt DM-RS additional position and MCS table (0..2); *S / *L = the PDSCH
+ *  start symbol / length learnt for TDA index tda (-1 unknown); *ov = a special-slot (S, L) override is on file for this RNTI (its grants may not follow the TDA map). */
+bool nr_pdsch_solver_derive_inputs(uint16_t rnti, int tda, bool *crc, int *add_pos, int *table, int *S, int *L, bool *ov);
 
 /** One scored hypothesis of a grant: the layouts of a reading (ids in any order), the scrambling hypothesis, the DM-RS additional position, and E2's outcome.
  *  rank = nr_dl_score_rank() (-inf = declaration inconsistent); sig = the hypothesis is CONFIRMABLE: n_signif == n_cells > 0 and the allocation meets

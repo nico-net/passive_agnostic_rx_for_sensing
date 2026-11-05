@@ -107,6 +107,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "nr_fep_cache.h" /* E5: one FEP per (slot, symbol) for the scorer, the fit and the CFR tap */
 #include "nr_dci11_prove.h"
 #include "nr_traffic_dci_fields.h"
+#include "nr_traffic_derive.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_sense_unit.h"
 #include "nr_pusch_passive_decode.h"
@@ -4766,7 +4767,27 @@ static void traffic_emit_dl(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
     r.grant_unproven = gp ? 1 : 0;
     r.fields_evidence = e1 ? NR_LAYOUT_EV_BITS : (ls == NR_LAYOUT_SOLVED && !gp && hf.k1 + hf.dai + hf.tpc + hf.pri > -4) ? (uint8_t)r.layout_evidence : NR_LAYOUT_EV_NONE;
     if (ls == NR_LAYOUT_SOLVED) r.table_evidence = (uint8_t)nr_pdsch_solver_table_evidence(out->rnti);
+    /* E7: derived nl / qm / tbs. Inputs and their proofs: nr_traffic_derive.h. The reading is the representative layout's, so its antenna-ports codepoint is read at
+     * that layout's offset; a layout that is unproven (PHYS without trusted fields) or a missing representative derives nothing. */
+    if (have_rep && ls == NR_LAYOUT_SOLVED && !gp) {
+      const nr_dci11_layout_t *rl = &g_dci11_resolver->hyp[rep];
+      const nr_dci11_offsets_t *ro = &g_dci11_resolver->off[rep];
+      nr_traffic_dl_in_t di = {.layout_trusted = true, .layout_crc = sev == NR_LAYOUT_EV_CRC, .ap_bits = rl->ant_ports, .dmrs_type = rl->dmrs_type,
+                               .ap_field = ro->ant_ports_bits > 0 ? (int)nr_dci_bits_field(payload, ro->total, ro->ant_ports, ro->ant_ports_bits) : -1,
+                               .rd_cdm = out->n_dmrs_cdm_groups, .rd_ports = out->dmrs_ports, .mcs = out->mcs, .mcs_table = out->mcs_table,
+                               .table_evidence = r.table_evidence, .nb_rb = out->num_rb, .S = out->start_symbol, .L = out->num_symbols,
+                               .dmrs_mask = out->dl_dmrs_symb_pos, .xoh = -1, .class_c = out->rnti_class == NR_BLIND_RNTI_CLASS_C, .sv_S = -1, .sv_L = -1};
+      di.sv_ok = nr_pdsch_solver_derive_inputs(out->rnti, out->tda_index, &di.sv_crc, &di.sv_add_pos, &di.sv_table, &di.sv_S, &di.sv_L, &di.sv_ov);
+      if (di.sv_ok && di.sv_S >= 0 && out->dl_dmrs_symb_pos != 0)
+        di.expect_mask = nr_pdsch_solver_dmrs_mask(__builtin_ctz(out->dl_dmrs_symb_pos), di.sv_S, di.sv_L, di.sv_add_pos);
+      const nr_pdsch_xoverhead_state_t xo = nr_pdsch_xoverhead_snapshot();
+      if (xo.confirmed) di.xoh = xo.assumed;   /* cell-wide RRC value: every other candidate refuted by a CRC-passing TB */
+      nr_traffic_derived_t dv;
+      nr_traffic_derive_dl(&di, &dv);
+      o->nl = dv.nl; o->qm = dv.qm; o->tbs = dv.tbs;
+    }
   }
+  if (is10) o->nl = 1;   /* E7: DCI 1_0 schedules antenna port 1000 only (TS 38.214 5.1.6.2) */
   r.dai = hf.dai; r.tpc = hf.tpc; r.pri = hf.pri; r.k1 = hf.k1;
   r.retx = no_harq ? -1 : (int8_t)nr_traffic_retx(0, out->rnti, out->harq_pid, out->ndi);
   if (is10) { /* the job of a 1_0 grant uses k0 = 0 (hy_k0 is only set by the 1_1 sweep); 1_1: k0 is not known at the accept */
@@ -4817,6 +4838,13 @@ static void traffic_emit_ul(const nr_pdcch_blind_monitor_cfg_t *cfg, const NR_DL
   r.start_rb_bwp = (int16_t)u->start_rb; r.tda_index = (int8_t)u->tda_index; r.tpc = (int8_t)u->tpc;
   if (!f00) { r.dai = (int8_t)u->dai; r.srs_req = (int8_t)u->srs_request; r.csi_req = (int8_t)u->csi_request; r.ulsch_ind = (int8_t)u->ulsch_indicator; }
   r.retx = (int8_t)nr_traffic_retx(1, u->rnti, u->harq_pid, u->ndi);
+  /* E7: UL qm only for a 0_1 of a locked layout, CP-OFDM, under the MCS table this RNTI's PUSCH CRC passes learnt (not the configured default). nl is the
+   * layout's own (blind_ul_finish rejects multi-layer); UL tbs stays null: the PUSCH xOverhead is never proven. */
+  if (!f00 && ls == NR_LAYOUT_SOLVED && !u->transform_precoding) {
+    const int ut = nr_pusch_passive_ul_table(u->rnti);
+    int qm = 0; uint32_t r10 = 0;
+    if (ut >= 0 && ut <= 2 && nr_traffic_mcs_qr(1, ut, u->mcs, &qm, &r10)) { o->qm = (int8_t)qm; o->mcs_table = (int8_t)ut; }
+  }
   r.decode = decode_wanted ? NR_DCI_DECODE_QUEUED : NR_DCI_DECODE_NONE;
   nr_traffic_cfg_snap_t sn;
   memset(&sn, 0, sizeof sn);

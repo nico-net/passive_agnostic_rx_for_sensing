@@ -41,6 +41,11 @@ int nr_sense_dci_to_json(const nr_sense_dci_rec_t *r, char *buf, size_t n)
     if (r->table_evidence < 2) o.mcs_table = o.qm = o.tbs = -1;
     if (r->grant_unproven) o.mcs = o.harq_pid = o.ndi = o.rv = o.start_rb = o.nb_rb = -1;   /* N5: the RB range is the RIV of the unproven layout */
   }
+  /* Derived fields (E7, nr_traffic_derive.h) are set at emit time only from proven inputs; this formatter adds no proof of its own, it only never prints
+   * a value without its source: nl needs a trusted layout (CRC, or PHYS with trusted fields) + its antenna-ports codepoint; qm needs that, a proven MCS
+   * table (table_evidence) and a non-reserved MCS; tbs needs a CRC layout, nl <= 4, qm, the learnt S/L/DM-RS mask and a CRC-confirmed xOverhead.
+   * No MCS (null) means no qm and no tbs. */
+  if (o.mcs < 0) o.qm = o.tbs = -1;
   char g[2048];
   if (nr_sense_grant_to_json(&o, &r->m, g, sizeof g) < 0) return -1;
   char *t = strstr(g, "\"type\":\"grant\"");

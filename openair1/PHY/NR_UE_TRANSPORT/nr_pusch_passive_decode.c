@@ -3396,6 +3396,15 @@ bool nr_pusch_passive_ul_table_learned(uint16_t rnti)
   return l;
 }
 
+int nr_pusch_passive_ul_table(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_tblr_mu);
+  const nr_ul_tblr_ent_t *e = nr_ul_tblr_get(g_tblr, rnti, false);
+  const int t = (e && e->learned && e->passes >= 2) ? (int)e->learned - 1 : -1;
+  pthread_mutex_unlock(&g_tblr_mu);
+  return t;
+}
+
 bool nr_pusch_passive_decode_probe(PHY_VARS_NR_UE *ue, int ctx, uint32_t frame,
                                    uint8_t slot, const nr_pdcch_blind_ul_result_t *g,
                                    int32_t ta_offset_samples, uint64_t abs_slot,
