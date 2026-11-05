@@ -64,6 +64,11 @@ GLOBS = [
     "openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c",  # CELLFEAT: sensing-mode scheduler thread (one per process)
     "openair1/PHY/NR_UE_ISAC/nr_isac.cc",                # CELLFEAT: sensing adapter (per-cell session, process configuration)
     "openair1/PHY/NR_UE_ISAC/nr_isac_stub.c",
+    "openair1/PHY/NR_UE_ISAC/nr_isac_mode.c",            # twomodes: process-wide mode / min_prb (set once at init)
+    "openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched.c",     # twomodes: scheduler value/admission math
+    "openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c",
+    "openair1/PHY/NR_UE_TRANSPORT/nr_dl_layout_score.c",
+    "openair1/PHY/NR_UE_TRANSPORT/nr_traffic_dci_fields.c",
     "common/utils/nr_dashboard.c",                       # CELLFEAT: dashboard launcher (process service)
     "openair1/PHY/NR_UE_TRANSPORT/pss_nr.c",             # DBG2: PSS fold of the initial sync
     "openair1/PHY/NR_UE_TRANSPORT/dci_nr.c",

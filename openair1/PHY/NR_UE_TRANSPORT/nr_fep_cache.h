@@ -27,4 +27,13 @@ static inline bool nr_fep_cache_claim(nr_fep_cache_t *c, int64_t key, const void
   c->n_fep++;
   return true;
 }
+/* true when (key, iq, fo) differs from the last call (or on the first): a second-level cache keyed like the FEP cache above uses it to drop its own contents. */
+static inline bool nr_fep_cache_changed(nr_fep_cache_t *c, int64_t key, const void *iq, double fo)
+{
+  uint64_t b = ~0ull;
+  if (fo == fo) memcpy(&b, &fo, sizeof b);
+  const bool ch = c->key != key || c->iq != iq || c->fo_bits != b;
+  c->key = key; c->iq = iq; c->fo_bits = b;
+  return ch;
+}
 #endif

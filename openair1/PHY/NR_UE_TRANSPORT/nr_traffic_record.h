@@ -67,6 +67,12 @@ void nr_traffic_stats_get(nr_traffic_stats_t *s);
  * reopen decision. Returns true after K consecutive counted failures. dir 0: the caller then calls nr_pdsch_solver_reopen (reopens). dir 1: the
  * caller forgets that RNTI's learned UL MCS table (reopens_ul); UL never touches DL state. */
 bool nr_traffic_decode_outcome(uint64_t abs_slot, int64_t dci_abs_slot, uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db);
+/* Sensing: the consumer DM-RS tap of a solver job runs after a CRC pass, and also after a CRC failure when the layout is SOLVED (the DM-RS channel estimate needs no CRC once the
+ * layout is known); unsolved/probe grants stay CRC-gated. */
+static inline bool nr_dmrs_tap_wanted(bool job_tap, bool layout_probe, bool crc_ok, bool crc_fail, nr_layout_state_t ls)
+{
+  return job_tap && !layout_probe && (crc_ok || (crc_fail && ls == NR_LAYOUT_SOLVED));
+}
 /* Per RNTI+HARQ pid last NDI (dir 0 DL, 1 UL): -1 first sighting (or ndi < 0), 0 new data (NDI toggled), 1 retransmission (same NDI). Updates the table. */
 int nr_traffic_retx(int dir, uint16_t rnti, int pid, int ndi);
 /* E7b: PDSCH slot offset k0 per (DCI length, TDA index) of this cell, proven by a decode whose FULL transport block passed CRC24 (TBS > 3824 bits; a CRC16 TB,

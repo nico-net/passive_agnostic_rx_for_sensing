@@ -31,6 +31,7 @@
 
 #include "nr_pusch_passive_decode.h"
 #include "nr_traffic_record.h"
+#include "nr_traffic_decode.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_sense_unit.h"
 #include "nr_pusch_passive_dmrs_pdu.h"
@@ -3351,6 +3352,9 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
       if (te) { te->learned = 0; te->passes = 0; }
       pthread_mutex_unlock(&g_tblr_mu);
     }
+  } else if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_enabled() && !cfr_only && g != NULL && out != NULL
+             && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL)) {
+    nr_traffic_decode_feedback(g->rnti, 1, t_solver_probe || nr_ul_layout_is_probe(g) || nr_ul_layout_is_trial(g), g->rv, out->status == NR_PUSCH_PASSIVE_OK, out->snr_db);
   }
   if (!t_solver_probe && (nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && g != NULL && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL ||
                     out->status == NR_PUSCH_PASSIVE_ZERO_TB)) {

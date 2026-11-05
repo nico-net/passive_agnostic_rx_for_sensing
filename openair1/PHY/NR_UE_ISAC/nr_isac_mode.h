@@ -26,6 +26,8 @@ bool nr_isac_mode_resolve(const char *mode_str, unsigned explicit_sources, int e
 /* Process-wide, set once by nr_isac_init(); LEGACY before. */
 nr_isac_mode_t nr_isac_mode(void);
 void nr_isac_mode_set(nr_isac_mode_t m);
+/* The traffic-only solver hooks (E3 DM-RS scoring, E4 seeded-only first DCI / probe triage): sensing and legacy run the legacy solver. */
+static inline bool nr_traffic_hooks_on(void) { return nr_isac_mode() == NR_ISAC_MODE_TRAFFIC; }
 
 /* [sensing] sense_min_prb, default 128. _set returns false (and restores 128) for a value < 1. */
 int nr_isac_sense_min_prb(void);

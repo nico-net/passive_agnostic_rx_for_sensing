@@ -5,6 +5,7 @@
 #include <vector>
 extern "C" {
 #include "nr_passive_metrics.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 }
 
 TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
@@ -33,7 +34,13 @@ TEST(PassiveMetrics, SerializesAllFieldsAsOneJsonObject) {
   EXPECT_NE(s.find("\"scanq_drop_full\":161"), std::string::npos);
   EXPECT_NE(s.find("\"prach_us\":73,\"prach_drops\":2,\"prach_skipped\":1"), std::string::npos);
   EXPECT_NE(s.find("\"sense_cfr_drop\":9,\"sense_rec_drop\":2,\"sense_io_errors\":1"), std::string::npos);
-  EXPECT_NE(s.find("\"sense_recon_skip\":6,"), std::string::npos);
+  EXPECT_EQ(s.find("sense_recon_skip"), std::string::npos); /* legacy ISAC_METRICS stays byte-identical */
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  char buf2[8192];
+  const int n2 = nr_passive_metrics_to_json(&m, buf2, sizeof(buf2));
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+  ASSERT_GT(n2, 0);
+  EXPECT_NE(std::string(buf2, n2).find("\"sense_recon_skip\":6,"), std::string::npos);
   EXPECT_NE(s.find("\"gpu_fep_selfcheck_skipped\":4"), std::string::npos);
   EXPECT_NE(s.find("\"sense_prod_us_pdsch_data\":123,\"sense_pack_us_pdsch_data\":45"), std::string::npos);
   EXPECT_NE(s.find("\"sense_prod_count_pdsch_data\":6"), std::string::npos);

@@ -35,7 +35,7 @@ typedef struct {
  * O(n_ant * n_re). Every computation is per PRB: nothing fits/smooths/correlates across a PRG boundary. At most 8
  * antennas are used. */
 /* Sparse sources (CSI-RS: 1 RE per PRB, one or few symbols; DM-RS of a precoded PDSCH/PUSCH is NOT sparse in this sense): a PRB is valid with >= 1 RE when the producer's noise estimate
- * (noise_var > 0 required) gives SNR >= NR_SENSE_PRB_SNR_MIN_DB; no local fit, no residual (resid_db NAN). With >= 2 symbols sharing subcarriers the record's symbol consistency
+ * (derived from the frame itself, three equally spaced PRBs' second difference; the producer's noise_var only stands when the frame has no such triple) gives SNR >= NR_SENSE_PRB_SNR_MIN_DB; no local fit, no residual (resid_db NAN). With >= 2 symbols sharing subcarriers the record's symbol consistency
  * must reach NR_SENSE_SPARSE_SYM_MIN, else the record has no valid PRB. */
 #define NR_SENSE_Q_SPARSE 1u
 #define NR_SENSE_SPARSE_SYM_MIN 0.5f /* general bound (half the coherent amplitude), not tuned on any cell */

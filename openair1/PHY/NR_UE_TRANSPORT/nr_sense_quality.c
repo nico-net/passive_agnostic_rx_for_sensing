@@ -21,6 +21,41 @@ static float pick(float *v, int n, int num, int den)
   return v[(n - 1) * num / den];
 }
 
+
+/* Sparse sources: the noise variance of H from the frame itself. The producers' own noise figures (the CSI-RS estimator's) are not in H scale, so for a sparse source the noise is derived
+ * here, white and common to the record: the second difference of the estimates of three equally spaced PRBs (same subcarrier, same symbol, spacing 1 PRB, else 2) removes any channel
+ * that is linear in frequency; for white noise E|h0 - 2 h1 + h2|^2 = 6 sigma^2. A channel with curvature across 2-4 PRBs (large delay spread) leaves a residue in it: the estimate is then
+ * biased HIGH (fewer PRBs valid, never more). Returns -1 when the frame has no such triple (the producer's figure, if any, then stands). */
+static double sparse_noise_from_frame(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs, const uint8_t *l_sym, int pmin, int sa)
+{
+  int16_t pe[NR_SENSE_MAX_PRB];
+  for (int p = 0; p < NR_SENSE_MAX_PRB; p++)
+    pe[p] = -1;
+  for (int i = 0; i < n_re; i++) {
+    const int p = k_abs[i] / 12 - pmin;
+    if (p < NR_SENSE_MAX_PRB && l_sym[i] == sa && pe[p] < 0)
+      pe[p] = (int16_t)i;
+  }
+  for (int d = 1; d <= 2; d++) {
+    double acc = 0;
+    long n = 0;
+    for (int p = 0; p + 2 * d < NR_SENSE_MAX_PRB; p++) {
+      const int i0 = pe[p], i1 = pe[p + d], i2 = pe[p + 2 * d];
+      if (i0 < 0 || i1 < 0 || i2 < 0 || k_abs[i0] % 12 != k_abs[i1] % 12 || k_abs[i1] % 12 != k_abs[i2] % 12)
+        continue;
+      for (int a = 0; a < n_ant; a++) {
+        const float *h = iq + 2 * (size_t)a * ant_stride;
+        const double r = h[2 * i0] - 2.0 * h[2 * i1] + h[2 * i2], m = h[2 * i0 + 1] - 2.0 * h[2 * i1 + 1] + h[2 * i2 + 1];
+        acc += r * r + m * m;
+        n++;
+      }
+    }
+    if (n > 0)
+      return acc / (6.0 * (double)n);
+  }
+  return -1;
+}
+
 void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
                               const uint8_t *l_sym, float noise_var, nr_sense_quality_t *q)
 {
@@ -100,6 +135,15 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
     }
   }
 
+  if (sparse) {
+    int sa0 = 0;
+    for (int sy = 1; sy < QSYM; sy++)
+      if (symcnt[sy] > symcnt[sa0])
+        sa0 = sy;
+    const double nf = sparse_noise_from_frame(n_ant, iq, ant_stride, n_re, k_abs, l_sym, pmin, sa0);
+    if (nf >= 0) /* a noiseless frame (0) gets a tiny positive variance: the 30 dB ceiling floor below then applies */
+      noise_var = nf > 1e-30 ? (float)nf : 1e-30f;
+  }
   float snr[NR_SENSE_MAX_PRB], res[NR_SENSE_MAX_PRB];
   int nv = 0;
   for (int p = 0; p < NR_SENSE_MAX_PRB; p++) {

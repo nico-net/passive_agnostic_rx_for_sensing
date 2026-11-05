@@ -29,6 +29,8 @@ void nr_traffic_probe_result(int dir, uint16_t rnti, bool crc_ok);
 bool nr_traffic_decode_wanted_prbs(int dir, uint16_t rnti, int rnti_class, nr_layout_state_t ls, bool ul_table_learned,
                                    uint64_t t_ns, bool hrv_alert, uint16_t est_prbs);
 /* Returns true when the RNTI must be reopened (K_REOPEN consecutive counted failures: rv 0 and snr >= 10 dB). */
+/* Sensing mode: feeds a decode verdict (crc < 0 = none) to the decode policy only, so its 1-in-32 check counter and UL backoff work; nothing is recorded or counted, no reopen. */
+void nr_traffic_decode_feedback(uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db);
 bool nr_traffic_decode_result(int dir, uint16_t rnti, int rv, float snr_db, bool crc_ok);
 void nr_traffic_decode_reset(void);   /* HARD_RESET epochs: forget every RNTI's counters */
 #ifdef __cplusplus

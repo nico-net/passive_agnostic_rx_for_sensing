@@ -116,3 +116,14 @@ TEST(IsacMode, MinPrbKey)
   EXPECT_FALSE(nr_isac_sense_min_prb_set(-5));
   EXPECT_EQ(nr_isac_sense_min_prb(), 128);
 }
+
+TEST(IsacMode, TrafficOnlySolverHooks)
+{
+  for (nr_isac_mode_t m : {NR_ISAC_MODE_LEGACY, NR_ISAC_MODE_SENSING}) {
+    nr_isac_mode_set(m);
+    EXPECT_FALSE(nr_traffic_hooks_on()); /* E3/E4 hooks (rt.c t_mode) stay off: sensing keeps the legacy solver */
+  }
+  nr_isac_mode_set(NR_ISAC_MODE_TRAFFIC);
+  EXPECT_TRUE(nr_traffic_hooks_on());
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}

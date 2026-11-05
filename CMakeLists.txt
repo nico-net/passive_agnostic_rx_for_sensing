@@ -2878,7 +2878,7 @@ if(ENABLE_TESTS)
   add_executable(test_nr_passive_metrics ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_metrics_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c)
   target_include_directories(test_nr_passive_metrics PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_passive_metrics PRIVATE GTest::gtest GTest::gtest_main)
+  target_link_libraries(test_nr_passive_metrics PRIVATE nr_isac_mode GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_nr_passive_metrics)
   add_test(NAME test_nr_passive_metrics COMMAND ./test_nr_passive_metrics)
   add_executable(test_nr_csirs_observer ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_observer_test.cc
@@ -2886,7 +2886,7 @@ if(ENABLE_TESTS)
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_periodic_track.c
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_metrics_json.c)
   target_include_directories(test_nr_csirs_observer PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_csirs_observer PRIVATE GTest::gtest GTest::gtest_main)
+  target_link_libraries(test_nr_csirs_observer PRIVATE nr_isac_mode GTest::gtest GTest::gtest_main)
   add_dependencies(tests test_nr_csirs_observer)
   add_test(NAME test_nr_csirs_observer COMMAND ./test_nr_csirs_observer)
 

@@ -159,3 +159,11 @@ void nr_traffic_probe_result(int dir, uint16_t rnti, bool crc_ok)
   else if (e->pend) { e->pend = false; e->bo = 0; if (e->k < 4) e->k++; }
   pthread_mutex_unlock(&g_td_mu);
 }
+
+/* sensing mode: the decode policy's verdict feedback only (no record, no counters, no reopen): resets the 1-in-32 grant counter and drives the UL backoff */
+void nr_traffic_decode_feedback(uint16_t rnti, int dir, bool probe, int rv, int crc, float snr_db)
+{
+  if (crc < 0) return;
+  if (dir == 1 && (!probe || crc == 1)) nr_traffic_probe_result(dir, rnti, crc == 1);
+  if (!probe) (void)nr_traffic_decode_result(dir, rnti, rv, snr_db, crc == 1);
+}

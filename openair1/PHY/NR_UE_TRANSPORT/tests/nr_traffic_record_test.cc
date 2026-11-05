@@ -240,3 +240,13 @@ TEST(TrafficRecord, DciJsonFitsRecordBytes)
   r.o.carrier_hz=3700000000LL; r.short_msg=255; r.short_msg_ind=3; r.tb_scaling=2; r.si_ind=1;
   EXPECT_LT(json(r).size(), 4096u-1);
 }
+
+TEST(TrafficRecord, ConsumerDmrsTapNeedsCrcUnlessLayoutSolved)
+{
+  EXPECT_TRUE(nr_dmrs_tap_wanted(true, false, true, false, NR_LAYOUT_UNSOLVED));   // CRC pass: always
+  EXPECT_TRUE(nr_dmrs_tap_wanted(true, false, false, true, NR_LAYOUT_SOLVED));     // CRC fail, solved layout: exported
+  EXPECT_FALSE(nr_dmrs_tap_wanted(true, false, false, true, NR_LAYOUT_UNSOLVED));  // CRC fail, unsolved: gated
+  EXPECT_FALSE(nr_dmrs_tap_wanted(true, false, false, true, NR_LAYOUT_CANDIDATE));
+  EXPECT_FALSE(nr_dmrs_tap_wanted(true, true, false, true, NR_LAYOUT_SOLVED));     // probe: never
+  EXPECT_FALSE(nr_dmrs_tap_wanted(false, false, true, false, NR_LAYOUT_SOLVED));   // non-solver job: monitor tap owns it
+}

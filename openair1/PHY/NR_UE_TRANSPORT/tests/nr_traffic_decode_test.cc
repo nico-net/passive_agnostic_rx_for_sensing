@@ -1,5 +1,6 @@
 // Traffic-mode decode policy: which grants are decoded, and when a solved RNTI is reopened.
 #include <gtest/gtest.h>
+#include <cmath>
 extern "C" {
 #include "nr_traffic_decode.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
@@ -295,6 +296,38 @@ TEST(TrafficDecode, DecodeStageIsBaselineNotUnitCost)
   EXPECT_FLOAT_EQ(v[0].wait_p99_ns, 0.f);
   EXPECT_EQ(nr_sense_unit_take_decode_wait_max(0), 15000000u);
   EXPECT_EQ(nr_sense_unit_take_decode_wait_max(0), 0u);
+  nr_sense_unit_reset(0);
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}
+
+TEST(TrafficDecode, SensingSolvedRntiDecodeFeedbackKeepsTheOneIn32Rate)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_sense_unit_reset(0);
+  nr_cell_bind(0);
+  int n = 0, nw = 0;
+  for (int i = 0; i < 64; i++) {
+    const bool w = nr_traffic_decode_wanted_prbs(0, 0x2101, C, NR_LAYOUT_SOLVED, false, S + i, false, 20); /* narrow grant, disabled unit */
+    n += w;
+    if (w) nr_traffic_decode_feedback(0x2101, 0, false, 0, 1, NAN); /* the decode's CRC verdict (I1) */
+    nw += nr_traffic_decode_wanted_prbs(0, 0x2102, C, NR_LAYOUT_SOLVED, false, S + i, false, 200); /* wideband rule unaffected */
+  }
+  EXPECT_LE(n, 3);
+  EXPECT_GE(n, 2);
+  EXPECT_EQ(nw, 64);
+  nr_sense_unit_reset(0);
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}
+TEST(TrafficDecode, DecodeResetRestartsTheGrantCounter)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_sense_unit_reset(0);
+  nr_cell_bind(0);
+  for (int i = 0; i < 31; i++) EXPECT_FALSE(nr_traffic_decode_wanted_prbs(0, 0x2103, C, NR_LAYOUT_SOLVED, false, S, false, 20)) << i;
+  nr_traffic_decode_reset(); /* new cell identity (I2): RNTI reuse starts from zero */
+  int n = 0;
+  for (int i = 0; i < 31; i++) n += nr_traffic_decode_wanted_prbs(0, 0x2103, C, NR_LAYOUT_SOLVED, false, S, false, 20);
+  EXPECT_EQ(n, 0);
   nr_sense_unit_reset(0);
   nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
 }

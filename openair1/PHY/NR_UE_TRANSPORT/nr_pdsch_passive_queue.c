@@ -62,6 +62,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h" // P99: lag bins, scan lag histogram
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_solver.h"
 #include "nr_traffic_record.h"
+#include "nr_traffic_decode.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_sense_unit.h"
 #include "nr_sense_api.h" /* nr_sense_crb_re */
@@ -1422,7 +1423,16 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
     return;
   const uint64_t uc0 = nr_sense_unit_cpu_ns();
   const uint32_t est_sz = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16, ncomb = (uint32_t)(nsc + 1) / 2;
-  int32_t(*est)[est_sz] = calloc((size_t)fp->nb_antennas_rx, sizeof *est);
+  /* per-thread reusable estimate buffer (zeroed per grant like the calloc it replaces): no mmap/munmap + page faults per CRC-OK grant */
+  static __thread void *t_est_buf;
+  static __thread size_t t_est_cap;
+  const size_t est_bytes = (size_t)fp->nb_antennas_rx * est_sz * sizeof(int32_t);
+  if (t_est_cap < est_bytes) {
+    void *nb = realloc(t_est_buf, est_bytes);
+    if (nb) { t_est_buf = nb; t_est_cap = est_bytes; }
+  }
+  int32_t(*est)[est_sz] = t_est_cap >= est_bytes ? (int32_t(*)[est_sz])t_est_buf : NULL;
+  if (est) memset(est, 0, est_bytes);
   float *h = malloc(sizeof(float) * 2 * (size_t)nant * ncomb);
   uint32_t *k = malloc(sizeof(uint32_t) * 2 * (size_t)ncomb), *l = k + ncomb;
   if (est && h && k) {
@@ -1454,7 +1464,6 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                        .pci = fp->Nid_cell, .slots_per_frame = fp->slots_per_frame};
     nr_isac_submit_cfr_multi_meta((uint32_t)job->absolute_slot, 0.0f, src, &carrier, h, (uint32_t)nant, ncomb, k, l, n, nvar > 0 ? (float)nvar : NAN, &meta);
   }
-  free(est);
   free(h);
   free(k);
   const uint64_t uc1 = nr_sense_unit_cpu_ns();
@@ -2381,6 +2390,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         const float tsnr = dec.dmrs_snr.comb_db > -90.f ? dec.dmrs_snr.comb_db : NAN;
         if (nr_traffic_decode_outcome(job.absolute_slot, job.dci_mono_slot > 0 ? job.dci_mono_slot : -1, job.rnti, 0, job.layout_probe, job.grant.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, tsnr))
           { nr_pdsch_solver_reopen(job.rnti); nr_dci11_bank_alive_clear(job.rnti); }
+      } else if (nr_isac_mode() == NR_ISAC_MODE_SENSING && !recov_hold
+                 && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+        nr_traffic_decode_feedback(job.rnti, 0, job.layout_probe, job.grant.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, NAN);
       }
       if ((nr_passive_obs_enabled() || nr_ue_ctx_enabled() || nr_sense_enabled()) && !job.layout_probe &&
           (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
@@ -2427,6 +2439,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                NR_UEV_TRUSTED, NR_UEC_CONVERGED, job.absolute_slot);
         }
       }
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.dmrs_tap
+          && nr_dmrs_tap_wanted(true, false, false, true, nr_pdsch_solver_layout_state(job.rnti, NULL, NULL)))
+        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF); /* SOLVED layout: the DM-RS CFR does not need a CRC pass */
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         if (job.dmrs_tap)

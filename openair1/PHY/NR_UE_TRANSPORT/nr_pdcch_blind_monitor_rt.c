@@ -157,6 +157,10 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 /* E3: the per-thread slot buffer is shared by every symbol a scorer needs: one FEP per (antenna, symbol) and slot, whichever caller asks first. */
 static __thread c16_t *t_slotbuf;
 static __thread nr_fep_cache_t t_slotbuf_c = NR_FEP_CACHE_INIT;
+static double slot_fep_fo(const PHY_VARS_NR_UE *ue)
+{
+  return ue->cont_fo_comp ? (isnan(nr_slot_fep_fo_override_hz) ? ue->dl_Doppler_shift + ue->freq_offset : nr_slot_fep_fo_override_hz) : 0.0;
+}
 static c16_t *slot_fep_sym(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, int nant, int sym)
 {
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -168,7 +172,7 @@ static c16_t *slot_fep_sym(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, in
   const int64_t key = (int64_t)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx;
   c16_t **iq = nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata);
   /* the de-rotation nr_slot_fep_ant applies: a cached symbol is reused only for the same one */
-  const double fo = ue->cont_fo_comp ? (isnan(nr_slot_fep_fo_override_hz) ? ue->dl_Doppler_shift + ue->freq_offset : nr_slot_fep_fo_override_hz) : 0.0;
+  const double fo = slot_fep_fo(ue);
   if (nr_fep_cache_claim(&t_slotbuf_c, key, iq, fo, sym)) {
     for (int a = 0; a < nant; a++)
       nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, sym, a, (c16_t(*)[fp->samples_per_slot_wCP])t_slotbuf, link_type_dl, 0, iq);
@@ -2037,6 +2041,7 @@ static void length_epoch_listener(const nr_cfg_epoch_snapshot_t *s)
         nr_tda_field_forget();
         nr_slotphase_reset();
         if (nr_isac_mode() == NR_ISAC_MODE_TRAFFIC) { nr_traffic_cfg_reset(); nr_traffic_retx_reset(); nr_traffic_k0_reset(); nr_traffic_decode_reset(); nr_dci11_bank_reset(); }
+        else if (nr_isac_mode() == NR_ISAC_MODE_SENSING) nr_traffic_decode_reset(); /* sensing shares the decode-policy tables */
         LOG_A(PHY, "SENSING: PDSCH_SOLVER reset on new cell identity (identity_gen %u -> %u)\n", solver_id, s->identity_gen);
       }
       solver_id = s->identity_gen;
@@ -4903,7 +4908,7 @@ static bool e3_rnti_due(uint16_t rnti, int64_t slot, int64_t every, bool qm)
 }
 
 /* the cached carrier grid of the slot: rxF[(a * symbols + l)] = n_sc contiguous subcarriers from CRB 0 (the FFT buffer wraps at the carrier edge) */
-typedef struct { c16_t *g; size_t cap; int nant, nsc, symbols; int64_t key; uint16_t done; float noise; bool noise_ok; const c16_t *ptr[NR_DL_MAX_ANT * 16]; } e3_grid_t;
+typedef struct { c16_t *g; size_t cap; int nant, nsc, symbols; nr_fep_cache_t kc; int64_t key; uint16_t done; float noise; bool noise_ok; const c16_t *ptr[NR_DL_MAX_ANT * 16]; } e3_grid_t;
 static __thread e3_grid_t t_e3g;
 static bool e3_grid(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, int l0, uint16_t mask, nr_dl_obs_t *ob)
 {
@@ -4919,8 +4924,10 @@ static bool e3_grid(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, int l0, u
     t->key = -1;
     if (!t->g) return false;
   }
-  const int64_t key = (int64_t)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx;
-  if (t->key != key || t->nant != nant || t->nsc != nsc || t->symbols != sn) {
+  const int64_t key = (int64_t)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx + ((int64_t)fp->Nid_cell << 40);
+  /* same key as the FEP cache under it: slot (+ cell), IQ buffer and de-rotation; a change drops the grid */
+  const bool kchg = nr_fep_cache_changed(&t->kc, key, nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata), slot_fep_fo(ue));
+  if (kchg || t->key != key || t->nant != nant || t->nsc != nsc || t->symbols != sn) {
     t->key = key; t->nant = nant; t->nsc = nsc; t->symbols = sn; t->done = 0; t->noise_ok = false;
     memset(t->ptr, 0, sizeof t->ptr);
   }
@@ -9431,7 +9438,8 @@ constdiag_done:;
       nr_cfg_epoch_note_si_modification(cfg_abs_slot, nr_cfg_epoch_si_period());
     NR_BLIND_CTR_INC(g_accepts);
     int t_seen = 0; /* traffic mode only: DCIs of this DL RNTI seen so far (probe triage) */
-    int tw = -1; /* traffic mode only: 1 = a non-probe decode of this DCI is wanted, 0 = suppressed (-1 in legacy mode: never read) */
+    const bool t_mode = nr_traffic_hooks_on(); /* the E3/E4 solver hooks run in traffic mode only: sensing keeps the legacy solver (tw there only decides decode vs skip) */
+    int tw = -1; /* traffic/sensing: 1 = a non-probe decode of this DCI is wanted, 0 = suppressed (-1 in legacy mode: never read) */
     if (nr_isac_mode() == NR_ISAC_MODE_SENSING) { /* sensing: all grants of an enabled PDSCH_DATA unit, the traffic policy + a sampled check otherwise */
       const bool is10t = out.dci_format == NR_BLIND_DCI_FORMAT_1_0;
       const bool slv = !is10t && nr_pdsch_solver_enabled() && cand_task[ti].dl_auto && g_dci11_state == 1 && g_dci11_resolver != NULL;
@@ -10339,13 +10347,13 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       if (nrd <= 0) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_NOREAD);
       else if (sv_budget <= 0 && !sv_weak) nr_pdsch_solver_note_skip(out.rnti, NR_PDSCH_SOLVER_WHY_BUDGET0);
       /* E3 (traffic mode only): CRC-free layout evidence from the DM-RS on this scan consumer; may solve the RNTI, reopen it, or note its Qm */
-      if (tw >= 0 && nrd > 0 && out.rnti_class == NR_BLIND_RNTI_CLASS_C) {
+      if (t_mode && nrd > 0 && out.rnti_class == NR_BLIND_RNTI_CLASS_C) {
         e3_in_t e3in = {.ue = ue, .proc = proc, .cfg = cfg, .R = R, .rnti = out.rnti, .dlen = dlen, .rep = rep, .abs = (int64_t)source_absolute_slot, .rp = rparsed, .rd = rd,
                         .nrd = nrd < 128 ? nrd : 128, .gid = s_gid, .payload = &rw->payload, .last = -1};
         e3_grant(&e3in);
       }
       /* E4: the first DCI of a C-RNTI (traffic mode) is planned with the solver's seeded variants only; the full search starts at the second */
-      nr_pdsch_solver_set_seeded_only(tw >= 0 && out.rnti_class == NR_BLIND_RNTI_CLASS_C && t_seen < 2);
+      nr_pdsch_solver_set_seeded_only(t_mode && out.rnti_class == NR_BLIND_RNTI_CLASS_C && t_seen < 2);
       const int nv = nrd > 0 && sv_budget > 0 ? nr_pdsch_solver_plan_slot(out.rnti, rw->payload, dlen, out.mcs,
                                                     cfg->dmrs_typeA_position + 2, sv_nrm > 0, rd, nrd, sv_budget, var) : 0;
       int v = 0;
@@ -10357,7 +10365,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
           nr_pdsch_solver_feedback(var[v].token, false, false);
           continue;
         }
-        if (tw >= 0 && var[v].probe && out.rnti_class == NR_BLIND_RNTI_CLASS_C) { /* E4 probe triage (traffic mode only: tw is -1 in legacy) */
+        if (t_mode && var[v].probe && out.rnti_class == NR_BLIND_RNTI_CLASS_C) { /* E4 probe triage (traffic mode only: tw is -1 in legacy) */
           if (tprobe < 0) {
             float tsnr = -100.f;
             if (!nr_pdsch_solver_snr(out.rnti, &tsnr)) tsnr = -100.f;
@@ -11028,6 +11036,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
               if (nr_traffic_decode_outcome(grant_pd.source_absolute_slot, source_absolute_slot, out.rnti, 0, false, out.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, tsnr))
                 { nr_pdsch_solver_reopen(out.rnti); nr_dci11_bank_alive_clear(out.rnti); }
             } else if (nr_sense_enabled() && (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL)) {
+              if (nr_isac_mode() == NR_ISAC_MODE_SENSING) nr_traffic_decode_feedback(out.rnti, 0, false, out.rv, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, NAN);
               struct timespec sense_ts;
               clock_gettime(CLOCK_MONOTONIC, &sense_ts);
               const bool no_harq = out.rnti_class >= NR_BLIND_RNTI_CLASS_SI;

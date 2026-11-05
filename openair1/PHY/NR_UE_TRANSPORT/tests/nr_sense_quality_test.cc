@@ -530,12 +530,42 @@ TEST(SenseQuality, SparseSourceOneRePerPrbIsValidWithAnEstimate)
 }
 TEST(SenseQuality, SparseSourceNeedsANoiseEstimateAndSnr)
 {
-  Cfr c = make_sparse(50, 2.f, false);
+  Cfr c = make_sparse(2, 2.f, false); /* two PRBs: no triple of equally spaced PRBs, so the frame gives no noise estimate */
   nr_sense_quality_t q;
   nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 0.f, NR_SENSE_Q_SPARSE, &q);
   EXPECT_EQ(q.valid_cfr_prbs, 0); /* nothing to judge the SNR with: not valid */
   nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 4.f, NR_SENSE_Q_SPARSE, &q);
-  EXPECT_EQ(q.valid_cfr_prbs, 0); /* |H|^2 = noise: SNR 0 dB < 3 dB */
+  EXPECT_EQ(q.valid_cfr_prbs, 0); /* the producer's figure stands: |H|^2 = noise, SNR 0 dB < 3 dB */
+}
+/* CSI-RS-like frame at a known SNR: one RE per PRB, a channel with a delay ramp, white complex noise; the noise is derived from the frame (no producer figure) */
+static double sparse_snr_case(double snr_db, int nprb, unsigned* valid, nr_sense_quality_t* q)
+{
+  Cfr c = make_sparse(nprb, 1.f, false);
+  std::mt19937 rng(7);
+  std::normal_distribution<double> g(0.0, 1.0);
+  const double sigma = std::sqrt(std::pow(10.0, -snr_db / 10.0) / 2.0); /* unit signal power */
+  for (int a = 0; a < c.n_ant; a++)
+    for (int i = 0; i < c.n_re; i++) {
+      const double ph = 0.1 * i + 0.3 * a;
+      c.iq[2 * (a * c.n_re + i)] = float(std::cos(ph) + sigma * g(rng));
+      c.iq[2 * (a * c.n_re + i) + 1] = float(std::sin(ph) + sigma * g(rng));
+    }
+  nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 0.f, NR_SENSE_Q_SPARSE, q);
+  *valid = q->valid_cfr_prbs;
+  return q->snr_db_p50;
+}
+TEST(SenseQuality, SparseSourceNoiseDerivedFromTheFrameRecoversSnr)
+{
+  nr_sense_quality_t q;
+  unsigned v;
+  double s = sparse_snr_case(10.0, 217, &v, &q);
+  EXPECT_NEAR(s, 10.0, 2.0);
+  EXPECT_GT(v, 200u);
+  s = sparse_snr_case(20.0, 217, &v, &q);
+  EXPECT_NEAR(s, 20.0, 2.0);
+  EXPECT_GT(v, 215u);
+  sparse_snr_case(0.0, 217, &v, &q); /* below the 3 dB gate: (almost) no PRB is valid; the p50 is over the PRBs that pass it */
+  EXPECT_LT(v, 217u / 4);
 }
 TEST(SenseQuality, SparseSourceSymbolConsistencyDecidesWithTwoSymbols)
 {
