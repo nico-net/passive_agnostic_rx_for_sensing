@@ -57,3 +57,18 @@ Rulings implemented: C1+I2 verified absolute per-cell prior; I1 symmetric decisi
 - Concerns: the DM-RS energy margin is derived from the model, not measured on OTA captures; the PBCH decode of the real hypotheses is not exercised (fake decoder in the test, no PBCH encoder in the harness);
   a cell with no TB CRC / SIB1 before its first RX_RECOVER has no verified prior (behaviour unchanged, fault possible); evidence counters are the cell's metrics_collect (called at each UE_synch entry once a lock exists).
   The post-hoc PDCCH-collapse detector remains out of scope. No OTA run.
+
+## Fix round 2 (commit 7e734010bf)
+- I1 evidence tied to the lock: per-cell counter of first-pass PDSCH CRC-OK TBs whose job slot >= the lock's producer slot (nr_cfo_crc_counts; nr_pdsch_passive_queue.c consumer), reset by nr_pdsch_passive_note_lock at each lock.
+  The late rescue (FO-override retry) is not counted, jobs enqueued before the lock cannot count. Independent of reconf. Assumption: job.absolute_slot and the producer slot read at lock time share the cell's monotonic clock.
+- I2 prior exit: NR_CFO_UNVERIFIED_MAX=3 consecutive unverified locks of the prior PCI drop the prior (logged "RESYNC_CFO_PRIOR dropped", count; no time expiry). Test: true CFO jumps +9 kHz -> exactly 3 wrong flips, then total = truth, prior off.
+- I3 pure gate: nr_cfo_verify_record_lock / select_prior / clear (nr_initial_sync_budget.c, type nr_cfo_verify_t in the UE struct). Tests: unverified lock does not replace verified one, promotion, cont_fo_comp on/off units, seed cancels, clear,
+  A1B epoch 3 through the gate. nr_pbch_dmrs_metrics exported (nr_initial_sync.c) and tested on a synthetic SSB, no fake decoder: right index found, best/mu0 > 100, mu0 independent of CFO.
+  MEASURED on it: at 0.465 SCS the DM-RS energy falls only 3.5 dB (the 3 symbols carry 60+24+60 REs, the middle sign flips: (96/144)^2), not 30 dB; with the measured best/mu0 the 3-sigma lead (~8.5e9) is just below the gap (~1.1e10),
+  so the alias is decisive there and ties go to the alias. At lower SNR the rule will tie -> alias (nearer the verified prior). Real-OTA validation of the margin is still open.
+- Minors: no full metrics collect (one atomic read); live-tune clear is a flag consumed by the cell's own sync job (no cross-thread memset; a lock made while a clear was pending is not recorded); PBCH diag snapshot only for the kept
+  hypothesis (trial decodes skip it, an alias taken snapshots once); cfo_alias_taken / cfo_alias_kept / cfo_unresolved in ISAC_METRICS (weak-linked getter).
+- Mutations: crc_counts always 1 + streak never drops -> 4 FAIL (in-flight, rescue, no lock slot, GPSDO jump); earlier round mutations (restore, sign, decision) unchanged; restored.
+- Verification [DGX aarch64]: build 24 .so; ctest -j4 17 failed, all in the known set (test_nr_gpu_pass also fails on the parent build, shown last round); static audit rc 0 (5 PER_CELL rows added); frozen OK;
+  legacy 4-RX rfsim gate 2 x 420 s PASS (ttc 4.49/4.62 s, postsolve CRC 100.00 over 51803/50302 grants, crc_floor 96.12/95.94, drop_full 0.012/0.028 %).
+- Open: margin unmeasured on OTA; prior_total is the lock-time value (tracker not folded in; fine below half a period); a cell with no verified TB before its first RX_RECOVER has no prior.
