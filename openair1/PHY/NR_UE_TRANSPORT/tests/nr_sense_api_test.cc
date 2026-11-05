@@ -505,3 +505,48 @@ TEST_F(QRing, SrsQualityWithTimingRamp)
     EXPECT_EQ(q.valid_cfr_prbs, 0) << "snr " << snr;
   }
 }
+
+/* UL-timing sources other than SRS (PUSCH DM-RS, PUSCH data-aided): same TA ramp, but the record is sparse in frequency (DM-RS type 1 comb 2, type 2 pairs) or dense, with several DM-RS symbols
+ * (add_pos). Pilots carry independent noise; the common ramp is the TA the receiver applied (1600 samples in the OTA runs). The phase step must use the record's own RE spacing. */
+TEST_F(QRing, UlSourcesQualityWithTimingRamp)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  open(8);
+  const float nv = 1e-3f;
+  uint64_t rng = 1234567890123ull;
+  auto gauss = [&] { double u = 0; for (int i = 0; i < 12; i++) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; u += (rng >> 11) * (1.0 / 9007199254740992.0); } return float(u - 6); };
+  struct Pat { const char *name; std::vector<int> ko; std::vector<int> syms; };
+  const Pat pats[] = {
+    {"dense 1sym", {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, {2}},
+    {"type1 comb2 1sym", {0, 2, 4, 6, 8, 10}, {2}},
+    {"type1 comb2 add_pos2", {1, 3, 5, 7, 9, 11}, {2, 6, 9}},
+    {"type2 pairs 1sym", {0, 1, 6, 7}, {3}},
+    {"type2 pairs add_pos1", {2, 3, 8, 9}, {3, 10}},
+  };
+  const nr_sense_src_t srcs[] = {NR_SENSE_SRC_PUSCH_DMRS, NR_SENSE_SRC_PUSCH_DATA};
+  for (const Pat &pt : pats) for (nr_sense_src_t src : srcs) for (double snr : {0.0, 3.0, 6.0, 12.0, 20.0}) for (double ta : {0.0, 1600.0, -700.0}) {
+    const int first = 33, nprb = 24, nant = 4;
+    std::vector<uint16_t> kk; std::vector<uint8_t> ll;
+    for (int sy : pt.syms) for (int p = 0; p < nprb; p++) for (int o : pt.ko) { kk.push_back(12 * (first + p) + o); ll.push_back(sy); }
+    const int n = (int)kk.size();
+    std::vector<float> v(2 * (size_t)nant * n);
+    for (int a = 0; a < nant; a++) for (int i = 0; i < n; i++) {
+      const double th = 2 * M_PI * 3 * kk[i] / 4096.0 + 0.9 * a;
+      std::complex<float> h0 = std::complex<float>(1.f, 0.f) + 0.4f * std::complex<float>(cosf(th), sinf(th));
+      std::complex<float> x = h0 * float(std::sqrt(nv * std::pow(10.0, snr / 10.0) / std::norm(h0))) + std::sqrt(nv / 2) * std::complex<float>(gauss(), gauss());
+      const double ph = 2 * M_PI * ta * kk[i] / 4096.0;
+      x *= std::complex<float>(cosf(ph), sinf(ph));
+      v[2 * ((size_t)a * n + i)] = x.real(); v[2 * ((size_t)a * n + i) + 1] = x.imag();
+    }
+    nr_sense_quality_t q;
+    const uint64_t id = nr_sense_push_cfr(src, nant, v.data(), n, n, kk.data(), ll.data(), 7, 0.f, nv, 0, 0, nullptr);
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(wait_q(id, &q));
+    SCOPED_TRACE(testing::Message() << pt.name << " src " << src << " snr " << snr << " ta " << ta);
+    EXPECT_EQ(q.first_prb, first);
+    if (snr >= 12) { EXPECT_EQ(q.valid_cfr_prbs, nprb); EXPECT_NEAR(q.snr_db_p50, snr, 2.5); }
+    else if (snr >= 6) EXPECT_GE(q.valid_cfr_prbs, nprb / 2) << "6 dB is 3 dB above the threshold";
+    else if (snr <= 0) EXPECT_LE(q.valid_cfr_prbs, nprb / 6) << "at 0 dB (3 dB under the threshold) only fluctuations pass";
+
+  }
+}

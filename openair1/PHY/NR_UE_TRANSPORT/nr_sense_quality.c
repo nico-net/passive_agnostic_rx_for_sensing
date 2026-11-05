@@ -108,24 +108,35 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
 
   /* UL record expressed in the DL frame (nr_sense_ul_to_dl): H carries the transmitter's timing advance as a phase ramp of up to ~pi per subcarrier, which a per-PRB
    * constant+slope fit in the complex domain cannot follow (residual ~1 whatever the SNR). The ramp is one common delay: its per-subcarrier phase step is the argument of the
-   * lag-1 correlation of the record's adjacent REs (same symbol, summed over antennas and REs: independent of the antenna phases, unbiased by noise). Inside a PRB the fit sees
+   * correlation of the record's adjacent REs (at the record's own RE spacing) (same symbol, summed over antennas and REs: independent of the antenna phases, unbiased by noise). Inside a PRB the fit sees
    * H derotated by that step; powers and the SNR are untouched, and a PRB without signal still fails the SNR test. */
   float tw_r[12], tw_i[12];
   for (int x = 0; x < 12; x++)
     tw_r[x] = 1.f, tw_i[x] = 0.f;
   if (flags & NR_SENSE_Q_UL_DELAY) {
+    /* the RE spacing d of the record is the commonest positive step between consecutive REs of a symbol (1 for dense records, the comb for pilot-only ones; DM-RS type 2 pairs give 1).
+     * The step per subcarrier is arg(corr_d)/d: an aliased arg only moves the derotation by a multiple of 2pi/d, which is a multiple of 2pi at every RE that is present. */
+    int hist[5] = {0}, d = 1;
+    for (int i = 0; i + 1 < n_re; i++) {
+      const int df = (int)k_abs[i + 1] - (int)k_abs[i];
+      if (l_sym[i + 1] == l_sym[i] && df >= 1 && df <= 4)
+        hist[df]++;
+    }
+    for (int j = 2; j <= 4; j++)
+      if (hist[j] > hist[d])
+        d = j;
     double cr = 0, ci = 0;
     for (int a = 0; a < n_ant; a++) {
       const float *h = iq + 2 * (size_t)a * ant_stride;
       for (int i = 0; i + 1 < n_re; i++) {
-        if (k_abs[i + 1] != k_abs[i] + 1 || l_sym[i + 1] != l_sym[i])
+        if ((int)k_abs[i + 1] - (int)k_abs[i] != d || l_sym[i + 1] != l_sym[i])
           continue;
         cr += (double)h[2 * i + 2] * h[2 * i] + (double)h[2 * i + 3] * h[2 * i + 1];
         ci += (double)h[2 * i + 3] * h[2 * i] - (double)h[2 * i + 2] * h[2 * i + 1];
       }
     }
     if (cr != 0 || ci != 0) {
-      const double phi = atan2(ci, cr);
+      const double phi = atan2(ci, cr) / d;
       for (int x = 0; x < 12; x++)
         tw_r[x] = (float)cos(phi * (x - 5.5)), tw_i[x] = (float)-sin(phi * (x - 5.5));
     }

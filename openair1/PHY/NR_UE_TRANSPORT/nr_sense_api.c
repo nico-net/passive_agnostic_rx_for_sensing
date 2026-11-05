@@ -209,7 +209,7 @@ static void frame_quality(const uint8_t *p, nr_sense_quality_t *q, bool *ok)
   const uint16_t *k=(const uint16_t *)(p+FRAME_HEADER);
   const uint8_t *l=p+FRAME_HEADER+2*(size_t)keep;
   const float *iq=(const float *)(p+((FRAME_HEADER+3*(size_t)keep+3)&~(size_t)3));
-  nr_sense_quality_compute_ex(n_ant,iq,(int)keep,(int)keep,k,l,noise,p[16]==NR_SENSE_SRC_CSIRS?NR_SENSE_Q_SPARSE:p[16]==NR_SENSE_SRC_SRS?NR_SENSE_Q_UL_DELAY:0u,q);
+  nr_sense_quality_compute_ex(n_ant,iq,(int)keep,(int)keep,k,l,noise,p[16]==NR_SENSE_SRC_CSIRS?NR_SENSE_Q_SPARSE:(p[16]==NR_SENSE_SRC_SRS||p[16]==NR_SENSE_SRC_PUSCH_DMRS||p[16]==NR_SENSE_SRC_PUSCH_DATA)?NR_SENSE_Q_UL_DELAY:0u,q);
   *ok=true;
 #else
   (void)p; (void)q; *ok=false;

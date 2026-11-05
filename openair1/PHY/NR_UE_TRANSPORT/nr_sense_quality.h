@@ -38,7 +38,7 @@ typedef struct {
  * (derived from the frame itself, three equally spaced PRBs' second difference; the producer's noise_var only stands when the frame has no such triple) gives SNR >= NR_SENSE_PRB_SNR_MIN_DB; no local fit, no residual (resid_db NAN). With >= 2 symbols sharing subcarriers the record's symbol consistency
  * must reach NR_SENSE_SPARSE_SYM_MIN, else the record has no valid PRB. */
 #define NR_SENSE_Q_SPARSE 1u
-/* UL source whose H is expressed in the DL frame (SRS): the common timing-advance phase ramp is removed before the per-PRB local fit (see nr_sense_quality.c). Dense sources only. */
+/* UL source whose H is expressed in the DL frame (SRS, PUSCH DM-RS, PUSCH data): the common timing-advance phase ramp is removed before the per-PRB local fit (see nr_sense_quality.c). Dense sources only. */
 #define NR_SENSE_Q_UL_DELAY 2u
 #define NR_SENSE_SPARSE_SYM_MIN 0.5f /* general bound (half the coherent amplitude), not tuned on any cell */
 void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
