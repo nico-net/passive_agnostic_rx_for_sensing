@@ -282,7 +282,8 @@ static void *run_writer(void *arg)
         if (!job_quality(job,i>0,&qcost) ) { count=i; break; }   /* frame still queued: stop the batch, the frame stream runs next */
         if (job->meta.q_valid) { /* per-unit view of the record (sensing mode only: the call is a no-op otherwise) */
           const int us=nr_sense_unit_of_src(job->src);
-          if (us>=0) nr_sense_unit_cfr((nr_unit_src_t)us,(uint16_t)job->meta.rnti,job->meta.q.valid_cfr_prbs,job->meta.q.snr_db_p50,nr_sense_now_ns());
+          if (job->meta.wbg) nr_sense_wbg_cfr(job->meta.q.valid_cfr_prbs,nr_sense_now_ns());
+          else if (us>=0) nr_sense_unit_cfr((nr_unit_src_t)us,(uint16_t)job->meta.rnti,job->meta.q.valid_cfr_prbs,job->meta.q.snr_db_p50,nr_sense_now_ns());
         }
         if (job->src==NR_SENSE_SRC_SRS && job->meta.q_valid) { /* diagnostic: SRS records by measured SNR */
           const nr_sense_quality_t *sq=&job->meta.q; const float p=sq->snr_db_p50;

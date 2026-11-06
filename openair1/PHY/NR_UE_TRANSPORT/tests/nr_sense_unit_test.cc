@@ -481,3 +481,73 @@ TEST_F(Unit, ArrivalGapsWindowAndWrap)
   EXPECT_NEAR((double)g[0].p95_gap_ns, 1.0 * MS, 0.1 * MS);   /* no 5 s hole although the window asked for 5 s */
   EXPECT_NEAR(g[0].rate_hz, 1000.f, 5.f);
 }
+
+/* ---- grant-level wideband path (nr_sense_wbg_*) ---- */
+TEST_F(Unit, WbgUnlimitedBeforeADecisionAndNarrowIsRefused)
+{
+  for (int i = 0; i < 50; i++) EXPECT_TRUE(nr_sense_wbg_admit(217, tb(1) + i));
+  EXPECT_FALSE(nr_sense_wbg_admit(127, tb(1))); /* below the cell's wideband target: not this path (not even counted) */
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.offered, 50u);
+  EXPECT_EQ(s.admitted, 50u);
+}
+
+TEST_F(Unit, WbgOnlyInSensingMode)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_TRAFFIC);
+  EXPECT_FALSE(nr_sense_wbg_admit(217, tb(1)));
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+  EXPECT_FALSE(nr_sense_wbg_admit(217, tb(1)));
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.offered, 0u); /* no state touched outside SENSING */
+}
+
+TEST_F(Unit, WbgRateLimitsAndTheGapRefills)
+{
+  nr_sense_wbg_set_rate(0, 10.f); /* 10 grants/s */
+  const uint64_t t0 = 5000ull * 1000000000ull;
+  int ok = 0;
+  for (int i = 0; i < 400; i++) ok += nr_sense_wbg_admit(217, t0 + (uint64_t)i * 5 * MS) ? 1 : 0; /* 200 grants/s for 2 s, same width */
+  EXPECT_GE(ok, 22); /* burst of 4 + 2 s x 10/s */
+  EXPECT_LE(ok, 26);
+  /* after a 1 s silence 10 more tokens accrued (bucket depth 4): the oldest gap is served first */
+  const uint64_t t1 = t0 + 400 * 5 * MS + 1000 * MS;
+  int burst = 0;
+  for (int i = 0; i < 10; i++) burst += nr_sense_wbg_admit(217, t1 + (uint64_t)i * MS) ? 1 : 0;
+  EXPECT_EQ(burst, 4);
+}
+
+TEST_F(Unit, WbgZeroRateKeepsOnlyTheWidestAndStopsAtTheDebtBound)
+{
+  nr_sense_wbg_set_rate(0, 0.f);
+  const uint64_t t0 = 6000ull * 1000000000ull;
+  int ok = 0;
+  for (int i = 0; i < 4; i++) ok += nr_sense_wbg_admit(150, t0 + i) ? 1 : 0; /* the bucket starts full: 4 grants */
+  EXPECT_EQ(ok, 4);
+  EXPECT_FALSE(nr_sense_wbg_admit(150, t0 + 10)); /* empty, and not wider than the widest admitted */
+  EXPECT_TRUE(nr_sense_wbg_admit(217, t0 + 11));  /* wider than any this window: may borrow ... */
+  EXPECT_TRUE(nr_sense_wbg_admit(273, t0 + 12));
+  EXPECT_FALSE(nr_sense_wbg_admit(273, t0 + 13)); /* ... never below the debt bound */
+  EXPECT_FALSE(nr_sense_wbg_admit(200, t0 + 14)); /* narrower than the widest */
+}
+
+TEST_F(Unit, WbgCostAndCellBookingNeverTouchAnRntiUnit)
+{
+  nr_sense_wbg_cost(100000);
+  nr_sense_wbg_cost(300000);
+  nr_sense_wbg_cfr(217, tb(3));
+  nr_sense_wbg_cfr(60, tb(4));
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.taps, 2u);
+  EXPECT_EQ(s.cost_ns, 400000u);
+  EXPECT_EQ(s.records, 2u);
+  nr_sense_unit_cell_stats_t cs;
+  nr_sense_unit_cell_stats(0, &cs);
+  EXPECT_EQ(cs.wb_valid, 1u); /* the 217-PRB record is a cell wideband record, the 60-PRB one is not */
+  nr_sense_unit_view_t vw[8];
+  EXPECT_EQ(snap(0, tb(5), vw), 0); /* no row was opened, no unit cost changed */
+  EXPECT_EQ(nr_sense_unit_unattributed_ns(0), 0u);
+}

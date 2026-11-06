@@ -10728,7 +10728,11 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       chest_alloc = set_bitmap_from_start_size(freq_alloc.prb_list[0], run);
     }
     /* SENSING mode unit gate (spec 5.6): a disabled (RNTI, PDSCH_DMRS) unit gets no DM-RS tap: no extra chest, no extraction, no hand-off. Counted once per accepted grant as a disabled skip (queued under g_phase2_mu, booked after the unlock); with the tap off the grant is handled exactly as under sources = "pdsch_data". */
-    const bool dmrs_gate_g = dmrs_source >= 0 && nr_sense_unit_gate_deferred(NR_UNIT_PDSCH_DMRS, out.rnti, (uint16_t)chest_alloc.num_rbs);
+    bool wbg_g = false; /* grant-level wideband path: a wide grant with proven fields (DCI 1_0, or a non-autodiscovered 1_1 layout) of a disabled unit is still tapped within the cell's wbg budget */
+    bool dmrs_gate_g = dmrs_source >= 0 && nr_sense_unit_gate_deferred(NR_UNIT_PDSCH_DMRS, out.rnti, (uint16_t)chest_alloc.num_rbs);
+    if (dmrs_source >= 0 && !dmrs_gate_g && nr_isac_mode() == NR_ISAC_MODE_SENSING && out.rnti_class == NR_BLIND_RNTI_CLASS_C && (is_dci10 || !cand_task[ti].dl_auto)
+        && nr_sense_wbg_admit((uint16_t)chest_alloc.num_rbs, nr_sense_now_ns()))
+      dmrs_gate_g = wbg_g = true;
     const int dmrs_source_g = dmrs_gate_g ? dmrs_source : -1;
     const bool want_dmrs_g = dmrs_source_g >= 0;
 
@@ -10914,8 +10918,9 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
       }
       if (t_sense_extract)
         nr_sense_cost_add(NR_SENSE_COST_PROD,NR_SENSE_SRC_PDSCH_DMRS,nr_sense_now_ns()-t_sense_extract);
-      if (uc_mark && want_dmrs_g) /* the grant's chest (if extra) + extraction: one message of the RNTI's PDSCH_DMRS unit */
+      if (uc_mark && want_dmrs_g && !wbg_g) /* the grant's chest (if extra) + extraction: one message of the RNTI's PDSCH_DMRS unit */
         nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, out.rnti, uc_acc + (nr_sense_unit_cpu_ns() - uc_mark), 0, false, (uint16_t)chest_alloc.num_rbs, nr_sense_now_ns());
+      const uint64_t uc_wbg = uc_mark && wbg_g ? uc_acc + (nr_sense_unit_cpu_ns() - uc_mark) : 0; /* wbg tap: chest + extraction here, the hand-off below */
       // ---- Gate 3 (last, most expensive to reach): the actual DMRS channel estimate itself looks
       // like noise even though every payload-level check passed by chance. mean|H|^2/nvar is
       // scale-invariant (both come from the SAME nr_pdsch_channel_estimation() call), so no absolute
@@ -10940,7 +10945,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
             .prg_valid=prg_latched >= 0, .prg_size=prg_latched >= 0 ? prg_latched : 0,
             .start_rb=dlsch_pdu.BWPStart+freq_alloc.first_rb, .nb_rb=freq_alloc.num_rbs,
             .ports=__builtin_popcount((unsigned)out.dmrs_ports), .port_mask=(int)out.dmrs_ports, .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
-            .transform_precoding=-1, .dmrs_type=out.dmrs_config_type ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_pdu.nscid},
+            .transform_precoding=-1, .dmrs_type=out.dmrs_config_type ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_pdu.nscid, .wbg=wbg_g},
             nvar > 0 && h_pow_sum > 0.0 ? (float)(10.0 * log10(h_pow_sum / nof_re / (double)nvar)) : NAN);
           /* exported slot index: the producer's un-wrapped clock (hyper-frame extended), the one SSB/CSI-RS/pdsch_data/UL rows use; the
            * frame-derived abs_slot above stays the internal key (rings, hashes) */
@@ -10948,7 +10953,9 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
           const uint64_t uc_sub = nr_sense_unit_cpu_ns();
           nr_isac_submit_cfr_multi_meta(export_slot, 0.0f, dmrs_source_g, &carrier, isac_h, nof_ant,
                                         273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, nvar > 0 ? (float)nvar : NAN, &rs_meta);
-          if (uc_sub) /* the hand-off into the sense ring: cost only (the message was counted above) */
+          if (uc_sub && wbg_g) /* one wbg tap: chest + extraction + hand-off */
+            nr_sense_wbg_cost(uc_wbg + (nr_sense_unit_cpu_ns() - uc_sub));
+          else if (uc_sub) /* the hand-off into the sense ring: cost only (the message was counted above) */
             nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, out.rnti, nr_sense_unit_cpu_ns() - uc_sub, 0, false, 0, nr_sense_now_ns());
           NR_BLIND_CTR_INC(g_cfr_submits);
         }

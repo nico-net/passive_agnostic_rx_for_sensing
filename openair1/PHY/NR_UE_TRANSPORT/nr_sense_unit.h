@@ -51,6 +51,16 @@ void nr_sense_unit_offer(nr_unit_src_t s, uint16_t rnti, unsigned grants);
  * nr_sense_unit_flush_pending() books the queued skips and must be called by the same thread after the unlock. */
 bool nr_sense_unit_gate_deferred(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs);
 void nr_sense_unit_flush_pending(void);
+/* Grant-level wideband path: a DL grant of >= T_cell PRBs with proven fields gets a DM-RS-only CFR whichever RNTI it belongs to, whatever its unit says.
+ * wbg_admit (calling thread's cell, SENSING only) is asked by a tap site after the unit gate refused: true = run the tap. It costs one token of the cell's bucket, refilled at the
+ * rate the scheduler allows (unlimited before its first decision); out of tokens, only a grant wider than any admitted since the last decision may borrow (widest first), the rest wait for
+ * time (oldest gap first). wbg_cost books the tap's thread CPU (the scheduler charges it to the pool), wbg_cfr books its exported record to the cell totals (never to an RNTI unit). */
+bool nr_sense_wbg_admit(uint16_t prbs, uint64_t t_ns);
+void nr_sense_wbg_cost(uint64_t cpu_ns);
+void nr_sense_wbg_cfr(uint16_t valid_prbs, uint64_t t_ns);
+void nr_sense_wbg_set_rate(int cell, float rate_hz); /* scheduler: grants/s allowed; < 0 = unlimited */
+typedef struct { uint64_t offered, admitted, taps, cost_ns, records; } nr_sense_wbg_stats_t; /* cumulative */
+void nr_sense_wbg_stats(int cell, nr_sense_wbg_stats_t *out);
 /* Per-cell totals for the metrics (cumulative since start; survive row eviction). */
 typedef struct {
   uint64_t violations, skips;                 /* drops inside enabled units / messages gated off */

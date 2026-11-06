@@ -68,6 +68,7 @@ typedef struct nr_sense_rs_meta_s {
   uint8_t recon_prb_ok[(NR_SENSE_MAX_PRB + 7) / 8]; /* bit = ABSOLUTE PRB (k/12) passes the reconstruction test */
   bool prg_valid;        /* prg_size is the per-RNTI PRG sweep's latched value (nr_pdsch_prg_latched); false prints null = "not latched", NOT "wideband" */
   int prg_size;          /* 0 = wideband, 2, 4 */
+  bool wbg;              /* a grant-level wideband record (nr_sense_wbg_admit): booked to the cell totals, not to an RNTI unit; never printed */
   uint32_t cfg_ref_ver;  /* with identity_gen + dedicated_epoch = cfg_ref; 0 = unknown (prints null) */
 } nr_sense_rs_meta_t;
 

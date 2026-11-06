@@ -330,6 +330,18 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
   /* admission in rank order against every resource; at most one unit with no history per decision */
   use_t use;
   memset(&use, 0, sizeof use);
+  double wbg_pool[NR_SENSE_CELLS] = {0}; /* ns per bucket the wideband-grant resource holds in the shared pool */
+  for (int c = 0; c < nc; c++) { /* the grant-level wideband path comes first: one per-cell resource, priced as offered rate x cost per tap, cut to what the pool leaves */
+    out->wbg_rate_hz[c] = -1.f; out->wbg_frac[c] = 1.f;
+    if (!(in->wbg_offered_hz[c] > 0.f) || !(in->wbg_cost_ns[c] > 0.f)) continue;
+    const double dem = (double)in->wbg_cost_ns[c] * (double)in->wbg_offered_hz[c] * ((double)SENSE_BUCKET_NS / 1e9);
+    const double room = budget[c][NR_RES_POOL] > 0 ? budget[c][NR_RES_POOL] - use.sh[NR_RES_POOL] : 0.0; /* absent / invalid / empty pool: nothing */
+    double f = room > 0 ? room / dem : 0.0;
+    if (f > 1.0) f = 1.0;
+    wbg_pool[c] = f * dem;
+    use.sh[NR_RES_POOL] += wbg_pool[c];
+    out->wbg_frac[c] = (float)f; out->wbg_rate_hz[c] = (float)(f * (double)in->wbg_offered_hz[c]);
+  }
   bool rejected = false, cold_taken = false;
   out->binding = NR_RES_N; /* none: binding is only the resource that rejected a candidate; top (below) is the tightest one when nothing was rejected */
   for (int i = 0; i < n; i++) {
@@ -392,6 +404,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       *run = 0;
     }
   }
+  for (int c = 0; c < nc; c++) now_use.sh[NR_RES_POOL] += wbg_pool[c];
   for (int i = 0; i < n; i++)
     if (C[i].enabled) add_use_c(&now_use, C[i].cell, C[i].dem);
   for (int i = 0; i < n; i++) {

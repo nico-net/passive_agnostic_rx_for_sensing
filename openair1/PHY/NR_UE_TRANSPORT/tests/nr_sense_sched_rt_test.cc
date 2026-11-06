@@ -281,3 +281,23 @@ TEST_F(Sched, OfferedGrantsWeightTheNextSkip)
   EXPECT_NEAR(b[0].wb_rate_hz / a[0].wb_rate_hz, 33.f, 0.5f); /* 1 + 32 messages */
   EXPECT_EQ(b[0].skips, 2u); /* still one skip per gated message */
 }
+
+TEST_F(Sched, WbgRateIsMeasuredAndPublished)
+{
+  /* decision 1 primes the counters; from decision 2 the offered rate and the cost per tap are measured and the allowed rate is published to the cell's bucket */
+  nr_sense_wbg_set_rate(0, 123.f);
+  nr_sense_sched_step(tb(DEC));
+  for (int i = 0; i < 400; i++) { nr_sense_wbg_admit(217, tb(DEC) + 1); nr_sense_wbg_cost(50000); }
+  nr_sense_sched_step(tb(2 * DEC)); /* 400 offered over 4 s = 100 Hz, 50 us per tap: 0.25 ms per second of an idle 200 ms/bucket pool: all fits */
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.offered, 400u);
+  nr_sense_wbg_set_rate(0, -1.f);
+  EXPECT_TRUE(nr_sense_wbg_admit(217, tb(2 * DEC) + 1)); /* unlimited or limited-with-room: admitted either way */
+  g_cap[NR_RES_POOL] = {100.f, 0.f}; /* a pool far too small for 100 Hz x 50 us per bucket */
+  for (int i = 0; i < 400; i++) { nr_sense_wbg_admit(217, tb(2 * DEC) + 2); nr_sense_wbg_cost(50000); }
+  nr_sense_sched_step(tb(3 * DEC));
+  int ok = 0;
+  for (int i = 0; i < 100; i++) ok += nr_sense_wbg_admit(150, tb(3 * DEC) + 1) ? 1 : 0;
+  EXPECT_LE(ok, 6); /* the bucket was cut to ~0: burst only */
+}

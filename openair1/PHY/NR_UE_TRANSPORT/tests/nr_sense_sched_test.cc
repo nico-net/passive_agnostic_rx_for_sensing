@@ -848,3 +848,62 @@ TEST(SchedGate, F2FloorPriorRelaxesAndALateRealSrsGetsEnabled)
   ASSERT_GT(en_at, 0);
   RecordProperty("en_at", en_at); EXPECT_LE(en_at, 12); /* measured: enabled at decision 8 (prior 1 - e^(-k/4) passes the incumbent margin at k=6, then SENSE_CONFIRM) */
 }
+
+/* ---- grant-level wideband path: one per-cell resource priced in the pool before any unit ---- */
+TEST(Wbg, UnmeasuredIsUnlimited)
+{
+  H h(1, 1000);
+  h.step();
+  EXPECT_LT(h.out.wbg_rate_hz[0], 0.f);
+  h.in.wbg_offered_hz[0] = 50.f; /* offered but no tap measured yet */
+  h.step();
+  EXPECT_LT(h.out.wbg_rate_hz[0], 0.f);
+}
+
+TEST(Wbg, FitsInThePoolWholeAndShrinksTheUnitBudget)
+{
+  /* pool 1000, headroom 0.4: budget 600 per 50 ms bucket. 50 grants/s x 100 ns... in bucket units: dem = cost x hz x 0.05 */
+  H h(1, 1000);
+  h.in.wbg_offered_hz[0] = 100.f; h.in.wbg_cost_ns[0] = 60.f; /* dem = 60 x 100 x 0.05 = 300 */
+  h.add(0, 1, 250); h.add(0, 2, 250);
+  h.steps(4);
+  EXPECT_FLOAT_EQ(h.out.wbg_frac[0], 1.f);
+  EXPECT_FLOAT_EQ(h.out.wbg_rate_hz[0], 100.f);
+  EXPECT_EQ(h.nen(0), 1); /* 600 - 300 leaves room for one 250 unit, not two (two would fit without the wideband grants) */
+  H g(1, 1000);
+  g.add(0, 1, 250); g.add(0, 2, 250);
+  g.steps(4);
+  EXPECT_EQ(g.nen(0), 2);
+}
+
+TEST(Wbg, ShortBudgetCutsTheRateNotTheCell)
+{
+  H h(1, 1000);
+  h.in.wbg_offered_hz[0] = 100.f; h.in.wbg_cost_ns[0] = 240.f; /* dem = 1200 against 600 */
+  h.step();
+  EXPECT_NEAR(h.out.wbg_frac[0], 0.5f, 1e-4);
+  EXPECT_NEAR(h.out.wbg_rate_hz[0], 50.f, 1e-2);
+  EXPECT_EQ(h.out.wbg_rate_hz[1], 0.f); /* cells that do not exist stay zero */
+}
+
+TEST(Wbg, InvalidOrEmptyPoolAdmitsNone)
+{
+  H h(1, 0.f);
+  h.in.wbg_offered_hz[0] = 10.f; h.in.wbg_cost_ns[0] = 100.f;
+  h.step();
+  EXPECT_FLOAT_EQ(h.out.wbg_rate_hz[0], 0.f);
+  H g(1, 100);
+  g.in.res[NR_RES_POOL].base_p99_ns = 100; /* the protected baseline eats the pool */
+  g.in.wbg_offered_hz[0] = 10.f; g.in.wbg_cost_ns[0] = 100.f;
+  g.step();
+  EXPECT_FLOAT_EQ(g.out.wbg_rate_hz[0], 0.f);
+}
+
+TEST(Wbg, CellsShareThePoolInOrder)
+{
+  H h(2, 1000);
+  for (int c = 0; c < 2; c++) { h.in.wbg_offered_hz[c] = 100.f; h.in.wbg_cost_ns[c] = 100.f; } /* 500 each against 600 shared */
+  h.step();
+  EXPECT_FLOAT_EQ(h.out.wbg_frac[0], 1.f);
+  EXPECT_NEAR(h.out.wbg_frac[1], 0.2f, 1e-4);
+}

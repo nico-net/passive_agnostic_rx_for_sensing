@@ -1438,7 +1438,9 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
       run++;
     ca = set_bitmap_from_start_size(ca.prb_list[0], run);
   }
-  if (!nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, job->rnti, (uint16_t)ca.num_rbs))
+  /* grant-level wideband path: a disabled unit's wide grant (layout proven: this tap runs after the CRC verified the identity, or on a SOLVED layout) is still tapped when the cell's wbg budget allows */
+  const bool wbg = !nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, job->rnti, (uint16_t)ca.num_rbs);
+  if (wbg && !nr_sense_wbg_admit((uint16_t)ca.num_rbs, nr_sense_now_ns()))
     return;
   int dmrs_sym = -1;
   for (int m = pdu->start_symbol; m < pdu->start_symbol + pdu->number_symbols && m < 32; m++)
@@ -1486,7 +1488,7 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
     const nr_sense_rs_meta_t meta = nr_sense_meta_with_snr((nr_sense_rs_meta_t){.rnti = job->rnti, .prg_valid = prg >= 0, .prg_size = prg >= 0 ? prg : 0,
         .start_rb = pdu->BWPStart + ca.first_rb, .nb_rb = ca.num_rbs, .ports = __builtin_popcount((unsigned)pdu->dmrs_ports),
         .port_mask = (int)pdu->dmrs_ports, .ssb_index = -1, .k_ssb = -1, .ta_est_samples = -1, .transform_precoding = -1,
-        .dmrs_type = pdu->dmrsConfigType ? 2 : 1, .dmrs_add_pos = -1, .dmrs_n_scid = pdu->nscid},
+        .dmrs_type = pdu->dmrsConfigType ? 2 : 1, .dmrs_add_pos = -1, .dmrs_n_scid = pdu->nscid, .wbg = wbg},
         nvar > 0 && pw > 0.0 ? (float)(10.0 * log10(pw / n / (double)nvar)) : NAN);
     const nr_isac_carrier_t carrier = {.nof_prb = (uint32_t)fp->N_RB_DL, .scs_hz = fp->subcarrier_spacing, .dl_center_hz = fp->dl_CarrierFreq,
                                        .pci = fp->Nid_cell, .slots_per_frame = fp->slots_per_frame};
@@ -1495,7 +1497,9 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
   free(h);
   free(k);
   const uint64_t uc1 = nr_sense_unit_cpu_ns();
-  if (uc1) /* one message of the RNTI's PDSCH_DMRS unit: FEP + estimate + export */
+  if (uc1 && wbg) /* the grant-level path pays the cell's wideband-grant resource, not the RNTI's unit */
+    nr_sense_wbg_cost(uc1 > uc0 ? uc1 - uc0 : 0);
+  else if (uc1) /* one message of the RNTI's PDSCH_DMRS unit: FEP + estimate + export */
     nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, job->rnti, uc1 > uc0 ? uc1 - uc0 : 0, 0, false, (uint16_t)ca.num_rbs, nr_sense_now_ns());
 }
 

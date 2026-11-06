@@ -58,6 +58,8 @@ typedef struct {
    * (nr_sense_unit_arrival_gaps); arrivals[c] = the cell's arrivals of any size in the window (0 = no evidence: T_cell = sense_min_prb). gap_valid[c] false (or cont_target_ns 0): the cell's floor does not move. */
   nr_sense_gapstat_t gap[NR_SENSE_CELLS][SENSE_FLOOR_MAX_STEPS]; uint32_t arrivals[NR_SENSE_CELLS]; bool gap_valid[NR_SENSE_CELLS];
   uint64_t cont_target_ns; int floor_prb;
+  /* grant-level wideband path, per cell (spec 2026-11-06): offered = wide grants/s that reached a tap site, cost = thread CPU per tap (ns, recent mean). cost 0 or offered 0 = not measured: unlimited. */
+  float wbg_offered_hz[NR_SENSE_CELLS], wbg_cost_ns[NR_SENSE_CELLS];
 } nr_sense_sched_in_t;
 
 /* Kept between decisions by the caller (zero-initialised at start). st->enabled is the decision: the caller applies it with nr_sense_unit_set_enabled
@@ -85,6 +87,8 @@ typedef struct {
   int floor_prb[NR_SENSE_CELLS]; bool in_gap[NR_SENSE_CELLS]; uint64_t gap_p95_ns[NR_SENSE_CELLS]; /* S9: T_cell after this decision, whether the cell is in a continuity gap at it, its p95 gap */
   int enables, disables, bad_cap; nr_res_id_t binding; nr_res_id_t top; int n_elig, cold_deferred; float value_last_admitted; /* value of the lowest-valued admitted unit */
   int n_admitted; nr_sense_admit_t admitted[NR_SENSE_ADMIT_LOG]; /* the admitted set in rank order (n_admitted counts all, the list holds the first NR_SENSE_ADMIT_LOG) */
+  /* the per-cell "wideband grant" resource: priced in the pool first (before any unit); wbg_rate_hz = wide grants/s the pool leaves it, < 0 = not limited (nothing measured yet), wbg_frac = rate / offered */
+  float wbg_rate_hz[NR_SENSE_CELLS], wbg_frac[NR_SENSE_CELLS];
 } nr_sense_sched_out_t;
 
 void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *st, nr_sense_sched_out_t *out);
