@@ -9,6 +9,7 @@
  * count (the grid sizes), the demod variant (tail template from qam_mode and nl, align, EVM chain), the EVM math (float / double) and the grid bound of the
  * PRB class. A grant outside the cached keys, with no free instance, or outside what the graph reproduces, returns 1 and is counted. */
 #include "nr_gpu_pass.h"
+#include "nr_pdsch_dec_est_copy.h" /* the sensing estimate hand-back gathers with the decoder-side copy */
 #include "PHY/CODING/nr_cb_fail_limit.h" /* NR_CB_FAIL_LIMIT: the TB abort rule k_pick mirrors */
 #include "nr_pdsch_gpu_fep.h"
 #include "nr_pdsch_gpu_chest.h"
@@ -2040,7 +2041,12 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
                                     cudaEventRecord(I.evC, ls) == cudaSuccess && cudaGraphLaunch(es[1]->exec[id], ls) == cudaSuccess && cudaEventRecord(I.evD, ls) == cudaSuccess &&
                                     cudaGraphLaunch(es[2]->exec[id], ls) == cudaSuccess /* back to back: stream order, no host wait between (evC / evD: measurement markers) */
                               : cudaGraphLaunch(e->exec[id], ls) == cudaSuccess);
-  const bool recorded = launched && cudaEventRecord(I.done, ls) == cudaSuccess;
+  /* sensing hand-back, DISCRETE: the first DM-RS symbol's estimate rows (all layers, RX) into the host mirror of I.est, on the pass's own stream before `done` (DIRECT: the host reads the mapped estimate, no copy) */
+  const bool est_hb = launched && r->est_rows && j->est_nsc > 0 && (int)j->est_off + (int)j->est_nsc <= 12 * j->nrb && j->nl * j->nbRx <= 16 && !j->nseg && !j->probe && j->ndmrs > 0;
+  const bool est_ok = !est_hb || nr_gpu_model() != NR_GPU_MODEL_DISCRETE ||
+                      cudaMemcpy2DAsync((char *)I.est.host + (size_t)(j->dmrs_sym[0] * N + j->est_off) * 4, (size_t)NSYM * N * 4, (const char *)I.est.dev + (size_t)(j->dmrs_sym[0] * N + j->est_off) * 4,
+                                        (size_t)NSYM * N * 4, (size_t)j->est_nsc * 4, (size_t)j->nl * nrx_of(job_gid(j)), cudaMemcpyDeviceToHost, ls) == cudaSuccess;
+  const bool recorded = launched && est_ok && cudaEventRecord(I.done, ls) == cudaSuccess;
   const uint64_t ts_l2 = nr_gpu_pass_now_ns();
   if (!recorded) {
     ++g_fb_err;
@@ -2075,6 +2081,7 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   r->post = rb.post;
   r->llr_stats = rb.llr_stats;
   r->tb_ok = 0;
+  r->est_valid = 0;
   r->seq = seq;
   memset(&r->li, 0, sizeof(r->li));
   r->cspan_ns = r->dspan_ns = r->lspan_ns = 0;
@@ -2138,6 +2145,16 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
                                                    : (const int16_t *)I.scratch.host + 2 * (size_t)((size_t)j->qm_sym * NR_GPU_DEMOD_MAX_NL * ext),
            (size_t)j->qm_n * 4);
     r->qm_valid = 1;
+  }
+  if (est_hb) { /* a copy of what the chest wrote (and, per row, its noise variance); the instance is released at return, so the caller's buffer owns it */
+    nr_dec_est_copy((int32_t *)r->est_rows, (const int32_t *)I.est.host, (size_t)NSYM * N, j->nl, nbRxJ, j->dmrs_sym[0], N, j->est_off, j->est_nsc);
+    const uint32_t *nv = (const uint32_t *)((const char *)I.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)); /* rows: DM-RS symbol 0, layer 0, RX a = row a */
+    uint64_t acc = 0;
+    int cnt = 0;
+    for (int a = 0; a < nbRxJ; a++)
+      if (nv[a] > 0) acc += nv[a], cnt++;
+    r->est_nvar = cnt ? (uint32_t)(acc / (uint64_t)cnt) : 0;
+    r->est_valid = 1;
   }
   if (r->brfo_rows && j->fo_first >= 0 && j->fo_last > j->fo_first) {
     const int16_t *e0 = (const int16_t *)I.est.host;

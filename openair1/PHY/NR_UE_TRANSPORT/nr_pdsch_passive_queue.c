@@ -1457,7 +1457,7 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
   for (int m = pdu->start_symbol; m < pdu->start_symbol + pdu->number_symbols && m < 32; m++)
     if (pdu->dlDmrsSymbPos & (1u << m)) { dmrs_sym0 = m; break; }
   /* The decoder's own estimate (sensing mode, kept by the decode on this thread): same symbol and width as this tap would estimate, so no FEP, no chest, and no IQ ring credit is needed. */
-  const bool use_de = de != NULL && de->nant == (uint8_t)fp->nb_antennas_rx && dmrs_sym0 >= 0 && de->dmrs_sym == (uint8_t)dmrs_sym0 && de->nsc == (uint16_t)(ca.num_rbs * NR_NB_SC_PER_RB) && ca.n_prb_list == 0 && job->freq_alloc.n_prb_list == 0 && de->nvar > 0;
+  const bool use_de = de != NULL && de->rnti == job->grant.rnti && de->slot == job->grant.source_absolute_slot && de->nant == (uint8_t)fp->nb_antennas_rx && dmrs_sym0 >= 0 && de->dmrs_sym == (uint8_t)dmrs_sym0 && de->nsc == (uint16_t)(ca.num_rbs * NR_NB_SC_PER_RB) && ca.n_prb_list == 0 && de->first_rb == (uint16_t)ca.first_rb && de->nvar > 0; /* a list grant of one run is not seg_path: the decoder kept an estimate only then */
   if (use_de) iq_ok = true;
   { /* which estimate the tap used: the decoder's (no FEP/chest) or its own (FEP + chest because the decoder kept none) */
     static _Atomic uint64_t n_dec, n_own;

@@ -42,6 +42,10 @@ typedef struct {
   /* the band the channel estimate covers (the slot share widens it upward; nr_pdsch_passive_decode.c share_chest_band); NULL = the grant's. Contiguous grants only */
   const freq_alloc_bitmap_t *chest_fa;
   const fapi_nr_dl_config_dlsch_pdu_rel15_t *chest_cfg;
+  /* sensing hand-back (nr_gpu_pass_result_t.est_rows): the caller's c16 buffer for nl * nbRx rows of est_nsc subcarriers (est_cap c16 in all), the grant's first subcarrier inside the estimate band (est_off); NULL = none */
+  c16_t *est_dst;
+  size_t est_cap;
+  int est_off, est_nsc;
 } nr_gpu_pass_dl_in_t;
 
 typedef struct {

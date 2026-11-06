@@ -1225,9 +1225,20 @@ static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last
  * every body; a layout probe leaves them 0. */
 static __thread uint16_t t_cb_ok = 0, t_cb_tried = 0, t_cb_total = 0;
 static __thread struct nr_pdsch_dec_est t_dec_est; /* h points into t_dec_est_buf; nant == 0: none kept */
-static inline bool chest_estimate_usable(int chest_hit, int chest_only, const freq_alloc_bitmap_t *fa) { return !chest_hit && chest_only < 0 && fa->n_prb_list == 0; }
+/* a list grant that is one contiguous run is not seg_path (the caller checks it): its estimate is the grant's */
+static inline bool chest_estimate_usable(int chest_hit, int chest_only, const freq_alloc_bitmap_t *fa) { (void)fa; return !chest_hit && chest_only < 0; }
 static __thread c16_t *t_dec_est_buf;
 static __thread size_t t_dec_est_cap;
+/* the per-thread buffer of the decoder-estimate export (grows once to the largest grant); NULL when it cannot hold `need` c16 */
+static c16_t *dec_est_buf(size_t need)
+{
+  if (t_dec_est_cap < need) {
+    free(t_dec_est_buf);
+    t_dec_est_buf = (c16_t *)malloc(need * sizeof(c16_t));
+    t_dec_est_cap = t_dec_est_buf ? need : 0;
+  }
+  return t_dec_est_cap >= need ? t_dec_est_buf : NULL;
+}
 static __thread nr_da_cb_pass_t t_cb_pass; /* every block's CRC24B result (sensing mode), same lifetime as t_cb_map */
 static __thread uint64_t t_cb_map = 0; /* EVMGRANT cbmap=: bit r = code block r passed its CRC (blocks >= 64 not shown), same lifetime as t_cb_ok */
 /* RANK2-ITER: LDPC iterations of the last body on this thread (EVMGRANT it= itc= its=): max OAI numIter over the code blocks (a block that hit the cap reports the cap;
@@ -3250,6 +3261,8 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * not settle, an unseen shape class, a busy pass instance or any gate that is not met leaves gp_ok false and the old path decodes from scratch, so a
    * failing grant costs the pass on top of the old path. Every ISAC_GPU_PASS_CHECK-th taken grant (default 64) is decoded by the old path too and compared. */
   bool gp_ok = false, gp_cmp = false, gp_tb = false, gp_tried = false, gp_fcmp = false;
+  c16_t *gp_est_dst = NULL; /* sensing: the buffer the pass hands its first-DM-RS-symbol estimate back into (nr_gpu_pass_result_t.est_rows), NULL = not asked */
+  int gp_est_nsc = 0;
   harqc_entry_t *gp_he = NULL; /* DL HARQ combining in the pass: the held (busy) store entry of this grant, released below */
   int gp_hq_mode = 0;          /* 0 none, 1 first transmission (the pass stores the soft sum), 2 retransmission (the pass combines with the stored sum) */
   uint32_t gp_hq_A = 0;
@@ -3352,8 +3365,12 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         }
       }
     }
+    if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_blind_dmrs_source() >= 0 && !seg_path && !t_probe_first_seg && cw->Nl <= NR_MAX_NB_LAYERS && fp->nb_antennas_rx <= 4) {
+      const int nsc_e = freq_alloc->num_rbs * NR_NB_SC_PER_RB, off_e = ((int)freq_alloc->first_rb - (int)gp_chest_fa.first_rb) * NR_NB_SC_PER_RB;
+      if (nsc_e > 0 && off_e >= 0 && (gp_est_dst = dec_est_buf((size_t)cw->Nl * fp->nb_antennas_rx * nsc_e)) != NULL) gp_est_nsc = nsc_e;
+    }
     {
-      const nr_gpu_pass_dl_in_t gin = {.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .seg = seg_path ? seg : NULL, .nseg = seg_path ? nseg : 0, .cw = cw,
+      const nr_gpu_pass_dl_in_t gin = {.est_dst = gp_est_dst, .est_cap = gp_est_dst ? t_dec_est_cap : 0, .est_off = gp_est_dst ? ((int)freq_alloc->first_rb - (int)gp_chest_fa.first_rb) * NR_NB_SC_PER_RB : 0, .est_nsc = gp_est_nsc,.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .seg = seg_path ? seg : NULL, .nseg = seg_path ? nseg : 0, .cw = cw,
                                        .ssb_rm = ssb_unav ? &ssb.dem : &gp_no_ssb, .rxdataF = &rxdataF[0][0], .rx_stride = fp->samples_per_slot_wCP,
                                        .rnti = grant->rnti, .G = G, .tbslbrm = dlsch_config->tbslbrm,
                                        .est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16,
@@ -3818,14 +3835,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     const int nsc_e = freq_alloc->num_rbs * NR_NB_SC_PER_RB, off_e = ((int)freq_alloc->first_rb - (int)chest_alloc.first_rb) * NR_NB_SC_PER_RB;
     const size_t need_e = (size_t)nl_e * nant_e * nsc_e;
     if (off_e >= 0 && off_e + nsc_e <= (int)chest_alloc.num_rbs * NR_NB_SC_PER_RB && nsc_e > 0 && nant_e <= 8) {
-      if (t_dec_est_cap < need_e) { /* grows to the largest grant once, then reused (not on the steady-state path) */
-        free(t_dec_est_buf);
-        t_dec_est_buf = (c16_t *)malloc(need_e * sizeof(c16_t));
-        t_dec_est_cap = t_dec_est_buf ? need_e : 0;
-      }
-      if (t_dec_est_cap >= need_e) {
+      if (dec_est_buf(need_e)) {
         nr_dec_est_copy((int32_t *)t_dec_est_buf, &pdsch_dl_ch_estimates[0][0], (size_t)pdsch_est_size, nl_e, nant_e, dmrs_first, fp->ofdm_symbol_size, off_e, nsc_e);
-        t_dec_est = (struct nr_pdsch_dec_est){.nant = (uint8_t)nant_e, .nl = (uint8_t)nl_e, .dmrs_sym = (uint8_t)dmrs_first, .nsc = (uint16_t)nsc_e, .nvar = est_nv0, .h = t_dec_est_buf};
+        t_dec_est = (struct nr_pdsch_dec_est){.nant = (uint8_t)nant_e, .nl = (uint8_t)nl_e, .dmrs_sym = (uint8_t)dmrs_first, .nsc = (uint16_t)nsc_e, .nvar = est_nv0, .h = t_dec_est_buf, .rnti = grant->rnti, .slot = grant->source_absolute_slot, .first_rb = (uint16_t)freq_alloc->first_rb};
       }
     }
   }
@@ -4052,6 +4064,9 @@ gpu_llr_ready:;
     if (out->dmrs_snr.comb_db > -90.f)
       memcpy(out->psinr_db, t_gpp->r.psinr_db, sizeof(out->psinr_db));
     dmrs_first = t_gpp->dmrs_first; dmrs_last = t_gpp->dmrs_last;
+    if (gp_est_dst && t_gpp->r.est_valid && t_gpp->r.est_rows == (int16_t *)gp_est_dst) /* the pass's own estimate of THIS grant, copied out by the pass (same slot/RNTI: the buffer is this thread's, written by this call) */
+      t_dec_est = (struct nr_pdsch_dec_est){.nant = (uint8_t)fp->nb_antennas_rx, .nl = (uint8_t)cw->Nl, .dmrs_sym = (uint8_t)dmrs_first, .nsc = (uint16_t)gp_est_nsc, .nvar = t_gpp->r.est_nvar, .h = gp_est_dst,
+                                            .rnti = grant->rnti, .slot = grant->source_absolute_slot, .first_rb = (uint16_t)freq_alloc->first_rb};
     out->nvar = nvar;
     for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
       nr_dl_chest_nvar_ant[a] = a < 4 ? t_gpp->nvar_ant[a] : 0;

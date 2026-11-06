@@ -162,6 +162,7 @@ typedef struct {
   int16_t *rxdataF;            /* the caller's rxdataF[nbRx][rx_stride] (c16, OAI layout) or NULL; DIRECT: filled in place by the GPU; DISCRETE: filled after the pass */
   uint32_t rx_stride;          /* c16 between two antennas of rxdataF */
   uint16_t copy_mask;          /* symbols of rxdataF the caller needs (DISCRETE copy-back) */
+  uint16_t est_nsc, est_off;   /* sensing hand-back (result.est_rows): subcarriers of the first DM-RS symbol's estimate to hand back, from est_off in the estimate row; 0 = none (traffic mode, probes, segmented grants) */
   /* ---- channel estimate, DM-RS type 1 (one row per DM-RS symbol x layer x antenna) */
   int nbRx, nl, ndmrs;
   uint8_t cell;                /* MPCI G3: the cell the grant belongs to (nr_cell_idx() of the bound decode thread, set by nr_gpu_pass_{dl,ul}_run, never read from the thread by the GPU module):
@@ -280,6 +281,12 @@ typedef struct {
     uint16_t npad, npad_last;    /* padding blocks of the class (ncb class - ncb); of them, ran to the iteration limit */
     uint32_t dpad_max_ns;        /* longest entry -> stop of a padding block */
   } li;
+  /* ---- sensing hand-back of the estimate the pass already made (a copy, no compute): job.est_nsc > 0 and a caller buffer. est_rows[(l * nbRx + a) * est_nsc + i] (c16, packed) = the estimate of layer l, RX a,
+   * first DM-RS symbol, subcarrier est_off + i, for every layer and RX; est_nvar = that estimate's noise variance of layer 0 (the mean of the RX branches' nonzero values, as nr_pdsch_channel_estimation's scalar).
+   * est_valid = 1 only when the pass ran its chest for this very result (not a gate skip, not an early refusal). */
+  int16_t *est_rows;
+  uint8_t est_valid;
+  uint32_t est_nvar;
 } nr_gpu_pass_result_t;
 
 /* Process-wide configuration, before nr_gpu_pass_init: the bit-exact chest reads the receiver's delay table (a fixed pointer, baked into the graphs). */

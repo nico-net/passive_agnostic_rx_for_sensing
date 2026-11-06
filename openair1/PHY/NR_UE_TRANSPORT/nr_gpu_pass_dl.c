@@ -851,6 +851,11 @@ int nr_gpu_pass_dl_run(const nr_gpu_pass_dl_in_t *in, nr_gpu_pass_dl_out_t *out)
   out->r.tb = in->tb;
   out->r.demod_out = &out->demod;
   out->r.brfo_rows = out->brfo_rows;
+  if (in->est_dst && nseg == 0 && !in->probe && in->est_nsc > 0 && in->est_off >= 0 && in->est_off + in->est_nsc <= 12 * nrb && (size_t)cw->Nl * fp->nb_antennas_rx * in->est_nsc <= in->est_cap) {
+    j->est_nsc = (uint16_t)in->est_nsc; /* sensing mode only: the caller passes a buffer then (traffic mode: est_dst NULL, the job and the pass are unchanged) */
+    j->est_off = (uint16_t)in->est_off;
+    out->r.est_rows = (int16_t *)in->est_dst;
+  }
   int qm_sym = -1;
   uint32_t qm_n = 0;
   for (int m = in->dlsch_config->start_symbol; m < in->dlsch_config->start_symbol + in->dlsch_config->number_symbols; m++)

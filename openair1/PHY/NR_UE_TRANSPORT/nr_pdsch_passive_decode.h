@@ -70,8 +70,8 @@ extern "C" {
 /// be told rather than read off the air.
 /// The decoder's own DM-RS channel estimate of the last body on this thread (sensing mode, copied before the working buffer is freed): the first DM-RS symbol, every layer and RX branch, the grant's
 /// subcarriers only (a shared-slot estimate band is cut to the grant). h[(l*nant + a)*nsc + j] in the LS units of nr_pdsch_channel_estimation, i.e. what the DM-RS tap exports. nvar = that estimate's noise
-/// variance (first DM-RS symbol, layer 0). Valid until the next decode on the thread; the result's est is NULL when the decoder kept none (GPU pass, single-branch chest, segmented / PRB-list grant, cached estimate).
-struct nr_pdsch_dec_est { uint8_t nant, nl, dmrs_sym; uint16_t nsc; uint32_t nvar; const c16_t *h; };
+/// variance (first DM-RS symbol, layer 0). Valid until the next decode on the thread; the result's est is NULL when the decoder kept none (single-branch chest, segmented / PRB-list grant, cached estimate, a pass that was gated or refused). A GPU graph pass hands its own estimate back (a copy, nr_gpu_pass_result_t.est_rows).
+struct nr_pdsch_dec_est { uint8_t nant, nl, dmrs_sym; uint16_t nsc; uint32_t nvar; const c16_t *h; uint16_t rnti, first_rb; long slot; /* the grant it belongs to (identity guard of the consumer) */ };
 
 typedef struct {
   bool check_sample_lifetime; ///< deferred IQ must survive the complete FEP

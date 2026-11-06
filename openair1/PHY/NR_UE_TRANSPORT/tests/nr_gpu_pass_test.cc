@@ -532,6 +532,9 @@ TEST(GpuPassDl, DiscreteEqualsDirectFullResult) {
       nr_gpu_pass_result_t g{}, s{};
       g.tb = gb.data(); s.tb = sb.data();
       g.brfo_rows = brfo.data(); g.qm_row = qm.data();
+      const int e_off = 12, e_nsc = 12 * fx.nrb - 24; /* sensing hand-back: the grant's inner subcarriers of the first DM-RS symbol, every layer and RX (a probe and a segmented grant get none) */
+      std::vector<int16_t> eh((size_t)c.nl * 4 * e_nsc * 2, 0x7e);
+      if (c.kind != 1 && c.kind != 2) { j.est_off = (uint16_t)e_off; j.est_nsc = (uint16_t)e_nsc; g.est_rows = eh.data(); }
       j.llr_out_all = c.kind == 1 ? 0 : 1; /* a probe's LLRs reach llr_out without it; the others: whatever the verdict, so the LLR path is compared on every grant */
       const int rc = m.pass_try(&j, &g);
       ASSERT_EQ(0, rc) << what;
@@ -558,6 +561,20 @@ TEST(GpuPassDl, DiscreteEqualsDirectFullResult) {
         EXPECT_EQ(0, memcmp(&e, &g.dsnr, sizeof(e))) << what << ": dsnr of layer " << l << " (host function on the stage-path estimate) comb " << e.comb_db << " vs " << g.dsnr.comb_db;
       }
       if (c.kind == 2) EXPECT_EQ(0, memcmp(brfo.data(), fx.est_l0.data(), brfo.size() * 2)) << "layer-0 estimates in data order, " << what;
+      if (g.est_rows) { /* the hand-back is a copy of the estimate the stage path made (the chest is bit-exact), all layers and RX, and the layer-0 noise variance */
+        if (g.skip) {
+          EXPECT_EQ(0, g.est_valid) << what;
+        } else {
+          EXPECT_EQ(1, g.est_valid) << what;
+          EXPECT_GT(g.est_nvar, 0u) << what;
+          for (int l = 0; l < c.nl; l++)
+            for (int a = 0; a < 4; a++)
+              EXPECT_EQ(0, memcmp(&eh[((size_t)l * 4 + a) * e_nsc * 2], fx.est_all.data() + 2 * ((size_t)(l * 4 + a) * 14 * 4096 + (size_t)j.dmrs_sym[0] * 4096 + e_off), (size_t)e_nsc * 4))
+                  << what << ": estimate hand-back layer " << l << " ant " << a;
+        }
+      } else {
+        EXPECT_EQ(0, g.est_valid) << what << ": no buffer, no hand-back";
+      }
       if (g.qm_valid == 0) ADD_FAILURE() << what << ": qm_row not delivered (qm_valid 0)";
       if (split && !g.skip && c.kind != 1 && !g.need_cpu && fx.tb.C >= 2) {
         n_li++;
