@@ -786,8 +786,6 @@ TEST(SchedGate, F2RotatingPuschRntiDeadRowsAndSheds)
   h.add(0, 17, 0, NR_UNIT_PDSCH_DMRS).wb_rate_hz = 20; /* productive: ratio 0.8, records keep coming (refreshed at every decision); val 3200 */
   auto tk = [&]() { auto *p = h.find(0, 17); p->last_cfr_ns = p->last_valid_wb_ns = h.in.now_ns + 4 * S - 1; tick(h); };
   uint16_t rn = 1000;
-  std::vector<std::pair<uint16_t, int>> born; /* rnti, decision */
-  int pd_en = -1;
   for (int k = -10; k < 14; k++, rn++) {
     h.v[0].erase(std::remove_if(h.v[0].begin(), h.v[0].end(), [&](const nr_sense_unit_view_t &u) { return u.src == NR_UNIT_PUSCH_DMRS && u.rnti >= 1000 && u.rnti < rn - 10; }), h.v[0].end());
     zero_yield(h, rn, NR_UNIT_PUSCH_DMRS, 40, 5); /* 128 PRB: val = 40 x prior x 256 */
@@ -798,9 +796,8 @@ TEST(SchedGate, F2RotatingPuschRntiDeadRowsAndSheds)
       if (h.out.admitted[i].rnti == rn) { seen = true; EXPECT_LE(h.out.admitted[i].val, 40 * 0.25 * 256) << "k=" << k << " PUSCH priced at the shed-driven prior (~0.22)"; }
     EXPECT_TRUE(seen) << "k=" << k;
     EXPECT_EQ(h.out.admitted[0].rnti, 17) << "k=" << k << ": PDSCH ranks above the fresh PUSCH RNTI";
-    if (pd_en < 0 && h.en(0, 17)) pd_en = k;
+    EXPECT_TRUE(h.en(0, 17)) << "k=" << k << ": PDSCH stays enabled while the sheds keep coming";
   }
-  EXPECT_TRUE(h.en(0, 17)); EXPECT_LE(pd_en, 2);
 }
 
 TEST(SchedGate, F2RecoveringSourceGetsItsPriorBack)
