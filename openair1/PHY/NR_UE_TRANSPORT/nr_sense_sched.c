@@ -169,6 +169,61 @@ static int slot_of(nr_sense_sched_state_t *st, int c, uint16_t rnti)
   return freeslot;
 }
 
+/* The per-cell "wideband grant" resource (grant-level DM-RS CFR of wide grants, nr_sense_wbg_*). Demand per 50 ms bucket: pool = offered wide grants/s x CPU per tap (the tap runs on the PDSCH consumer, so the same
+ * time is a wait for the next decode job: QUEUE_DL), ring = offered x writer cost per record. Not yet measured (cost 0): the cost of a pdsch_dmrs unit of the cell (its p99 bucket CPU per message) and the
+ * wide message rate its units see; nothing to price from: one tap per decision interval. Pool share per cell = the room left by the incumbents / the cells with offered wide grants. Published rate =
+ * f x offered x INCUMBENT margin, never unlimited. */
+static void wbg_price(const nr_sense_sched_in_t *in, const nr_sense_sched_state_t *st, nr_sense_sched_out_t *out, double budget[][NR_RES_N], int nc, use_t *use, double *wbg_pool, double *wbg_q, double *wbg_r)
+{
+  (void)st;
+  if (nc < 1) return;
+  double cost[NR_SENSE_CELLS], off[NR_SENSE_CELLS];
+  bool model[NR_SENSE_CELLS]; /* priced from the unit model (nothing measured): sets the startup rate, holds no budget */
+  int n_off = 0;
+  for (int c = 0; c < nc; c++) {
+    cost[c] = (double)in->wbg_cost_ns[c];
+    off[c] = (double)in->wbg_offered_hz[c];
+    double mc = 0, mo = 0;
+    for (int i = 0; i < in->n_units[c]; i++) { /* the unit model */
+      const nr_sense_unit_view_t *v = &in->units[c][i];
+      if (v->src != NR_UNIT_PDSCH_DMRS) continue;
+      mo += (double)v->wb_rate_hz;
+      const double per = (double)v->cpu_p99_ns / (v->wb_rate_hz * (SENSE_BUCKET_NS / 1e9) > 1.0 ? v->wb_rate_hz * (SENSE_BUCKET_NS / 1e9) : 1.0);
+      if (per > 0 && (mc == 0 || per < mc)) mc = per;
+    }
+    model[c] = !(cost[c] > 0);
+    if (model[c]) { cost[c] = mc; if (!(off[c] > 0)) off[c] = mo; } /* startup: both from the model */
+    if (cost[c] > 0 && off[c] > 0 && !model[c]) n_off++;
+  }
+  const double room0 = budget[0][NR_RES_POOL] > 0 ? budget[0][NR_RES_POOL] - use->sh[NR_RES_POOL] : 0.0; /* POOL is shared: the same for every cell */
+  const double share = n_off ? (room0 > 0 ? room0 / n_off : 0.0) : 0.0;
+  const double bucket_s = (double)SENSE_BUCKET_NS / 1e9;
+  for (int c = 0; c < nc; c++) {
+    out->wbg_frac[c] = 1.f;
+    out->wbg_rate_hz[c] = (float)(1e9 / (double)SENSE_DECIDE_NS); /* one tap per decision interval */
+    if (!(cost[c] > 0 && off[c] > 0)) continue;
+    const double dem = cost[c] * off[c] * bucket_s, dem_r = (double)in->wbg_ring_ns[c] * off[c] * bucket_s;
+    double f = budget[c][NR_RES_POOL] > 0 ? (model[c] ? (room0 > 0 ? room0 : 0.0) : share) / dem : 0.0;
+    if (budget[c][NR_RES_QUEUE_DL] == -2.0) f = 0.0;
+    else if (budget[c][NR_RES_QUEUE_DL] != -1.0) { const double r = budget[c][NR_RES_QUEUE_DL] - use->pc[c][NR_RES_QUEUE_DL]; const double fq = r > 0 ? r / dem : 0.0; if (fq < f) f = fq; }
+    if (dem_r > 0) {
+      if (budget[c][NR_RES_SENSE_RING] == -2.0) f = 0.0;
+      else if (budget[c][NR_RES_SENSE_RING] != -1.0) { const double r = budget[c][NR_RES_SENSE_RING] - use->pc[c][NR_RES_SENSE_RING]; const double fr = r > 0 ? r / dem_r : 0.0; if (fr < f) f = fr; }
+    }
+    if (f > 1.0) f = 1.0;
+    if (f < 0.0) f = 0.0;
+    out->wbg_frac[c] = (float)f;
+    out->wbg_rate_hz[c] = (float)(f * off[c] * INCUMBENT);
+    if (model[c]) continue;
+    wbg_pool[c] = f * dem; wbg_q[c] = f * dem; wbg_r[c] = f * dem_r;
+    use->sh[NR_RES_POOL] += wbg_pool[c];
+    if (wbg_q[c] > use->pc[c][NR_RES_QUEUE_DL]) use->pc[c][NR_RES_QUEUE_DL] = wbg_q[c];
+    use->pc[c][NR_RES_SENSE_RING] += wbg_r[c];
+    out->wbg_frac[c] = (float)f;
+    out->wbg_rate_hz[c] = (float)(f * off[c] * INCUMBENT);
+  }
+}
+
 void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t *st, nr_sense_sched_out_t *out)
 {
   memset(out, 0, sizeof *out);
@@ -330,24 +385,16 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
   /* admission in rank order against every resource; at most one unit with no history per decision */
   use_t use;
   memset(&use, 0, sizeof use);
-  double wbg_pool[NR_SENSE_CELLS] = {0}; /* ns per bucket the wideband-grant resource holds in the shared pool */
-  for (int c = 0; c < nc; c++) { /* the grant-level wideband path comes first: one per-cell resource, priced as offered rate x cost per tap, cut to what the pool leaves */
-    out->wbg_rate_hz[c] = -1.f; out->wbg_frac[c] = 1.f;
-    if (!(in->wbg_offered_hz[c] > 0.f) || !(in->wbg_cost_ns[c] > 0.f)) continue;
-    const double dem = (double)in->wbg_cost_ns[c] * (double)in->wbg_offered_hz[c] * ((double)SENSE_BUCKET_NS / 1e9);
-    const double room = budget[c][NR_RES_POOL] > 0 ? budget[c][NR_RES_POOL] - use.sh[NR_RES_POOL] : 0.0; /* absent / invalid / empty pool: nothing */
-    double f = room > 0 ? room / dem : 0.0;
-    if (f > 1.0) f = 1.0;
-    wbg_pool[c] = f * dem;
-    use.sh[NR_RES_POOL] += wbg_pool[c];
-    out->wbg_frac[c] = (float)f; out->wbg_rate_hz[c] = f >= 1.0 ? -1.f : (float)(f * (double)in->wbg_offered_hz[c]); /* it fits whole: no throttle (a bucket at exactly the offered rate would cut bursts) */
-  }
+  double wbg_pool[NR_SENSE_CELLS] = {0}, wbg_q[NR_SENSE_CELLS] = {0}, wbg_r[NR_SENSE_CELLS] = {0}; /* what the wideband-grant resource holds per cell: ns per bucket of POOL (shared), QUEUE_DL, SENSE_RING */
   bool rejected = false, cold_taken = false;
   out->binding = NR_RES_N; /* none: binding is only the resource that rejected a candidate; top (below) is the tightest one when nothing was rejected */
+  for (int pass = 0; pass < 2; pass++) { /* pass 0: the enabled incumbents and the units with history; the wideband-grant resource; pass 1: the cold units */
+  if (pass == 1) wbg_price(in, st, out, budget, nc, &use, wbg_pool, wbg_q, wbg_r);
   for (int i = 0; i < n; i++) {
     cand_t *k = &C[i];
     if (!k->elig || k->val <= 0 || k->removed) continue;
     if (k->holdoff) continue; /* backed off: no want, no budget, no streak */
+    if ((pass == 0) != (k->enabled || k->pending || !k->cold)) continue; /* pass 0: incumbents and units with history, in rank order (a challenger that beats an incumbent by the margin still displaces it) */
     out->n_elig++;
     const bool cold_slot = k->cold && !k->pending; /* F3: a pending unit already holds its slot */
     if (cold_slot && cold_taken) { out->cold_deferred++; continue; }
@@ -366,6 +413,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       rejected = true;
       out->binding = (nr_res_id_t)over;
     }
+  }
   }
   { /* top = the tightest resource (use / budget), rejected or not; none when no budget is positive */
     double best = -1;
@@ -404,7 +452,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       *run = 0;
     }
   }
-  for (int c = 0; c < nc; c++) now_use.sh[NR_RES_POOL] += wbg_pool[c];
+  for (int c = 0; c < nc; c++) { now_use.sh[NR_RES_POOL] += wbg_pool[c]; if (wbg_q[c] > now_use.pc[c][NR_RES_QUEUE_DL]) now_use.pc[c][NR_RES_QUEUE_DL] = wbg_q[c]; now_use.pc[c][NR_RES_SENSE_RING] += wbg_r[c]; }
   for (int i = 0; i < n; i++)
     if (C[i].enabled) add_use_c(&now_use, C[i].cell, C[i].dem);
   for (int i = 0; i < n; i++) {

@@ -1424,7 +1424,7 @@ extern __thread uint32_t nr_gp_tt[26]; /* nr_gpu_pass_dl.c */
  * history through nr_sense_unit_gate), so the scheduler never saw it and no record was ever produced. Here, after the TB CRC verified the identity: gate
  * (counts the message, skips when disabled), FEP of the first DM-RS symbol, the same estimator, the same comb-2 export as the monitor tap. */
 static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdsch_passive_job_t *job, int rxdataF_sz,
-                              c16_t rxdataF[][rxdataF_sz])
+                              c16_t rxdataF[][rxdataF_sz], bool crc_ok)
 {
   const int src = nr_sense_blind_dmrs_source();
   if (src < 0 || nr_isac_mode() != NR_ISAC_MODE_SENSING)
@@ -1438,10 +1438,17 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
       run++;
     ca = set_bitmap_from_start_size(ca.prb_list[0], run);
   }
-  /* grant-level wideband path: a disabled unit's wide grant (layout proven: this tap runs after the CRC verified the identity, or on a SOLVED layout) is still tapped when the cell's wbg budget allows */
-  const bool wbg = !nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, job->rnti, (uint16_t)ca.num_rbs);
-  if (wbg && !nr_sense_wbg_admit((uint16_t)ca.num_rbs, nr_sense_now_ns()))
-    return;
+  /* grant-level wideband path: a wide grant of a disabled unit is still tapped when the cell's wbg bucket allows, only after the TB CRC passed (a CRC-failed grant's DCI was never verified)
+   * and only for a C-RNTI. A monitor-site grant (wbg_pre) was admitted there and booked its unit message there: no second gate, no second token. */
+  bool wbg = job->wbg_pre;
+  if (!wbg) {
+    const bool open = nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, job->rnti, (uint16_t)ca.num_rbs);
+    const int w = nr_sense_wbg_after_gate(open, nr_sense_wbg_consumer_ok(crc_ok, job->rnti_class == NR_BLIND_RNTI_CLASS_C), (uint16_t)ca.num_rbs, nr_sense_now_ns());
+    if (w < 0) return;
+    wbg = w > 0;
+  }
+  if (wbg && !crc_ok)
+    return; /* a wbg_pre job that failed the CRC (solved-layout rescue path) */
   int dmrs_sym = -1;
   for (int m = pdu->start_symbol; m < pdu->start_symbol + pdu->number_symbols && m < 32; m++)
     if (pdu->dlDmrsSymbPos & (1u << m)) {
@@ -1492,7 +1499,8 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
         nvar > 0 && pw > 0.0 ? (float)(10.0 * log10(pw / n / (double)nvar)) : NAN);
     const nr_isac_carrier_t carrier = {.nof_prb = (uint32_t)fp->N_RB_DL, .scs_hz = fp->subcarrier_spacing, .dl_center_hz = fp->dl_CarrierFreq,
                                        .pci = fp->Nid_cell, .slots_per_frame = fp->slots_per_frame};
-    nr_isac_submit_cfr_multi_meta((uint32_t)job->absolute_slot, 0.0f, src, &carrier, h, (uint32_t)nant, ncomb, k, l, n, nvar > 0 ? (float)nvar : NAN, &meta);
+    if (!wbg || nr_sense_wbg_export_ok((float)nvar, pw, n)) /* a wbg record needs a noise variance, a channel power and an RE (an overwritten-IQ slot gives pw = 0: no record) */
+      nr_isac_submit_cfr_multi_meta((uint32_t)job->absolute_slot, 0.0f, src, &carrier, h, (uint32_t)nant, ncomb, k, l, n, nvar > 0 ? (float)nvar : NAN, &meta);
   }
   free(h);
   free(k);
@@ -2473,12 +2481,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.dmrs_tap
           && nr_dmrs_tap_wanted(true, false, false, true, nr_pdsch_solver_layout_state(job.rnti, NULL, NULL)))
-        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF); /* SOLVED layout: the DM-RS CFR does not need a CRC pass */
+        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, false); /* SOLVED layout: the DM-RS CFR does not need a CRC pass (not for the wbg path: it needs the CRC) */
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         lock_verify_note_crc_ok(job.absolute_slot);
         if (job.dmrs_tap)
-          consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF);
+          consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, true);
         if (job.want_data) {
           /* Publish THIS job's monotonic slot so the CPI grid indexes it correctly. Without this the
            * submit derives the index from proc->frame_rx, which wraps at 1024 -- harmless in order,

@@ -296,7 +296,8 @@ static void *run_writer(void *arg)
         { /* the unit pays its writer cost: this record's formatting + the quality computed for its frame (SENSE_RING demand, not the unit's whole CPU) */
           const uint64_t t_now=nr_sense_now_ns(); const int us=nr_sense_unit_of_src(job->src);
           nr_sense_cost_add(NR_SENSE_COST_REC,job->src,t_now-t_rec);
-          if (us>=0) nr_sense_unit_cost_ring((nr_unit_src_t)us,(uint16_t)job->meta.rnti,(t_now-t_rec)+qcost,t_now);
+          if (job->meta.wbg) nr_sense_wbg_ring_cost((t_now-t_rec)+qcost); /* the wideband-grant resource pays, not the RNTI's unit */
+          else if (us>=0) nr_sense_unit_cost_ring((nr_unit_src_t)us,(uint16_t)job->meta.rnti,(t_now-t_rec)+qcost,t_now);
         }
         record_binary[at]=0;
         }

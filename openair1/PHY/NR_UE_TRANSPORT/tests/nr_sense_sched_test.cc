@@ -849,31 +849,44 @@ TEST(SchedGate, F2FloorPriorRelaxesAndALateRealSrsGetsEnabled)
   RecordProperty("en_at", en_at); EXPECT_LE(en_at, 12); /* measured: enabled at decision 8 (prior 1 - e^(-k/4) passes the incumbent margin at k=6, then SENSE_CONFIRM) */
 }
 
-/* ---- grant-level wideband path: one per-cell resource priced in the pool before any unit ---- */
-TEST(Wbg, UnmeasuredIsUnlimited)
+/* ---- grant-level wideband path: one per-cell resource priced in the pool after the incumbents, before the cold units ---- */
+TEST(Wbg, UnmeasuredIsFiniteOneTapPerInterval)
 {
   H h(1, 1000);
   h.step();
-  EXPECT_LT(h.out.wbg_rate_hz[0], 0.f);
-  h.in.wbg_offered_hz[0] = 50.f; /* offered but no tap measured yet */
+  EXPECT_NEAR(h.out.wbg_rate_hz[0], 0.25f, 1e-4); /* never -1 (unlimited) */
+  h.in.wbg_offered_hz[0] = 50.f; /* offered but no tap measured yet and no pdsch_dmrs unit to price it from */
   h.step();
-  EXPECT_LT(h.out.wbg_rate_hz[0], 0.f);
+  EXPECT_NEAR(h.out.wbg_rate_hz[0], 0.25f, 1e-4);
 }
 
-TEST(Wbg, FitsInThePoolWholeAndShrinksTheUnitBudget)
+TEST(Wbg, UnmeasuredStartsFromThePdschDmrsUnitCostModel)
 {
-  /* pool 1000, headroom 0.4: budget 600 per 50 ms bucket. 50 grants/s x 100 ns... in bucket units: dem = cost x hz x 0.05 */
   H h(1, 1000);
+  h.add(0, 1, 25).wb_rate_hz = 10; /* a pdsch_dmrs unit: 25 ns per bucket at 10 wide messages/s (< 1 per bucket: one message) */
+  h.step();
+  EXPECT_NEAR(h.out.wbg_rate_hz[0], 12.5f, 1e-3); /* 1.25 x the unit's wide rate: the cost fits the pool */
+}
+
+TEST(Wbg, FitsInThePoolWholeAfterTheUnitsWithHistory)
+{
+  H h(1, 1000); /* budget 600 */
   h.in.wbg_offered_hz[0] = 100.f; h.in.wbg_cost_ns[0] = 60.f; /* dem = 60 x 100 x 0.05 = 300 */
+  h.add(0, 1, 250);
+  h.steps(4);
+  EXPECT_TRUE(h.en(0, 1));
+  EXPECT_FLOAT_EQ(h.out.wbg_frac[0], 1.f); /* 350 left */
+  EXPECT_NEAR(h.out.wbg_rate_hz[0], 125.f, 1e-3); /* finite: offered x the 1.25 margin */
+}
+
+TEST(Wbg, UnitsWithHistoryAreServedBeforeTheWbg)
+{
+  H h(1, 1000);
+  h.in.wbg_offered_hz[0] = 100.f; h.in.wbg_cost_ns[0] = 60.f; /* 300 */
   h.add(0, 1, 250); h.add(0, 2, 250);
   h.steps(4);
-  EXPECT_FLOAT_EQ(h.out.wbg_frac[0], 1.f);
-  EXPECT_LT(h.out.wbg_rate_hz[0], 0.f); /* fits whole: not throttled */
-  EXPECT_EQ(h.nen(0), 1); /* 600 - 300 leaves room for one 250 unit, not two (two would fit without the wideband grants) */
-  H g(1, 1000);
-  g.add(0, 1, 250); g.add(0, 2, 250);
-  g.steps(4);
-  EXPECT_EQ(g.nen(0), 2);
+  EXPECT_EQ(h.nen(0), 2);                              /* the units keep their 500 ... */
+  EXPECT_NEAR(h.out.wbg_frac[0], 1.f / 3.f, 1e-3);    /* ... the wbg gets the 100 that is left */
 }
 
 TEST(Wbg, ShortBudgetCutsTheRateNotTheCell)
@@ -882,7 +895,7 @@ TEST(Wbg, ShortBudgetCutsTheRateNotTheCell)
   h.in.wbg_offered_hz[0] = 100.f; h.in.wbg_cost_ns[0] = 240.f; /* dem = 1200 against 600 */
   h.step();
   EXPECT_NEAR(h.out.wbg_frac[0], 0.5f, 1e-4);
-  EXPECT_NEAR(h.out.wbg_rate_hz[0], 50.f, 1e-2);
+  EXPECT_NEAR(h.out.wbg_rate_hz[0], 62.5f, 1e-2);
   EXPECT_EQ(h.out.wbg_rate_hz[1], 0.f); /* cells that do not exist stay zero */
 }
 
@@ -899,11 +912,39 @@ TEST(Wbg, InvalidOrEmptyPoolAdmitsNone)
   EXPECT_FLOAT_EQ(g.out.wbg_rate_hz[0], 0.f);
 }
 
-TEST(Wbg, CellsShareThePoolInOrder)
+TEST(Wbg, CellsShareTheRoomLeftByTheIncumbentsFairly)
 {
-  H h(2, 1000);
-  for (int c = 0; c < 2; c++) { h.in.wbg_offered_hz[c] = 100.f; h.in.wbg_cost_ns[c] = 100.f; } /* 500 each against 600 shared */
+  H h(2, 1000); /* pool budget 600 */
+  h.add(0, 1, 300).enabled = true; /* an enabled incumbent holds half of it */
+  for (int c = 0; c < 2; c++) { h.in.wbg_offered_hz[c] = 100.f; h.in.wbg_cost_ns[c] = 100.f; } /* 500 each */
   h.step();
-  EXPECT_FLOAT_EQ(h.out.wbg_frac[0], 1.f);
-  EXPECT_NEAR(h.out.wbg_frac[1], 0.2f, 1e-4);
+  EXPECT_TRUE(h.en(0, 1)); /* the incumbent is not starved */
+  EXPECT_NEAR(h.out.wbg_frac[0], 0.3f, 1e-4); /* (600 - 300) / 2 cells = 150 of 500 each */
+  EXPECT_NEAR(h.out.wbg_frac[1], 0.3f, 1e-4);
+}
+
+TEST(Wbg, IncumbentsOutrankTheWbgAndTheWbgOutranksColdUnits)
+{
+  H h(1, 1000);
+  h.add(0, 1, 500).enabled = true;
+  h.add(0, 2, 500); /* a challenger that does not fit next to the incumbent and the wbg */
+  h.in.wbg_offered_hz[0] = 100.f; h.in.wbg_cost_ns[0] = 40.f; /* 200 */
+  h.steps(4);
+  EXPECT_TRUE(h.en(0, 1));
+  EXPECT_FALSE(h.en(0, 2));
+  EXPECT_NEAR(h.out.wbg_frac[0], 0.5f, 1e-4); /* 100 left of 600 after the incumbent: the wbg is cut, not the incumbent */
+}
+
+TEST(Wbg, PricedOnTheDecodeQueueAndTheRingToo)
+{
+  H h(1, 1e6f);
+  h.in.res[NR_RES_QUEUE_DL] = {1000.f, 0.f}; /* budget 600 */
+  h.in.wbg_offered_hz[0] = 100.f; h.in.wbg_cost_ns[0] = 240.f; /* dem 1200 */
+  h.step();
+  EXPECT_NEAR(h.out.wbg_frac[0], 0.5f, 1e-4);
+  H g(1, 1e6f);
+  g.in.res[NR_RES_SENSE_RING] = {100.f, 0.f}; /* budget 60 */
+  g.in.wbg_offered_hz[0] = 100.f; g.in.wbg_cost_ns[0] = 10.f; g.in.wbg_ring_ns[0] = 24.f; /* ring dem 120 */
+  g.step();
+  EXPECT_NEAR(g.out.wbg_frac[0], 0.5f, 1e-4);
 }

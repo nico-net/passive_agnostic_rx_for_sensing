@@ -21,6 +21,9 @@ const char *nr_sense_res_name(int res);
 /* S9: T_cell of a cell after the last decision (0 before the first), its p95 continuity gap (ms) and whether it was in a gap; for ISAC_METRICS. */
 int nr_sense_sched_floor_info(int cell, uint64_t *gap_p95_ms, bool *in_gap);
 
+/* The wideband-grant resource of a cell as the last decision measured it: offered wide grants/s and mean CPU per tap (ns); 0 before the first measurement and after a cell reset. */
+void nr_sense_sched_wbg_info(int cell, double *offered_hz, double *cost_ns);
+
 /* One decision at time now_ns (the thread calls it every SENSE_DECIDE_NS; tests call it directly). */
 void nr_sense_sched_step(uint64_t now_ns);
 

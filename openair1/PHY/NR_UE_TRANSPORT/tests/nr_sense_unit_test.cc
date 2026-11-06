@@ -6,6 +6,7 @@
 #include <atomic>
 #include <thread>
 #include <vector>
+#include <cmath>
 
 static const uint64_t B = SENSE_BUCKET_NS;
 static const uint64_t T0 = 100000ull * B; /* arbitrary monotonic origin */
@@ -483,9 +484,11 @@ TEST_F(Unit, ArrivalGapsWindowAndWrap)
 }
 
 /* ---- grant-level wideband path (nr_sense_wbg_*) ---- */
-TEST_F(Unit, WbgUnlimitedBeforeADecisionAndNarrowIsRefused)
+TEST_F(Unit, WbgFiniteBeforeADecisionAndNarrowIsRefused)
 {
-  for (int i = 0; i < 50; i++) EXPECT_TRUE(nr_sense_wbg_admit(217, tb(1) + i));
+  int ok = 0;
+  for (int i = 0; i < 50; i++) ok += nr_sense_wbg_admit(217, tb(1) + i) ? 1 : 0;
+  EXPECT_EQ(ok, 4); /* never unlimited: before the first decision only the bucket depth (4) is available, then 1 per decision interval */
   EXPECT_FALSE(nr_sense_wbg_admit(127, tb(1))); /* below the wideband target (sense_min_prb): not this path (not even counted) */
   nr_sense_cell_floor_publish(0, 32);
   EXPECT_FALSE(nr_sense_wbg_admit(100, tb(1))); /* the continuity floor T_cell does not lower it */
@@ -493,7 +496,76 @@ TEST_F(Unit, WbgUnlimitedBeforeADecisionAndNarrowIsRefused)
   nr_sense_wbg_stats_t s;
   nr_sense_wbg_stats(0, &s);
   EXPECT_EQ(s.offered, 50u);
-  EXPECT_EQ(s.admitted, 50u);
+  EXPECT_EQ(s.admitted, 4u);
+  EXPECT_NEAR(s.rate_hz, 0.25f, 1e-3); /* the startup rate: one tap per SENSE_DECIDE_NS */
+  EXPECT_FALSE(nr_sense_wbg_admit(217, tb(1) + 1000000)); /* 1 ms later: still nothing */
+  EXPECT_TRUE(nr_sense_wbg_admit(217, tb(1) + 4100ull * MS)); /* one decision interval later: one more */
+}
+
+TEST_F(Unit, WbgSiteConditions)
+{
+  /* consumer site: the TB CRC must have passed (a CRC-failed grant on a SOLVED layout has a DCI nobody verified) and the RNTI must be a C-RNTI */
+  EXPECT_TRUE(nr_sense_wbg_consumer_ok(true, true));
+  EXPECT_FALSE(nr_sense_wbg_consumer_ok(false, true));
+  EXPECT_FALSE(nr_sense_wbg_consumer_ok(true, false));
+  /* monitor site: C-RNTI, proven fields (DCI 1_0 or a non-dl_auto 1_1), and no unsettled sweep hypothesis */
+  EXPECT_TRUE(nr_sense_wbg_monitor_ok(true, true, false, false));
+  EXPECT_TRUE(nr_sense_wbg_monitor_ok(true, true, true, true));
+  EXPECT_FALSE(nr_sense_wbg_monitor_ok(false, true, false, false)); /* SI/RA/TC/P RNTI */
+  EXPECT_FALSE(nr_sense_wbg_monitor_ok(true, false, false, false)); /* dl_auto 1_1: layout not proven */
+  EXPECT_FALSE(nr_sense_wbg_monitor_ok(true, true, true, false));   /* sweep hypothesis not settled */
+  /* export: a record needs a noise variance, a channel power and at least one RE */
+  EXPECT_TRUE(nr_sense_wbg_export_ok(1.f, 2.0, 10));
+  EXPECT_FALSE(nr_sense_wbg_export_ok(0.f, 2.0, 10));
+  EXPECT_FALSE(nr_sense_wbg_export_ok(1.f, 0.0, 10));
+  EXPECT_FALSE(nr_sense_wbg_export_ok(1.f, 2.0, 0));
+  EXPECT_FALSE(nr_sense_wbg_export_ok(NAN, 2.0, 10));
+}
+
+TEST_F(Unit, WbgNoDoubleExportWhenTheUnitIsOpen)
+{
+  nr_sense_wbg_set_rate(0, 100.f);
+  EXPECT_EQ(nr_sense_wbg_after_gate(true, true, 217, tb(1)), 0);   /* the unit's own tap runs: wbg takes no token and counts nothing */
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.offered, 0u);
+  EXPECT_EQ(nr_sense_wbg_after_gate(false, true, 217, tb(1)), 1);  /* disabled unit, site ok: wbg */
+  EXPECT_EQ(nr_sense_wbg_after_gate(false, false, 217, tb(1)), -1); /* disabled unit, site refuses (CRC): none */
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.offered, 1u);
+}
+
+TEST_F(Unit, WbgCellsBeyondTheSchedulerAreNeverUnlimited)
+{
+  if (NR_CELL_MAX <= NR_SENSE_CELLS) GTEST_SKIP();
+  nr_cell_bind(NR_SENSE_CELLS); /* a cell the scheduler does not decide for */
+  EXPECT_FALSE(nr_sense_wbg_admit(217, tb(1)));
+  nr_cell_bind(0);
+}
+
+TEST_F(Unit, WbgConcurrentAdmitsStayWithinTheTokens)
+{
+  nr_sense_wbg_set_rate(0, 0.f); /* no refill: only the bucket (4) and at most the 2 tokens of borrowing */
+  std::atomic<int> ok{0};
+  std::vector<std::thread> th;
+  for (int t = 0; t < 8; t++) th.emplace_back([&] { nr_cell_bind(0); for (int i = 0; i < 2000; i++) if (nr_sense_wbg_admit(217, tb(1))) ok++; });
+  for (auto &x : th) x.join();
+  EXPECT_LE(ok.load(), 6);
+  EXPECT_GE(ok.load(), 4);
+}
+
+TEST_F(Unit, WbgRingCostAndReset)
+{
+  nr_sense_wbg_ring_cost(70000);
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.ring_ns, 70000u);
+  nr_sense_wbg_admit(217, tb(1));
+  nr_sense_unit_reset(0); /* a new cell: counters, bucket and rate restart */
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.ring_ns, 0u);
+  EXPECT_EQ(s.offered, 0u);
+  EXPECT_NEAR(s.rate_hz, 0.25f, 1e-3);
 }
 
 TEST_F(Unit, WbgOnlyInSensingMode)

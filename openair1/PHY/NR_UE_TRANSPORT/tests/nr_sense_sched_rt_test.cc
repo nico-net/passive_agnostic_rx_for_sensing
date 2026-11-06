@@ -284,20 +284,56 @@ TEST_F(Sched, OfferedGrantsWeightTheNextSkip)
 
 TEST_F(Sched, WbgRateIsMeasuredAndPublished)
 {
-  /* decision 1 primes the counters; from decision 2 the offered rate and the cost per tap are measured and the allowed rate is published to the cell's bucket */
-  nr_sense_wbg_set_rate(0, 123.f);
-  nr_sense_sched_step(tb(DEC));
-  for (int i = 0; i < 400; i++) { nr_sense_wbg_admit(217, tb(DEC) + 1); nr_sense_wbg_cost(50000); }
-  nr_sense_sched_step(tb(2 * DEC)); /* 400 offered over 4 s = 100 Hz, 50 us per tap: 0.25 ms per second of an idle 200 ms/bucket pool: all fits */
+  nr_sense_sched_step(tb(DEC)); /* primes the counters */
   nr_sense_wbg_stats_t s;
   nr_sense_wbg_stats(0, &s);
-  EXPECT_EQ(s.offered, 400u);
-  nr_sense_wbg_set_rate(0, -1.f);
-  EXPECT_TRUE(nr_sense_wbg_admit(217, tb(2 * DEC) + 1)); /* unlimited or limited-with-room: admitted either way */
+  EXPECT_NEAR(s.rate_hz, 0.25f, 1e-3); /* unmeasured: one tap per interval, never unlimited */
+  nr_sense_wbg_set_rate(0, 1000.f);
+  for (int i = 0; i < 400; i++) { nr_sense_wbg_admit(217, tb(DEC) + 1); nr_sense_wbg_cost(50000); }
+  nr_sense_sched_step(tb(2 * DEC)); /* 400 offered over 4 s = 100 Hz, 50 us per tap */
+  double off = 0, cost = 0;
+  nr_sense_sched_wbg_info(0, &off, &cost);
+  EXPECT_NEAR(off, 100.0, 1.0);
+  EXPECT_NEAR(cost, 50000.0, 1.0);
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_NEAR(s.rate_hz, 125.f, 1.5f); /* the pool is idle: the whole offered rate x the 1.25 margin, finite */
   g_cap[NR_RES_POOL] = {100.f, 0.f}; /* a pool far too small for 100 Hz x 50 us per bucket */
   for (int i = 0; i < 400; i++) { nr_sense_wbg_admit(217, tb(2 * DEC) + 2); nr_sense_wbg_cost(50000); }
   nr_sense_sched_step(tb(3 * DEC));
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_LT(s.rate_hz, 0.1f); /* cut to what the pool leaves (60 of 250000 per bucket) */
   int ok = 0;
   for (int i = 0; i < 100; i++) ok += nr_sense_wbg_admit(150, tb(3 * DEC) + 1) ? 1 : 0;
-  EXPECT_LE(ok, 6); /* the bucket was cut to ~0: burst only */
+  EXPECT_LE(ok, 6);
+}
+
+TEST_F(Sched, WbgCellResetClearsTheMeasurement)
+{
+  nr_sense_sched_step(tb(DEC));
+  for (int i = 0; i < 400; i++) { nr_sense_wbg_admit(217, tb(DEC) + 1); nr_sense_wbg_cost(50000); }
+  nr_sense_sched_step(tb(2 * DEC));
+  double off = 0, cost = 0;
+  nr_sense_sched_wbg_info(0, &off, &cost);
+  ASSERT_GT(cost, 0.0);
+  nr_sense_sched_cell_reset(0);
+  nr_sense_sched_step(tb(3 * DEC));
+  nr_sense_sched_wbg_info(0, &off, &cost);
+  EXPECT_EQ(cost, 0.0); /* the stale cost per tap is gone */
+  EXPECT_EQ(off, 0.0);
+}
+
+TEST_F(Sched, WbgCounterDecreaseIsNotAHugeCost)
+{
+  nr_sense_sched_step(tb(DEC));
+  for (int i = 0; i < 400; i++) { nr_sense_wbg_admit(217, tb(DEC) + 1); nr_sense_wbg_cost(50000); }
+  nr_sense_sched_step(tb(2 * DEC));
+  nr_sense_unit_reset(0); /* the counters restart from 0 under the scheduler */
+  for (int i = 0; i < 10; i++) { nr_sense_wbg_admit(217, tb(2 * DEC) + 2); nr_sense_wbg_cost(50000); }
+  nr_sense_sched_step(tb(3 * DEC));
+  double off = 0, cost = 0;
+  nr_sense_sched_wbg_info(0, &off, &cost);
+  EXPECT_LT(cost, 1e6); /* not ~1e19 from an unsigned underflow */
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_GT(s.rate_hz, 0.1f); /* and the rate did not collapse */
 }

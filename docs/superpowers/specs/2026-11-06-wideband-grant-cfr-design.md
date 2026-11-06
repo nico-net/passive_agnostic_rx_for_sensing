@@ -15,23 +15,16 @@ gated per (cell, RNTI, source) unit; the scheduler enables about 3 units at a ti
 - Cost per tap: the code comments quote ~100-136 us at wide allocations [CODE COMMENT, DGX 2026-11-01]; this branch measures it per cell (SENSE_WBG cost_us) [see report].
 - The grant itself is already decoded (sensing decodes every proven wide grant), so the tap is the only extra work.
 
-## Design
-1. `nr_sense_wbg_admit(prbs, t)` (nr_sense_unit.c), asked by both sites only when the unit gate refused: admits a grant of >= T_cell PRBs (`nr_sense_cell_floor`,
-   sense_min_prb = 128 until the scheduler steps it down) in SENSING mode, whichever RNTI. Grants whose unit is enabled never reach it (no double export); the
-   per-RNTI units and their skip/rate accounting are unchanged. Fields must be proven: site 1 only runs for CRC-verified or SOLVED layouts; site 2 only for DCI 1_0 or a
-   non-dl_auto 1_1; a family accept without verified fields never gets here.
-2. Per-cell lock-free token bucket (no mutex; CAS on one word). Unlimited until the scheduler's first decision. When tokens run out a grant wider than any admitted since
-   the last decision may borrow (down to -2 tokens): widest first; otherwise tokens accrue with time, so the grant after the longest gap gets the next token: oldest gap first.
-   No per-RNTI ranking.
-3. Budget: the scheduler (`nr_sense_sched_decide`) prices one per-cell "wideband grant" resource in the shared POOL before any unit is admitted:
-   demand = offered wide-grant rate x mean CPU per tap x bucket; admitted fraction f = min(1, pool room / demand); the rate f x offered is published to the bucket every
-   decision. Its CPU is booked by `nr_sense_wbg_cost` into its own counters, never into an RNTI unit or the unattributed baseline (no double count).
-4. Records: `nr_sense_rs_meta_t.wbg` (not printed). The writer books a wbg record to the cell totals (wb_valid, gap_max) via `nr_sense_wbg_cfr`, not to an RNTI unit, so the
-   units' valid ratio, age and eligibility are untouched.
-5. Traffic and legacy mode: every new path starts with `nr_isac_mode() == SENSING` (the unit gate returns true there, so `wbg` stays false); the scheduler thread does not run.
-   No new env/CLI/-D/.cfg key, no constants per cell, no locks on RX/scan threads, no fixed cores.
+## Design (as implemented after fix round 1)
+1. Scope: a DL grant of >= sense_min_prb PRBs (the wideband target; not the continuity floor T_cell), C-RNTI, proven fields, whose unit is disabled. Grants of enabled units never reach the path (no double export).
+   - Consumer site (`consumer_dmrs_tap`, solver-path jobs and monitor-site jobs flagged `wbg_pre`): only after the TB CRC passed. A CRC-failed grant's DCI was never verified (chance DCI = random allocation), so the SOLVED-layout CRC-fail rescue tap stays unit-only.
+   - Monitor site (DCI 1_0, non-dl_auto 1_1, sweep settled): the monitor runs NO chest (it holds the per-cell g_phase2_mu); it only takes a token (one CAS) and enqueues the job with `wbg_pre`; the PDSCH consumer taps it after the CRC.
+   - A record is exported only with nvar > 0, channel power > 0 and at least one RE.
+2. `nr_sense_wbg_admit`: per-cell lock-free token bucket (depth 4), refilled at the rate the scheduler published, never unlimited: one tap per decision interval before the first decision / after a cell reset. A grant takes one token; with none left only a grant wider than the widest admitted since the last decision may borrow (down to -2 tokens); everything else waits for the refill (time). It is a rate limiter with a widest-grant exception, not a ranking of grants. Cells the scheduler does not decide for (index >= NR_SENSE_CELLS) admit nothing.
+3. Budget (`nr_sense_sched_decide`), admission order per decision: (a) enabled incumbents and units with history, in rank order (a challenger that beats an incumbent by the margin still displaces it); (b) the wideband-grant resource, per cell, priced on POOL (offered rate x CPU per tap), QUEUE_DL (the tap runs on the PDSCH consumer, so the same time delays the next decode job) and SENSE_RING (writer cost per wbg record); its pool share is the room left by (a) divided by the cells with offered wide grants; (c) cold units. Published rate = f x offered x 1.25 (the incumbent margin), finite. Not measured yet: rate from the cell's pdsch_dmrs unit model (wide rate x p99 bucket CPU per message) holding no budget, else one tap per decision interval.
+4. Accounting: tap CPU -> `nr_sense_wbg_cost`, writer cost -> `nr_sense_wbg_ring_cost`, record -> `nr_sense_wbg_cfr` (cell totals only). Never booked to an RNTI unit or to the unattributed baseline. Scheduler counter deltas are guarded against a decrease (cell reset), `g_wbgp[c]` is cleared on a cell reset.
+5. Traffic and legacy: every new function starts with nr_isac_mode()==SENSING or sits behind the unit gate (true outside sensing); no new env/CLI/-D/.cfg key, no locks, no fixed cores.
 
 ## Known limits
-- The mean (not p99) per-tap cost is compared with the p99 pool budget.
-- The record writer's cost for wbg records (SENSE_RING) is not priced.
-- T_cell below sense_min_prb makes wbg records of [T_cell, 128) PRBs continuity records, as for units.
+- The mean (not p99) per-tap cost is compared with the p99 budgets.
+- Records of [T_cell, 128) PRBs cannot come from this path (threshold is sense_min_prb).
