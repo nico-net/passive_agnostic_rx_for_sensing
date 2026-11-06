@@ -1,0 +1,18 @@
+stch_415_1_1_231300 multi-user (slot,symbol) groups 380 gap histogram (PRB, between ordered user pairs, nearest): {0: 70, 16: 5, 32: 188, 48: 17, 64: 8, 80: 13, 96: 14, 112: 2, 128: 5, 144: 63}
+  edge control (same user, edge RE vs RE one PRB inside): n=1526 coh median 0.873 frac<0.9 0.607
+  adjacent boundaries 70 dphi MAD 1.079 coh median 0.522 frac coh<0.9 0.986 amp dB MAD 7.49 dphi uniform-null MAD would be 2.17
+stch_415_2_1_231558 multi-user (slot,symbol) groups 305 gap histogram (PRB, between ordered user pairs, nearest): {0: 40, 16: 6, 32: 171, 48: 8, 64: 6, 80: 17, 96: 9, 128: 8, 144: 56, 176: 1}
+  edge control (same user, edge RE vs RE one PRB inside): n=1238 coh median 0.934 frac<0.9 0.356
+  adjacent boundaries 40 dphi MAD 2.375 coh median 0.618 frac coh<0.9 0.9 amp dB MAD 15.6 dphi uniform-null MAD would be 2.17
+stch_415_3_1_231855 multi-user (slot,symbol) groups 309 gap histogram (PRB, between ordered user pairs, nearest): {0: 61, 16: 2, 32: 145, 48: 7, 64: 6, 80: 9, 96: 16, 112: 5, 128: 3, 144: 56, 176: 2, 192: 1}
+  edge control (same user, edge RE vs RE one PRB inside): n=1248 coh median 0.924 frac<0.9 0.428
+  adjacent boundaries 61 dphi MAD 0.757 coh median 0.483 frac coh<0.9 0.918 amp dB MAD 4.94 dphi uniform-null MAD would be 2.17
+stch_923_1_1_232151 multi-user (slot,symbol) groups 2911 gap histogram (PRB, between ordered user pairs, nearest): {0: 2640, 16: 205, 32: 95, 48: 24, 64: 21, 80: 16, 96: 18, 112: 15, 128: 19, 144: 19, 160: 24, 176: 165}
+  edge control (same user, edge RE vs RE one PRB inside): n=12000 coh median 0.966 frac<0.9 0.171
+  adjacent boundaries 2640 dphi MAD 1.769 coh median 0.881 frac coh<0.9 0.568 amp dB MAD 6.13 dphi uniform-null MAD would be 2.17
+stch_923_2_1_232451 multi-user (slot,symbol) groups 933 gap histogram (PRB, between ordered user pairs, nearest): {0: 812, 16: 42, 32: 30, 48: 4, 64: 1, 80: 6, 96: 3, 128: 6, 144: 8, 160: 17, 176: 46}
+  edge control (same user, edge RE vs RE one PRB inside): n=3774 coh median 0.964 frac<0.9 0.190
+  adjacent boundaries 812 dphi MAD 1.633 coh median 0.879 frac coh<0.9 0.578 amp dB MAD 7.33 dphi uniform-null MAD would be 2.17
+stch_923_3_1_232751 multi-user (slot,symbol) groups 4387 gap histogram (PRB, between ordered user pairs, nearest): {0: 3989, 16: 279, 32: 83, 48: 45, 64: 21, 80: 41, 96: 37, 112: 32, 128: 33, 144: 47, 160: 37, 176: 170}
+  edge control (same user, edge RE vs RE one PRB inside): n=18012 coh median 0.949 frac<0.9 0.250
+  adjacent boundaries 3989 dphi MAD 1.053 coh median 0.891 frac coh<0.9 0.536 amp dB MAD 7.12 dphi uniform-null MAD would be 2.17

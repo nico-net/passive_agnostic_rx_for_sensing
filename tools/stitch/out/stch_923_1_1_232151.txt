@@ -1,0 +1,145 @@
+{"key": ["nl1", "abs", "b%16=0"], "n": 3061, "dphi_med": -0.03, "dphi_mad_rad": 0.039, "coh_med": 0.995, "coh_p10": 0.982, "amp_db_mad": 0.35, "frac_coh_lt_0p9": 0.008}
+{"key": ["nl1", "abs", "b%2=0(not4)"], "n": 12766, "dphi_med": -0.031, "dphi_mad_rad": 0.048, "coh_med": 0.994, "coh_p10": 0.98, "amp_db_mad": 0.38, "frac_coh_lt_0p9": 0.007}
+{"key": ["nl1", "abs", "b%4=0(not16)"], "n": 9686, "dphi_med": -0.029, "dphi_mad_rad": 0.05, "coh_med": 0.994, "coh_p10": 0.981, "amp_db_mad": 0.43, "frac_coh_lt_0p9": 0.007}
+{"key": ["nl1", "abs", "odd"], "n": 25532, "dphi_med": -0.025, "dphi_mad_rad": 0.045, "coh_med": 0.994, "coh_p10": 0.982, "amp_db_mad": 0.39, "frac_coh_lt_0p9": 0.001}
+{"key": ["nl1", "within"], "n": 256435, "dphi_med": -0.004, "dphi_mad_rad": 0.011, "coh_med": 1.0, "coh_p10": 0.99, "amp_db_mad": 0.04, "frac_coh_lt_0p9": 0.0}
+{"key": ["nl>1", "abs", "b%16=0"], "n": 28008, "dphi_med": -0.031, "dphi_mad_rad": 0.041, "coh_med": 0.994, "coh_p10": 0.971, "amp_db_mad": 0.34, "frac_coh_lt_0p9": 0.009}
+{"key": ["nl>1", "abs", "b%2=0(not4)"], "n": 117818, "dphi_med": -0.033, "dphi_mad_rad": 0.054, "coh_med": 0.993, "coh_p10": 0.975, "amp_db_mad": 0.41, "frac_coh_lt_0p9": 0.01}
+{"key": ["nl>1", "abs", "b%4=0(not16)"], "n": 89244, "dphi_med": -0.032, "dphi_mad_rad": 0.051, "coh_med": 0.992, "coh_p10": 0.975, "amp_db_mad": 0.43, "frac_coh_lt_0p9": 0.01}
+{"key": ["nl>1", "abs", "odd"], "n": 235636, "dphi_med": -0.027, "dphi_mad_rad": 0.048, "coh_med": 0.993, "coh_p10": 0.977, "amp_db_mad": 0.38, "frac_coh_lt_0p9": 0.002}
+{"key": ["nl>1", "within"], "n": 2365165, "dphi_med": -0.004, "dphi_mad_rad": 0.012, "coh_med": 1.0, "coh_p10": 0.987, "amp_db_mad": 0.04, "frac_coh_lt_0p9": 0.001}
+stch_923_1_1_232151 multi-user (slot,symbol) groups 2911 gap histogram (PRB, between ordered user pairs, nearest): {0: 2640, 16: 205, 32: 95, 48: 24, 64: 21, 80: 16, 96: 18, 112: 15, 128: 19, 144: 19, 160: 24, 176: 165}
+  adjacent boundaries 2640 dphi MAD 1.769 coh median 0.881 frac coh<0.9 0.568 amp dB MAD 6.13 dphi uniform-null MAD would be 2.17
+stch_923_1_1_232151 contiguous wide records 2252 nl1 213
+ cut=odd S=2 gap= 0 PRB n=400 | scalar err max-seg phase p50/p90 0.03/0.07 rad, amp p50/p90 0.2/0.8 dB | CFR rel.err aligned p50 0.02 vs none p50 0.64 | PDP total-variation dist vs intact (0 = identical) aligned p50 0.006 p90 0.017; none p50 0.244; (intact-with-gap-REs-removed 0.000) | peak shift aligned p90 0 bins
+ cut=odd S=3 gap= 0 PRB n=400 | scalar err max-seg phase p50/p90 0.05/0.13 rad, amp p50/p90 0.5/1.3 dB | CFR rel.err aligned p50 0.04 vs none p50 0.83 | PDP total-variation dist vs intact (0 = identical) aligned p50 0.012 p90 0.027; none p50 0.327; (intact-with-gap-REs-removed 0.000) | peak shift aligned p90 0 bins
+ cut=odd S=2 gap= 4 PRB n=400 | scalar err max-seg phase p50/p90 0.27/0.78 rad, amp p50/p90 2.5/7.1 dB | CFR rel.err aligned p50 0.22 vs none p50 0.62 | PDP total-variation dist vs intact (0 = identical) aligned p50 0.066 p90 0.148; none p50 0.234; (intact-with-gap-REs-removed 0.026) | peak shift aligned p90 1 bins
+ cut=odd S=2 gap=16 PRB n=400 | scalar err max-seg phase p50/p90 1.03/2.40 rad, amp p50/p90 9.3/25.7 dB | CFR rel.err aligned p50 0.55 vs none p50 0.61 | PDP total-variation dist vs intact (0 = identical) aligned p50 0.191 p90 0.337; none p50 0.221; (intact-with-gap-REs-removed 0.075) | peak shift aligned p90 3 bins
+ cut=prg S=2 gap= 0 PRB n=400 | scalar err max-seg phase p50/p90 0.03/0.11 rad, amp p50/p90 0.3/0.9 dB | CFR rel.err aligned p50 0.03 vs none p50 0.64 | PDP total-variation dist vs intact (0 = identical) aligned p50 0.008 p90 0.022; none p50 0.237; (intact-with-gap-REs-removed 0.000) | peak shift aligned p90 0 bins
+ cut=prg S=3 gap= 0 PRB n=400 | scalar err max-seg phase p50/p90 0.06/0.17 rad, amp p50/p90 0.5/1.4 dB | CFR rel.err aligned p50 0.04 vs none p50 0.81 | PDP total-variation dist vs intact (0 = identical) aligned p50 0.013 p90 0.033; none p50 0.322; (intact-with-gap-REs-removed 0.000) | peak shift aligned p90 0 bins
+ cut=prg S=2 gap= 4 PRB n=400 | scalar err max-seg phase p50/p90 0.29/0.82 rad, amp p50/p90 1.8/5.4 dB | CFR rel.err aligned p50 0.19 vs none p50 0.65 | PDP total-variation dist vs intact (0 = identical) aligned p50 0.065 p90 0.136; none p50 0.244; (intact-with-gap-REs-removed 0.026) | peak shift aligned p90 1 bins
+ cut=prg S=2 gap=16 PRB n=400 | scalar err max-seg phase p50/p90 1.16/2.55 rad, amp p50/p90 8.3/27.4 dB | CFR rel.err aligned p50 0.56 vs none p50 0.61 | PDP total-variation dist vs intact (0 = identical) aligned p50 0.198 p90 0.336; none p50 0.236; (intact-with-gap-REs-removed 0.076) | peak shift aligned p90 3 bins
+ NULL splice of two different records (n=171): seam spatial coherence p50 0.97 (same-user boundary ref ~0.98); PDP TV distance stitched-vs-A-half 0.26, vs B-half 0.21 (0 = same)
+csirs frames full-band 7118 [('row=1,fd=2,l0=9,densi', 4662), ('row=1,fd=2,l0=5,densi', 2456)]
+(1) CSI-RS same-resource stationarity: lag_ms: n, median per-PRB spatial coherence, median PDP TV
+      0 ms  n= 2497  coh 0.999  TV 0.003
+     20 ms  n= 2495  coh 0.998  TV 0.104
+     40 ms  n= 9610  coh 0.998  TV 0.103
+     60 ms  n= 2493  coh 0.998  TV 0.088
+     80 ms  n= 9605  coh 0.999  TV 0.089
+    100 ms  n= 2491  coh 0.998  TV 0.133
+    120 ms  n= 9600  coh 0.998  TV 0.134
+    140 ms  n= 2489  coh 0.998  TV 0.125
+    160 ms  n= 9595  coh 0.998  TV 0.124
+    180 ms  n= 2487  coh 0.998  TV 0.082
+    200 ms  n= 9590  coh 0.998  TV 0.082
+    220 ms  n= 2485  coh 0.998  TV 0.117
+    240 ms  n= 9585  coh 0.998  TV 0.117
+    260 ms  n= 2483  coh 0.998  TV 0.142
+    280 ms  n= 9580  coh 0.998  TV 0.141
+    300 ms  n= 2481  coh 0.998  TV 0.099
+    320 ms  n= 9575  coh 0.998  TV 0.099
+    340 ms  n= 2479  coh 0.998  TV 0.098
+    360 ms  n= 9570  coh 0.998  TV 0.099
+    380 ms  n= 2477  coh 0.998  TV 0.141
+    400 ms  n= 9565  coh 0.998  TV 0.142
+    420 ms  n= 2475  coh 0.998  TV 0.115
+    440 ms  n= 9560  coh 0.998  TV 0.114
+    460 ms  n= 2473  coh 0.998  TV 0.082
+    480 ms  n= 9555  coh 0.998  TV 0.083
+    500 ms  n= 2471  coh 0.998  TV 0.124
+    520 ms  n= 9550  coh 0.998  TV 0.125
+    540 ms  n= 2469  coh 0.998  TV 0.133
+    560 ms  n= 9545  coh 0.998  TV 0.132
+    580 ms  n= 2467  coh 0.998  TV 0.091
+    600 ms  n= 9540  coh 0.998  TV 0.090
+    620 ms  n= 2465  coh 0.998  TV 0.108
+    640 ms  n= 9535  coh 0.998  TV 0.109
+    660 ms  n= 2463  coh 0.998  TV 0.146
+    680 ms  n= 9530  coh 0.998  TV 0.146
+    700 ms  n= 2461  coh 0.998  TV 0.107
+    720 ms  n= 9525  coh 0.998  TV 0.106
+    740 ms  n= 2459  coh 0.998  TV 0.092
+    760 ms  n= 9520  coh 0.998  TV 0.092
+    780 ms  n= 2457  coh 0.998  TV 0.134
+    800 ms  n= 9515  coh 0.998  TV 0.135
+    820 ms  n= 2455  coh 0.998  TV 0.124
+    840 ms  n= 9510  coh 0.998  TV 0.124
+    860 ms  n= 2453  coh 0.998  TV 0.082
+    880 ms  n= 9505  coh 0.998  TV 0.081
+    900 ms  n= 2451  coh 0.998  TV 0.117
+    920 ms  n= 9500  coh 0.998  TV 0.118
+    940 ms  n= 2449  coh 0.998  TV 0.141
+    960 ms  n= 9495  coh 0.998  TV 0.141
+    980 ms  n= 2447  coh 0.998  TV 0.098
+   1000 ms  n=104179  coh 0.998  TV 0.119
+(2) wide user H*W_u vs nearest CSI-RS H (<=40 ms): n=2569 | per-PRB spatial coherence median-of-medians 0.966 (p10 of PRB p10: 0.911) | PDP TV user-vs-CSIRS median 0.063 p90 0.168 | CSIRS-vs-CSIRS TV at similar lag is the floor
+   nl=1 n=242 coh 0.948 TV 0.057
+   nl=2 n=2231 coh 0.967 TV 0.062
+   nl=3 n=72 coh 0.918 TV 0.099
+   nl=4 n=24 coh 0.950 TV 0.050
+(3) adjacent-user seams (923): n=2640 seam spatial coherence median 0.881, frac<0.9 0.568
+csirs frames full-band 7118 [('row=1,fd=2,l0=9,densi', 4662), ('row=1,fd=2,l0=5,densi', 2456)]
+(1) CSI-RS same-resource stationarity: lag_ms: n, median per-PRB spatial coherence, median PDP TV
+      0 ms  n= 2497  coh 0.999  TV 0.003
+     20 ms  n= 2495  coh 0.998  TV 0.104
+     40 ms  n= 9610  coh 0.998  TV 0.103
+     60 ms  n= 2493  coh 0.998  TV 0.088
+     80 ms  n= 9605  coh 0.999  TV 0.089
+    100 ms  n= 2491  coh 0.998  TV 0.133
+    120 ms  n= 9600  coh 0.998  TV 0.134
+    140 ms  n= 2489  coh 0.998  TV 0.125
+    160 ms  n= 9595  coh 0.998  TV 0.124
+    180 ms  n= 2487  coh 0.998  TV 0.082
+    200 ms  n= 9590  coh 0.998  TV 0.082
+    220 ms  n= 2485  coh 0.998  TV 0.117
+    240 ms  n= 9585  coh 0.998  TV 0.117
+    260 ms  n= 2483  coh 0.998  TV 0.142
+    280 ms  n= 9580  coh 0.998  TV 0.141
+    300 ms  n= 2481  coh 0.998  TV 0.099
+    320 ms  n= 9575  coh 0.998  TV 0.099
+    340 ms  n= 2479  coh 0.998  TV 0.098
+    360 ms  n= 9570  coh 0.998  TV 0.099
+    380 ms  n= 2477  coh 0.998  TV 0.141
+    400 ms  n= 9565  coh 0.998  TV 0.142
+    420 ms  n= 2475  coh 0.998  TV 0.115
+    440 ms  n= 9560  coh 0.998  TV 0.114
+    460 ms  n= 2473  coh 0.998  TV 0.082
+    480 ms  n= 9555  coh 0.998  TV 0.083
+    500 ms  n= 2471  coh 0.998  TV 0.124
+    520 ms  n= 9550  coh 0.998  TV 0.125
+    540 ms  n= 2469  coh 0.998  TV 0.133
+    560 ms  n= 9545  coh 0.998  TV 0.132
+    580 ms  n= 2467  coh 0.998  TV 0.091
+    600 ms  n= 9540  coh 0.998  TV 0.090
+    620 ms  n= 2465  coh 0.998  TV 0.108
+    640 ms  n= 9535  coh 0.998  TV 0.109
+    660 ms  n= 2463  coh 0.998  TV 0.146
+    680 ms  n= 9530  coh 0.998  TV 0.146
+    700 ms  n= 2461  coh 0.998  TV 0.107
+    720 ms  n= 9525  coh 0.998  TV 0.106
+    740 ms  n= 2459  coh 0.998  TV 0.092
+    760 ms  n= 9520  coh 0.998  TV 0.092
+    780 ms  n= 2457  coh 0.998  TV 0.134
+    800 ms  n= 9515  coh 0.998  TV 0.135
+    820 ms  n= 2455  coh 0.998  TV 0.124
+    840 ms  n= 9510  coh 0.998  TV 0.124
+    860 ms  n= 2453  coh 0.998  TV 0.082
+    880 ms  n= 9505  coh 0.998  TV 0.081
+    900 ms  n= 2451  coh 0.998  TV 0.117
+    920 ms  n= 9500  coh 0.998  TV 0.118
+    940 ms  n= 2449  coh 0.998  TV 0.141
+    960 ms  n= 9495  coh 0.998  TV 0.141
+    980 ms  n= 2447  coh 0.998  TV 0.098
+   1000 ms  n=104179  coh 0.998  TV 0.119
+(2) wide user H*W_u vs nearest CSI-RS H (<=40 ms): n=2569 | per-PRB spatial coherence median-of-medians 0.966 (p10 of PRB p10: 0.911) | PDP TV user-vs-CSIRS median 0.063 p90 0.168 | CSIRS-vs-CSIRS TV at similar lag is the floor
+   nl=1 n=242 coh 0.948 TV 0.057
+   nl=2 n=2231 coh 0.967 TV 0.062
+   nl=3 n=72 coh 0.918 TV 0.099
+   nl=4 n=24 coh 0.950 TV 0.050
+(3) adjacent-user seams (923): n=2640 seam spatial coherence median 0.881, frac<0.9 0.568
+chains >= 48 PRB (users adjacent, k-gap<=4) with CSI-RS within 40 ms: 838
+  48- 96 PRB n= 455 | PDP TV vs CSI-RS (0=same): aligned(ii) 0.130 | CSIRS-fit scalar(iii) 0.101 | none 0.197 | random null 0.221 | single-segment floor 0.097 || peak-delay err (5.4 ns bins) aligned 1.0 | iii 0.0 | none 2.0 | random 3.0 || seam coh 0.884
+  96-128 PRB n= 102 | PDP TV vs CSI-RS (0=same): aligned(ii) 0.126 | CSIRS-fit scalar(iii) 0.118 | none 0.145 | random null 0.165 | single-segment floor 0.102 || peak-delay err (5.4 ns bins) aligned 1.0 | iii 0.0 | none 1.0 | random 1.0 || seam coh 0.904
+ 128-300 PRB n= 281 | PDP TV vs CSI-RS (0=same): aligned(ii) 0.095 | CSIRS-fit scalar(iii) 0.085 | none 0.112 | random null 0.125 | single-segment floor 0.080 || peak-delay err (5.4 ns bins) aligned 0.0 | iii 0.0 | none 0.0 | random 0.5 || seam coh 0.923
+ 128-300 PRB stitched-only(no seg>=128) n=  48 | PDP TV vs CSI-RS (0=same): aligned(ii) 0.120 | CSIRS-fit scalar(iii) 0.109 | none 0.139 | random null 0.153 | single-segment floor 0.092 || peak-delay err (5.4 ns bins) aligned 1.0 | iii 0.0 | none 1.0 | random 1.0 || seam coh 0.924
