@@ -1,0 +1,57 @@
+# wbgrant: grant-level wideband DM-RS CFR path (sensing mode only)
+
+Branch twomodes/wbgrant from twomodes/design 6abc464153. Design: docs/superpowers/specs/2026-11-06-wideband-grant-cfr-design.md.
+Host for every measurement: DGX Spark (aarch64), 4 RX, idle host under flock -x heavy.lock + td_measure.lock.
+
+## What changed
+- `nr_sense_wbg_admit/cost/cfr/set_rate/stats` (nr_sense_unit.c): per-cell lock-free token bucket. Asked by both DM-RS tap sites only after the unit gate refused (so no double export); admits grants of >= sense_min_prb PRBs (the wideband target, not the continuity floor) of any RNTI. Out of tokens: a grant wider than any admitted this window may borrow (widest first), otherwise tokens accrue with time (oldest gap first). No per-RNTI ranking.
+- `nr_sense_sched_decide`: one per-cell "wideband grant" resource priced in the shared POOL before any unit (offered rate x mean CPU per tap x bucket); f = min(1, pool room / demand). f = 1: no throttle. rt thread measures offered rate and cost per tap from cumulative counters and publishes the rate each decision.
+- Sites: `consumer_dmrs_tap` (solver-path grants: CRC-verified or SOLVED layout) and the monitor tap (DCI 1_0 / non-dl_auto 1_1). Never-guess: unsolved layouts and sweep hypotheses never reach it.
+- wbg records are booked to the cell totals only (meta.wbg, not printed), never to an RNTI unit; wbg tap CPU goes to its own counter (not the unit, not the unattributed baseline).
+- No new env/CLI/-D/.cfg key, no locks, no fixed cores. Everything is behind nr_isac_mode()==SENSING.
+
+## How a pdsch_dmrs record is produced (item 1) [CODE READ]
+DM-RS tap only: one slot FEP of the first DM-RS symbol + `nr_pdsch_channel_estimation` + comb-2 export. No LDPC. The grant is decoded anyway in sensing mode (every proven wide grant). Cost per tap at 217 PRB / 4 RX [MEASURED replay, DGX, 4 RX, 0.25x speed, thread CPU incl. FEP + estimate + export + hand-off]: about 290-300 us steady (SENSE_WBG cost_us 285-312; 360-710 us in the first seconds), 104 us on the 106 PRB rfsim bed. The 217-PRB tap does its own FEP (consumer site is not on the E5 shared cache), which is why it is ~3x the code-comment figure of ~100 us [HYPOTHESIS: not decomposed].
+
+## Replay A/B [MEASURED replay, DGX, raw_pci415_12s_b (217 PRB, 4 RX, sensing cfg, FROZEN-style env MPCI_20261025, speed 0.25), base = rr-twomodes build 6abc464153, new = this branch]
+12 s capture (10.8 s span with grants). Order b, n, n, b used the first n build, which had two defects fixed afterwards (T_cell threshold, meta.wbg not carried); those arms (wS1/wS2) are not used below. Final arms: bS1 bS2 (base), nS1 nS2 (new).
+
+| arm | wide grants (>=128 PRB) | wideband pdsch_dmrs rec/s | share of wide grants with a >=128 PRB pdsch rs record (slot+rnti) | share with any pdsch rs record | snr_db_p50 p10/p50/p90 (wideband pdsch_dmrs) | CPU cores | scanq full+stale / queued | pdschq full+stale / queued |
+|---|---|---|---|---|---|---|---|---|
+| base S1 | 482 | 0.18 | 0.4 % | 3.1 % | 5.7 / 8.0 / 8.0 | 2.27 | 0 / 18314 | 0 / 7607 |
+| base S2 | 336 | 1.39 | 8.3 % | 23.8 % | 7.3 / 14.1 / 17.8 | 1.84 | 0 / 18223 | 0 / 4103 |
+| new S1 | 478 | 7.21 | 18.8 % | 43.3 % | 6.0 / 8.3 / 15.9 | 2.23 | 0 / 18269 | 0 / 7258 |
+| new S2 | 474 | 6.93 | 18.1 % | 41.1 % | 5.9 / 8.3 / 15.9 | 2.28 | 0 / 18287 | 0 / 6918 |
+
+- Headline: wideband pdsch_dmrs rec/s 0.18-1.39 (base) to 6.9-7.2 (new), x5 to x40; share of wide grants with a wideband record 0.4-8.3 % to 18-19 %.
+- SNR distribution of the wideband records is in the base spread (p50 8.0-14.1 vs 8.3); the p90 widens (15.9 vs 8.0-17.8) because the new records include RNTIs at other SNR.
+- CPU: 2.23 / 2.28 (new) vs 2.27 / 1.84 (base): within the 0.4-core spread between base runs; no penalty resolvable with n=2.
+- Queue drops: scan and PDSCH queue full and stale are 0 in all four arms.
+- Budget: `frac=1.00, rate=-1` in every decision (the budget never bound): offered 116-118 taps over the run, 290 us each = about 3 ms CPU/s at replay speed. The budget-short path is exercised by the unit and rt tests only [SIM VERIFIED], not on air.
+- Limit [MEASURED]: only 116-118 of ~478 wide grants reach a tap site. The rest are never offered: grants of RNTIs whose layout is not yet proven in this 12 s capture (solver probe grants have dmrs_tap = false, unsolved dl_auto 1_1 never taps by the never-guess rule). So the remaining gap is the solver's coverage, not the budget. 43 % of wide grants now have some pdsch rs record but only 19 % reach >= 128 valid PRBs: the quality block (unchanged) invalidates PRBs on the rest.
+- Replay caveat: the replay runs at 0.25x, so wall-time rates (SENSE_WBG offered_hz) are 4x lower than capture-time rates; the capture is 12 s old data (2026-10), not the daytime 2026-11-06 traffic. Two arms per build; run-to-run spread of the base is large (wide grants 482 vs 336, wideband rec/s 0.18 vs 1.39).
+
+## Traffic mode, same capture [MEASURED replay, 1 arm each]
+bT1 (base) vs nT1 (new), traffic cfg: ISAC_METRICS key set identical (336 keys), no SENSE_SCHED / SENSE_WBG lines in either log, no sense_prod_count / sense_cfr_exported counters (all 0 in both). Counters differ by replay timing (pdschq_crc_ok 241 vs 261, traffic_skip 7758 vs 9209, scanq_queued 18285 vs 18313): the base-vs-base spread was not measured for traffic, so these are not shown byte-identical, only structurally identical. Code argument: every new function begins with nr_isac_mode()==SENSING or sits behind nr_sense_unit_gate (always true outside sensing), the scheduler thread does not run, and the nr_isac.cc copy of meta.wbg only copies a false bool [CODE READ].
+
+## Sensing rfsim, s9 bed [SIM VERIFIED, DGX, 106 PRB, 4 RX, 150 s, ue.passive.sensing.rfsim.s9.cfg, rfsim_arm.sh, one arm each]
+| arm | ssb | csirs | pdsch_dmrs | pdsch_data | invalid rs (valid_cfr_prbs 0) | violations (last SENSE_SCHED) |
+|---|---|---|---|---|---|---|
+| base, sense_min_prb 128 (cfg default) | 9534 | 795 | 12338 | 3359 | 0 | 0 |
+| new, 128 | 9591 | 800 | 14072 | 3370 | 0 | 0 |
+| base, --sensing.sense_min_prb 96 | 9606 | 801 | 14672 | 3384 | 0 | 0 |
+| new, 96 | 9603 | 800 | 14807 | 3382 | 1 | 0 |
+- At 128 the 106 PRB bed never offers a grant (offered=0): the path is dormant, as intended. At 96 it fires: 682 taps, 682 records, 104 us per tap, frac 1.0.
+- All sources valid, 0 violations in all four arms, except one pdsch_dmrs record with valid_cfr_prbs = 0 (snr null, n_re 636, rnti 4660, abs_slot 48890) among 14807 in new-96. I did not establish whether it came from the wbg or the unit path or whether base can produce one (0 of 14672 in base-96; n=1 arm). Flag for review.
+
+## ctest -j4 [SIM VERIFIED, DGX]
+397 tests: 19 not passing first run. 16 are the known list (7 Not-Run pusch_uci, qam64/qam256, ul_disc, nr_td_sim_test, ssb_rate_match_prod, gpu_pass_cells, dft_test, ldpc_cuda_pool_cpu, modulation). Three were new to me and are handled: test_static_audit_scanner and static_audit_check failed because the new file-static g_wbgp had no row in tools/mpci/mpci_statics.tsv (row added, both pass); test_nr_gpu_pass failed under load and passed on rerun (flaky in earlier reports too). All sense tests pass: unit (+5 wbg), sched (+5 Wbg), sched_rt (+1).
+
+## Concerns
+1. Coverage is capped by proven layouts (~25 % of wide grants reach a tap in this capture); more wideband records now need the solver to prove layouts faster, not a bigger budget.
+2. The record writer cost (SENSE_RING) of wbg records is not priced; mean (not p99) tap cost is compared with the p99 pool budget. Both are harmless at 3 ms/s but matter if a cell has hundreds of wide grants/s.
+3. The tap does its own FEP at the consumer site (~290 us at 217 PRB); sharing the E5 slot cache there would cut it.
+4. Unit tests were written after the implementation (no red run); mutation check not done.
+5. Measured on a 12 s October capture at 0.25x speed, not on air and not on the daytime traffic; no OTA validation.
+6. Traffic/legacy identity is structural plus counter-set equality, not byte equality (replay timing).
+7. One invalid record in new-96 rfsim (above).
