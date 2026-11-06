@@ -23,7 +23,7 @@ __attribute__((weak)) int nr_gpu_pass_active(void);
 __attribute__((weak)) int nr_isac_pdsch_data_aided_workers(void);
 
 static const char *const k_res_name[NR_RES_N] = {"pool", "queue_dl", "queue_ul", "gpu", "sense_ring", "da"};
-const char *nr_sense_res_name(int r) { return (unsigned)r < NR_RES_N ? k_res_name[r] : "?"; }
+const char *nr_sense_res_name(int r) { return (unsigned)r < NR_RES_N ? k_res_name[r] : "none"; }
 
 /* Process-wide: there is one scheduler thread (it serves every cell). The state is touched by that thread (or by a test calling step() alone). */
 static nr_sense_sched_state_t g_st;
@@ -183,7 +183,7 @@ void nr_sense_sched_step(uint64_t now_ns)
 {
   const uint32_t rm = nr_sense_sched_take_cell_resets(); /* a cell that changed starts its T_cell over (a decision already in flight may publish the old level once) */
   for (int c = 0; c < NR_SENSE_CELLS; c++)
-    if (rm & (1u << c)) { g_st.fl_idx[c] = g_st.fl_pend[c] = g_st.fl_cnt[c] = g_st.fl_warm[c] = 0; nr_sense_cell_floor_publish(c, 0); atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed); }
+    if (rm & (1u << c)) { g_st.fl_idx[c] = g_st.fl_pend[c] = g_st.fl_cnt[c] = g_st.fl_warm[c] = 0; memset(g_st.pr_sum[c], 0, sizeof g_st.pr_sum[c]); memset(g_st.pr_w[c], 0, sizeof g_st.pr_w[c]); nr_sense_cell_floor_publish(c, 0); atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed); }
   nr_sense_sched_sample_t sm;
   bool (*smp)(nr_sense_sched_sample_t *, uint64_t) = atomic_load(&g_sampler);
   if (!(smp ? smp(&sm, now_ns) : sample_prod(&sm, now_ns))) {
@@ -251,8 +251,8 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
     nr_sense_unit_cell_stats(c, &cs);
     viol += cs.violations; skips += cs.skips; en += cs.units_enabled; drops += sm->ring_drops[c];
   }
-  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s admitted=%d [%s] t_cell=[%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_ul_base=unmeasured gpu_base=unmeasured\n",
-        (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), out->n_admitted, set, tc, en,
+  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s top=%s elig=%d cold_deferred=%d admitted=%d [%s] t_cell=[%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_ul_base=unmeasured gpu_base=unmeasured\n",
+        (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), nr_sense_res_name((int)out->top), out->n_elig, out->cold_deferred, out->n_admitted, set, tc, en,
         (unsigned long)viol, (unsigned long)skips, (unsigned long)drops, sm->res[NR_RES_POOL].cap_ns * 1e-6, sm->res[NR_RES_POOL].base_p99_ns * 1e-6); /* per 50 ms bucket */
   {
     int steps[SENSE_FLOOR_MAX_STEPS];

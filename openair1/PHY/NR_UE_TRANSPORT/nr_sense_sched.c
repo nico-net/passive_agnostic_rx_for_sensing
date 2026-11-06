@@ -14,7 +14,7 @@ typedef struct {
   int cell, slot;
   const nr_sense_unit_view_t *v;
   double val, rank, snr, dem[NR_RES_N];
-  bool elig, cold, enabled, want, removed, viol, holdoff;
+  bool elig, cold, pending, enabled, want, removed, viol, holdoff;
 } cand_t;
 
 static _Atomic int g_cell_floor[NR_SENSE_CELLS];
@@ -205,6 +205,21 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
     st->pci_seen[c] = true; st->pci_was_elig[c] = pci_elig;
     const uint64_t pref = st->last_pci_valid_wb_ns[c] > st->pci_elig_since[c] ? st->last_pci_valid_wb_ns[c] : st->pci_elig_since[c];
     const double pci_boost = nr_sense_age_boost(pci_elig, pref, in->now_ns);
+    /* F2: prior of a unit whose ratio is unknown = decayed mean of the evidence of its source in this cell: every known ratio, and a ratio 0 for every zero-yield shed (F1).
+     * Decay: time constant SENSE_WIN_DECISIONS decisions. Floored at SENSE_ELIG_VALID_MIN; a source never observed (or long unobserved) tends to 1.0 (probe it). */
+    double prior[NR_UNIT_SRC_N];
+    {
+      const double dec = exp(-1.0 / SENSE_WIN_DECISIONS);
+      for (int s2 = 0; s2 < NR_UNIT_SRC_N; s2++) { st->pr_sum[c][s2] = st->pr_sum[c][s2] * dec + (1.0 - dec); st->pr_w[c][s2] = st->pr_w[c][s2] * dec + (1.0 - dec); } /* decay, and relax toward the optimistic 1.0 with the same time constant (an old floor must not freeze) */
+      for (int i = 0; i < in->n_units[c]; i++) {
+        const nr_sense_unit_view_t *v = &in->units[c][i];
+        if (nr_sense_unit_ratio_known(v, in->now_ns)) { st->pr_sum[c][v->src] += v->valid_ratio; st->pr_w[c][v->src] += 1.0; }
+      }
+      for (int s2 = 0; s2 < NR_UNIT_SRC_N; s2++) {
+        const double m = st->pr_sum[c][s2] / st->pr_w[c][s2]; /* pr_w > 0 always (relaxation) */
+        prior[s2] = m < SENSE_ELIG_VALID_MIN ? SENSE_ELIG_VALID_MIN : m;
+      }
+    }
 
     for (int i = 0; i < in->n_units[c] && n < MAXC; i++) {
       const nr_sense_unit_view_t *v = &in->units[c][i];
@@ -218,14 +233,24 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       if (st->enabled[c][sl][v->src] != v->enabled) st->streak[c][sl][v->src] = 0; /* the caller has not applied (or has overridden) the last decision */
       st->enabled[c][sl][v->src] = v->enabled;
       k->elig = nr_sense_unit_eligible(v, in->now_ns);
+      { /* F1: a unit enabled for a full window (SENSE_WIN_DECISIONS decisions) whose CFR record count did not grow and whose ratio is unknown/stale yielded nothing: ineligible, so the shed + re-probe back-off apply */
+        uint8_t *q = &st->quiet[c][sl][v->src];
+        uint32_t *seen = &st->cfr_seen[c][sl][v->src];
+        if (!v->enabled || !st->known[c][sl][v->src] || st->gen[c][sl][v->src] != v->gen || v->n_cfr != *seen) { *q = 0; *seen = v->n_cfr; }
+        else if (*q < 255) (*q)++;
+        if (k->elig && *q >= SENSE_WIN_DECISIONS && !nr_sense_unit_ratio_known(v, in->now_ns)) {
+          k->elig = false;
+          if (*q == SENSE_WIN_DECISIONS) st->pr_w[c][v->src] += 1.0; /* once per episode: a zero-yield observation (ratio 0) for the source prior */
+        }
+      }
       if (k->elig && st->known[c][sl][v->src] && !st->was_elig[c][sl][v->src]) st->elig_since[c][sl][v->src] = in->now_ns;
       st->was_elig[c][sl][v->src] = k->elig;
       if (k->elig) {
         /* a counted message had >= T_cell usable PRBs by construction (the cell's floor, sense_min_prb until it steps down); est_usable_prbs (latest) only raises the size */
         const int lo = out->floor_prb[c] > 0 ? out->floor_prb[c] : in->min_prb;
-        double prbs = v->est_usable_prbs > lo ? v->est_usable_prbs : lo;
+        double prbs = v->src == NR_UNIT_SRS ? lo : (v->est_usable_prbs > lo ? v->est_usable_prbs : lo); /* SRS has no PRB estimate of its own: the cell floor */
         if (prbs < 1) prbs = 1;
-        const double ratio = nr_sense_unit_ratio_known(v, in->now_ns) ? v->valid_ratio : SENSE_ELIG_VALID_MIN; /* unknown ratio: the floor */
+        const double ratio = nr_sense_unit_ratio_known(v, in->now_ns) ? v->valid_ratio : prior[v->src];
         uint64_t ref = v->last_valid_wb_ns ? v->last_valid_wb_ns : v->first_ns;
         if (st->elig_since[c][sl][v->src] > ref) ref = st->elig_since[c][sl][v->src];
         double boost = nr_sense_age_boost(true, ref, in->now_ns) * pci_boost;
@@ -234,7 +259,8 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       }
       if (st->holdoff[c][sl][v->src]) { k->holdoff = true; st->holdoff[c][sl][v->src]--; }
       k->snr = v->snr_db;
-      k->rank = k->val * (k->enabled ? INCUMBENT : 1.0) * (out->in_gap[c] ? SENSE_GAP_PREC : 1.0);
+      k->pending = !k->enabled && st->streak[c][sl][v->src] > 0; /* F3: admitted last decision, not yet confirmed */
+      k->rank = k->val * (k->enabled || k->pending ? INCUMBENT : 1.0) * (out->in_gap[c] ? SENSE_GAP_PREC : 1.0);
       /* violations since the last decision; the counters restart from 0 when the row was re-created */
       uint32_t dv = v->violations;
       if (st->known[c][sl][v->src] && st->gen[c][sl][v->src] == v->gen && v->violations >= st->viol[c][sl][v->src]) dv = v->violations - st->viol[c][sl][v->src];
@@ -248,7 +274,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       bool any = false;
       for (int s = 0; s < NR_UNIT_SRC_N; s++) {
         if (present[c][sl][s]) { any = true; continue; }
-        st->known[c][sl][s] = false; st->was_elig[c][sl][s] = false; st->elig_since[c][sl][s] = 0; st->holdoff[c][sl][s] = 0; memset(st->mem[c][sl][s], 0, sizeof st->mem[c][sl][s]); st->shed_n[c][sl][s] = st->run_n[c][sl][s] = 0; st->enabled[c][sl][s] = false; st->streak[c][sl][s] = 0; st->gen[c][sl][s] = 0; st->viol[c][sl][s] = 0;
+        st->known[c][sl][s] = false; st->was_elig[c][sl][s] = false; st->elig_since[c][sl][s] = 0; st->holdoff[c][sl][s] = 0; memset(st->mem[c][sl][s], 0, sizeof st->mem[c][sl][s]); st->shed_n[c][sl][s] = st->run_n[c][sl][s] = 0; st->enabled[c][sl][s] = false; st->streak[c][sl][s] = 0; st->quiet[c][sl][s] = 0; st->cfr_seen[c][sl][s] = 0; st->gen[c][sl][s] = 0; st->viol[c][sl][s] = 0;
       }
       if (!any && sl > 0) st->rnti[c][sl] = 0;
     }
@@ -305,10 +331,14 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
   use_t use;
   memset(&use, 0, sizeof use);
   bool rejected = false, cold_taken = false;
+  out->binding = NR_RES_N; /* none: binding is only the resource that rejected a candidate; top (below) is the tightest one when nothing was rejected */
   for (int i = 0; i < n; i++) {
     cand_t *k = &C[i];
     if (!k->elig || k->val <= 0 || k->removed) continue;
-    if (k->cold && cold_taken) continue;
+    if (k->holdoff) continue; /* backed off: no want, no budget, no streak */
+    out->n_elig++;
+    const bool cold_slot = k->cold && !k->pending; /* F3: a pending unit already holds its slot */
+    if (cold_slot && cold_taken) { out->cold_deferred++; continue; }
     int over = NR_RES_POOL;
     double eu[NR_RES_N];
     eff_use(&use, k->cell, eu);
@@ -319,19 +349,20 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
         out->admitted[out->n_admitted] = (nr_sense_admit_t){.cell = k->cell, .rnti = k->v->rnti, .src = k->v->src, .val = (float)k->val};
       out->n_admitted++;
       if (!out->value_last_admitted || k->val < out->value_last_admitted) out->value_last_admitted = (float)k->val;
-      if (k->cold) cold_taken = true;
+      if (cold_slot) cold_taken = true;
     } else if (!rejected) {
       rejected = true;
       out->binding = (nr_res_id_t)over;
     }
   }
-  if (!rejected) {
+  { /* top = the tightest resource (use / budget), rejected or not; none when no budget is positive */
     double best = -1;
+    out->top = NR_RES_N;
     for (int c = 0; c < nc; c++) {
       double eu[NR_RES_N];
       eff_use(&use, c, eu);
       for (int r = 0; r < NR_RES_N; r++)
-        if (budget[c][r] > 0 && eu[r] / budget[c][r] > best) { best = eu[r] / budget[c][r]; out->binding = (nr_res_id_t)r; }
+        if (budget[c][r] > 0 && eu[r] / budget[c][r] > best) { best = eu[r] / budget[c][r]; out->top = (nr_res_id_t)r; }
     }
   }
 

@@ -72,6 +72,8 @@ typedef struct {
   uint64_t elig_since[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; bool was_elig[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
   float mem[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N][4]; /* cpu, wait, ring, da */ /* last measured p99 demand while enabled, decayed while the unit is off (SENSE_COST_MEM_DECAY per decision) */
   uint8_t shed_n[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], run_n[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* consecutive sheds (re-probe back-off) / decisions enabled and wanted */
+  uint8_t quiet[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; uint32_t cfr_seen[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* F1: decisions enabled in a row without CFR record growth / n_cfr at the last growth */
+  double pr_sum[NR_SENSE_CELLS][NR_UNIT_SRC_N], pr_w[NR_SENSE_CELLS][NR_UNIT_SRC_N]; /* F2: decayed evidence of the valid ratio of each source in each cell (sum of ratios, weight) */
   uint8_t holdoff[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* decisions a violation-removed unit must still wait before it can be enabled */
   bool known[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];     /* below: the violation baseline of the previous decision (re-baselined when the row generation changes) */
   uint32_t gen[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], viol[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];
@@ -81,7 +83,7 @@ typedef struct {
 typedef struct { int cell; uint16_t rnti; nr_unit_src_t src; float val; } nr_sense_admit_t;
 typedef struct {
   int floor_prb[NR_SENSE_CELLS]; bool in_gap[NR_SENSE_CELLS]; uint64_t gap_p95_ns[NR_SENSE_CELLS]; /* S9: T_cell after this decision, whether the cell is in a continuity gap at it, its p95 gap */
-  int enables, disables, bad_cap; nr_res_id_t binding; float value_last_admitted; /* value of the lowest-valued admitted unit */
+  int enables, disables, bad_cap; nr_res_id_t binding; nr_res_id_t top; int n_elig, cold_deferred; float value_last_admitted; /* value of the lowest-valued admitted unit */
   int n_admitted; nr_sense_admit_t admitted[NR_SENSE_ADMIT_LOG]; /* the admitted set in rank order (n_admitted counts all, the list holds the first NR_SENSE_ADMIT_LOG) */
 } nr_sense_sched_out_t;
 
