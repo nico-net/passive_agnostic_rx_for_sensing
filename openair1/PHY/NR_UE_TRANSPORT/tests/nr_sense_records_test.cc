@@ -738,3 +738,15 @@ TEST(SenseRecordsS3, JsonFallbackRecordCountsAsQualityMiss)
   EXPECT_EQ(st.q_miss,1u);
   nr_sense_close();
 }
+
+TEST(SenseRecords, InvalFieldOnlyOnWideRecordsWithRemovals)
+{
+  nr_sense_rs_meta_t m{};
+  m.rnti=77; m.ports=1; m.port_mask=1; m.dmrs_type=1; m.dmrs_add_pos=-1; m.dmrs_n_scid=0; m.nb_rb=140; m.q_valid=true;
+  char a[4096], b[4096];
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DATA,&m,1,a,sizeof a),0);
+  EXPECT_EQ(strstr(a,"\"inval\""),nullptr);             // inval_on false: no field, record as before
+  m.inval_on=true; m.q.inval[NR_SENSE_INV_ABSENT]=5; m.q.inval[NR_SENSE_INV_SNR]=10;
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DATA,&m,1,b,sizeof b),0);
+  EXPECT_NE(strstr(b,",\"inval\":{\"absent\":5,\"snr\":10}}"),nullptr); // appended last, only the non-zero rules
+}

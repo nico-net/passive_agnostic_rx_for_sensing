@@ -70,6 +70,7 @@ typedef struct nr_sense_rs_meta_s {
   int prg_size;          /* 0 = wideband, 2, 4 */
   uint8_t est_dec, est_sym, est_layers; /* est_dec: 0 = the tap's own estimate, 1 = decoder (exact), 2 = decoder, first run of a segmented grant, 3 = decoder, noise variance of a wider estimate band */ /* the CFR is the decoder's own DM-RS estimate (first DM-RS symbol est_sym, est_layers layers estimated, layer 0 exported), not a tap-side FEP + chest; printed appended only then */
   uint16_t tb_cb_ok, tb_cb_total; /* partial-TB data-aided record: code blocks that passed CRC24B / blocks in the TB; tb_cb_total 0 = a whole-TB (or non-DA) record, nothing printed */
+  bool inval_on;         /* sensing mode, PDSCH record with nb_rb >= 128 and at least one PRB removed by a validity rule: prints "inval":{rule:nprb} from q.inval (writer-set) */
   bool wbg;              /* a grant-level wideband record (nr_sense_wbg_admit): booked to the cell totals, not to an RNTI unit; never printed */
   uint32_t cfg_ref_ver;  /* with identity_gen + dedicated_epoch = cfg_ref; 0 = unknown (prints null) */
 } nr_sense_rs_meta_t;

@@ -231,6 +231,11 @@ static int job_quality(rs_job_t *job, bool may_wait, uint32_t *qcost)
   pthread_mutex_unlock(&mu);
   if (r && m->q_valid) {
     if (m->recon_valid) { q.recon_conf=m->q.recon_conf; nr_sense_quality_apply_recon(&q,m->recon_prb_ok); }
+    m->inval_on=false;
+    if ((job->src==NR_SENSE_SRC_PDSCH_DMRS || job->src==NR_SENSE_SRC_PDSCH_DATA) && m->nb_rb>=128) { /* sensing mode only (want_q): why a wide record lost PRBs; counts, changes no rule */
+      m->inval_on=nr_sense_quality_absent(&q,m->nb_rb,m->truncated,m->tb_cb_total>0)>0;
+      nr_sense_wbq_note(&q);
+    }
     m->q=q; m->wideband=q.valid_cfr_prbs>=m->min_prb;
   }
   return r;

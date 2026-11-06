@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <random>
 #include <vector>
+#include <cstring>
 
 typedef std::complex<float> cf;
 struct Cfr {
@@ -586,4 +587,66 @@ TEST(SenseQuality, SparseSourceSymbolConsistencyDecidesWithTwoSymbols)
   nr_sense_quality_compute_ex(bad.n_ant, bad.iq.data(), bad.n_re, bad.n_re, bad.k.data(), bad.l.data(), 0.25f, NR_SENSE_Q_SPARSE, &q);
   EXPECT_LT(q.sym_consist, NR_SENSE_SPARSE_SYM_MIN);
   EXPECT_EQ(q.valid_cfr_prbs, 0);
+}
+
+/* ---- per-rule PRB removal counts of a wide record (diagnostic; no rule changes) ---- */
+TEST(SenseQuality, InvalCountsPerRuleAndAddUpToTheGrant)
+{
+  const int nb = 140;
+  Cfr c = make(nb, [](int p) { return p < 10 ? -10.f : 20.f; }, 1.f); /* PRBs 0-9: SNR rule */
+  std::vector<int> keep;
+  std::mt19937_64 g(7);
+  std::vector<int> seen(nb, 0);
+  for (int i = 0; i < c.n_re; i++) {
+    const int p = c.k[i] / 12;
+    if (p >= 20 && p < 25) continue;                            /* absent: no RE in the frame */
+    if (p >= 10 && p < 15 && ++seen[p] > 2) continue;           /* few_re: 2 REs left */
+    keep.push_back(i);
+  }
+  Cfr d = c;
+  d.n_re = keep.size();
+  d.k.clear(); d.l.clear(); d.iq.assign(2 * d.n_ant * d.n_re, 0.f);
+  for (size_t j = 0; j < keep.size(); j++) {
+    d.k.push_back(c.k[keep[j]]); d.l.push_back(c.l[keep[j]]);
+    for (int a = 0; a < c.n_ant; a++) {
+      float re = c.iq[2 * (a * c.n_re + keep[j])], im = c.iq[2 * (a * c.n_re + keep[j]) + 1];
+      const int p = c.k[keep[j]] / 12;
+      if (p >= 30 && p < 35) { const float th = float(2 * M_PI * (g() >> 11) / 9007199254740992.0); re = 10.f * std::cos(th), im = 10.f * std::sin(th); } /* resid: 20 dB but no linear structure */
+      if (p >= 40 && p < 45) re = im = 0.f;                     /* nosig: no signal power */
+      d.iq[2 * (a * d.n_re + j)] = re; d.iq[2 * (a * d.n_re + j) + 1] = im;
+    }
+  }
+  nr_sense_quality_t q = run(d, 1.f);
+  uint8_t ok[(NR_SENSE_MAX_PRB + 7) / 8];
+  memset(ok, 0xff, sizeof ok);
+  for (int p = 50; p < 55; p++) ok[p >> 3] &= (uint8_t)~(1u << (p & 7)); /* recon: PRBs 50-54 fail the reconstruction */
+  nr_sense_quality_apply_recon(&q, ok);
+  const int removed = nr_sense_quality_absent(&q, nb, false, false);
+  EXPECT_EQ(q.inval[NR_SENSE_INV_ABSENT], 5);
+  EXPECT_EQ(q.inval[NR_SENSE_INV_TRUNC], 0);
+  EXPECT_EQ(q.inval[NR_SENSE_INV_PARTIAL], 0);
+  EXPECT_EQ(q.inval[NR_SENSE_INV_FEW_RE], 5);
+  EXPECT_EQ(q.inval[NR_SENSE_INV_SNR], 10);
+  EXPECT_EQ(q.inval[NR_SENSE_INV_RESID], 5);
+  EXPECT_EQ(q.inval[NR_SENSE_INV_NOSIG], 5);
+  EXPECT_EQ(q.inval[NR_SENSE_INV_RECON], 5);
+  EXPECT_EQ(q.inval[NR_SENSE_INV_SYM], 0);
+  EXPECT_EQ(removed, 35);
+  EXPECT_EQ(q.valid_cfr_prbs + removed, nb); /* every PRB of the grant is valid or charged to exactly one rule */
+  /* the cause of the missing PRBs: truncation first, else a partial TB, else unexplained */
+  nr_sense_quality_t t = q;
+  memset(t.inval, 0, sizeof t.inval);
+  nr_sense_quality_absent(&t, nb, true, true);
+  EXPECT_EQ(t.inval[NR_SENSE_INV_TRUNC], 5);
+  memset(t.inval, 0, sizeof t.inval);
+  nr_sense_quality_absent(&t, nb, false, true);
+  EXPECT_EQ(t.inval[NR_SENSE_INV_PARTIAL], 5);
+}
+
+TEST(SenseQuality, CleanWideRecordHasNothingRemoved)
+{
+  Cfr c = make(140, [](int) { return 20.f; }, 1.f);
+  nr_sense_quality_t q = run(c, 1.f);
+  EXPECT_EQ(nr_sense_quality_absent(&q, 140, false, false), 0);
+  EXPECT_EQ(q.valid_cfr_prbs, 140);
 }

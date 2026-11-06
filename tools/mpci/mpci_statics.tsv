@@ -1178,6 +1178,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1796	g_pool_mu	file_static	std
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1797	g_pool_cv	file_static	std::condition_variable	PROCESS	G3	GPU pass instance pool / graph cache: shared by all cells (G3 adds per-cell quotas)
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1799	OVF_WAIT_US	file_static	constexpr int	CONST	G3	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	1895	t_hold_guard	tls	HoldGuard	TLS	G3	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_graph.cu	2052	nr_gpu_pass_dl_try::n_fail	func_static	std::atomic<uint64_t>	PROCESS	G3	count of failed estimate hand-back copies (stderr rate limit only); pass module state shared by all cells
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	31	c_crc	global	CrcTab [device]	CONST	G3	device constant tables / templates of the post kernels (const after module load)
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	32	c_crc_poly	global	uint32_t[3] [device]	CONST	G3	device constant tables / templates of the post kernels (const after module load)
 openair1/PHY/NR_UE_TRANSPORT/nr_gpu_pass_post.cuh	141	c_index_k0	global	uint8_t[2][4] [device]	CONST	G3	device constant tables / templates of the post kernels (const after module load)
@@ -3363,6 +3364,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	45	unit_tab	file_static	unit_tab_t 
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	315	g_single	file_static	_Atomic bool	PROCESS	CELLFEAT	sensing scheduler (one thread for every cell) publishes whether exactly one sensing cell is active; read lock-free by the gates of every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	408	tl_pend	tls	struct {}[PEND_N]	TLS	CELLFEAT	per-thread queue of unit-gate skips taken under a long lock, booked by the same thread after the unlock
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	409	tl_pend_n	tls	int	TLS	CELLFEAT	per-thread fill of tl_pend
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	310	nr_sense_inv_name::n	func_static	const char *const[NR_SENSE_INV_N]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	54	srs_lock	file_static	pthread_mutex_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	83	sr_state	file_static	srs_state_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	210	process_srs::offsets	func_static	const int[]	CONST	CELLFEAT	auto

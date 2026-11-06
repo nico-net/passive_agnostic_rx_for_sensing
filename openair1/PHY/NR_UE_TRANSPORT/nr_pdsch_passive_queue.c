@@ -1467,7 +1467,7 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
     else if (de->nvar == 0) de_why = NR_DER_NVAR0;
     else de_why = de->kind;
   }
-  const bool use_de = de_why <= NR_DER_BAND;
+  const bool use_de = de != NULL && de->nant != 0 && de_why <= NR_DER_BAND; /* nant == 0 never reads the (empty) buffer even if a stray why is 0 */
   if (use_de) iq_ok = true;
   { /* which estimate the tap used: the decoder's (no FEP/chest) or its own (FEP + chest) and, for the own, why the decoder's was not usable */
     static _Atomic uint64_t n_why[NR_DER_N];

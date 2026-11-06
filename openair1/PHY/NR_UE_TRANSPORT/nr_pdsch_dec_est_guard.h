@@ -6,7 +6,7 @@
 /* NR_DER_*: the fate of one DM-RS tap's estimate. 0..2 = the decoder's estimate was used (exact one-run grant / segmented grant, first run / estimate band wider than the grant: its noise variance is the band's);
  * the rest = the tap estimated itself, and why. The decoder writes NR_DER_PASS_NOEST..NR_DER_EARLY into the struct when it kept none; the tap adds the guard ones. */
 enum { NR_DER_EXACT, NR_DER_SEG, NR_DER_BAND, NR_DER_NODEC /* no decode result (monitor-site tap, decode never ran) */, NR_DER_PASS_NOEST /* the GPU pass took the grant, no hand-back */,
-       NR_DER_GW /* shared GrantWork chest: this body made none */, NR_DER_SINGLE_BRANCH, NR_DER_SEG_CPU /* segmented grant on the CPU path */, NR_DER_BUF /* buffer / band bounds */,
+       NR_DER_GW /* shared GrantWork chest: this body made none */, NR_DER_SINGLE_BRANCH, NR_DER_SEG_CPU /* segmented grant on the CPU path with the GPU chest (no per-segment noise variance) or a probe */, NR_DER_BUF /* buffer / band bounds */,
        NR_DER_EARLY /* the decode returned before any estimate */, NR_DER_G_ID /* rnti / slot */, NR_DER_G_SHAPE /* RX count, layers, DM-RS ports */, NR_DER_G_WIDTH /* subcarriers / first PRB */,
        NR_DER_G_SYM /* the estimate's symbol is not a DM-RS symbol of the grant */, NR_DER_NVAR0, NR_DER_N };
 static const char *const nr_der_name[NR_DER_N] = {"exact", "seg", "band", "nodec", "pass_noest", "gw", "single_branch", "seg_cpu", "buf", "early", "g_id", "g_shape", "g_width", "g_sym", "nvar0"};

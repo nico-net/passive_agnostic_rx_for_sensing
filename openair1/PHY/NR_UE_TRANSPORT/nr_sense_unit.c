@@ -43,6 +43,7 @@ typedef struct {
   _Atomic uint64_t ev[CFR_EV_N];       /* S9: the cell's latest DCI arrivals, (t_ns / 1000) << 16 | grant PRBs; 0 = empty */
   _Atomic uint64_t ev_head;            /* records written so far (the next slot is ev_head % CFR_EV_N) */
   _Atomic uint64_t wbg_offered, wbg_admitted, wbg_taps, wbg_cost_ns, wbg_rec, wbg_ring_ns, wbg_refunded, wbg_overcap; /* grant-level wideband path (nr_sense_wbg_*) */
+  _Atomic uint64_t wbq_wide, wbq_short, wbq_hit[NR_SENSE_INV_N], wbq_first[NR_SENSE_INV_N], wbq_prbs[NR_SENSE_INV_N]; /* wide-record valid-PRB reasons (nr_sense_wbq_*) */
   _Atomic uint64_t wbg_tok;            /* token bucket: t_us(32, wrapping) << 32 | milli-tokens (signed 32); 0 = never used (full) */
   _Atomic uint32_t wbg_rate_m1;        /* allowed grants/s in milli-Hz + 1; 0 = the startup rate (no decision yet / cell reset) */
   _Atomic uint32_t wbg_widest;         /* widest allocation admitted since the last decision */
@@ -395,6 +396,33 @@ void nr_sense_wbg_cfr(uint16_t valid_prbs, uint64_t t_ns)
   unit_tab_t *T = tab_of(nr_cell_idx());
   atomic_fetch_add_explicit(&T->wbg_rec, 1, memory_order_relaxed);
   if (wideband_capable(valid_prbs)) cell_wb_note(T, valid_prbs, t_ns);
+}
+void nr_sense_wbq_note(const nr_sense_quality_t *q)
+{
+  unit_tab_t *T = tab_of(nr_cell_idx());
+  atomic_fetch_add_explicit(&T->wbq_wide, 1, memory_order_relaxed);
+  if (q->valid_cfr_prbs >= (unsigned)nr_isac_sense_min_prb()) return;
+  atomic_fetch_add_explicit(&T->wbq_short, 1, memory_order_relaxed);
+  for (int r = 0, f = 1; r < NR_SENSE_INV_N; r++)
+    if (q->inval[r]) {
+      atomic_fetch_add_explicit(&T->wbq_hit[r], 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&T->wbq_prbs[r], q->inval[r], memory_order_relaxed);
+      if (f) atomic_fetch_add_explicit(&T->wbq_first[r], 1, memory_order_relaxed);
+      f = 0;
+    }
+}
+void nr_sense_wbq_stats(int cell, nr_sense_wbq_stats_t *out)
+{
+  memset(out, 0, sizeof *out);
+  if (cell < 0 || cell >= NR_CELL_MAX) return;
+  const unit_tab_t *T = tab_of(cell);
+  out->wide = atomic_load_explicit(&T->wbq_wide, memory_order_relaxed);
+  out->shorts = atomic_load_explicit(&T->wbq_short, memory_order_relaxed);
+  for (int r = 0; r < NR_SENSE_INV_N; r++) {
+    out->hit[r] = atomic_load_explicit(&T->wbq_hit[r], memory_order_relaxed);
+    out->first[r] = atomic_load_explicit(&T->wbq_first[r], memory_order_relaxed);
+    out->prbs[r] = atomic_load_explicit(&T->wbq_prbs[r], memory_order_relaxed);
+  }
 }
 void nr_sense_wbg_set_rate(int cell, float rate_hz)
 {
@@ -767,6 +795,8 @@ void nr_sense_unit_reset(int cell)
   atomic_store_explicit(&T->ev_head, 0, memory_order_relaxed);
   atomic_store_explicit(&T->wbg_offered, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_admitted, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_taps, 0, memory_order_relaxed);
   atomic_store_explicit(&T->wbg_cost_ns, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_rec, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_ring_ns, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_refunded, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_overcap, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_tok, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->wbq_wide, 0, memory_order_relaxed); atomic_store_explicit(&T->wbq_short, 0, memory_order_relaxed);
+  for (int r = 0; r < NR_SENSE_INV_N; r++) { atomic_store_explicit(&T->wbq_hit[r], 0, memory_order_relaxed); atomic_store_explicit(&T->wbq_first[r], 0, memory_order_relaxed); atomic_store_explicit(&T->wbq_prbs[r], 0, memory_order_relaxed); }
   atomic_store_explicit(&T->wbg_rate_m1, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_widest, 0, memory_order_relaxed);
   nr_sense_sched_cell_reset(cell); /* a new unit table = a new cell: its T_cell restarts at sense_min_prb */
 }

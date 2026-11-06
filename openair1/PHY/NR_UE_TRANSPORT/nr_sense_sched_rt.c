@@ -304,6 +304,15 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
     nr_sense_wbg_stats(c, &ws);
     LOG_A(PHY, "SENSING: SENSE_WBG cell=%d offered_hz=%.1f cost_us=%.1f frac=%.2f rate_hz=%.2f ring_ns=%.0f offered=%lu admitted=%lu taps=%lu records=%lu\n", c, in->wbg_offered_hz[c], in->wbg_cost_ns[c] * 1e-3,
           out->wbg_frac[c], out->wbg_rate_hz[c], (double)in->wbg_ring_ns[c], (unsigned long)ws.offered, (unsigned long)ws.admitted, (unsigned long)ws.taps, (unsigned long)ws.records);
+    nr_sense_wbq_stats_t wq;
+    nr_sense_wbq_stats(c, &wq);
+    if (wq.wide) { /* wide (>=128 PRB) PDSCH records; over those ending below sense_min_prb valid PRBs: hit=records where the rule removed PRBs, first=records whose first rule it was, prbs=PRBs removed */
+      char wh[320] = "";
+      size_t wo = 0;
+      for (int r = 0; r < NR_SENSE_INV_N && wo < sizeof wh; r++)
+        wo += (size_t)snprintf(wh + wo, sizeof wh - wo, "%s%s:%lu/%lu/%lu", r ? " " : "", nr_sense_inv_name(r), (unsigned long)wq.hit[r], (unsigned long)wq.first[r], (unsigned long)wq.prbs[r]);
+      LOG_A(PHY, "SENSING: SENSE_WBQ cell=%d wide=%lu short=%lu rules(hit/first/prbs)=[%s]\n", c, (unsigned long)wq.wide, (unsigned long)wq.shorts, wh);
+    }
   }
   {
     int steps[SENSE_FLOOR_MAX_STEPS];

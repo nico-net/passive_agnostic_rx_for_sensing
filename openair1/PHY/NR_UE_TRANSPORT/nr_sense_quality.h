@@ -1,6 +1,7 @@
 #ifndef NR_SENSE_QUALITY_H
 #define NR_SENSE_QUALITY_H
 #include <stdint.h>
+#include <stdbool.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -16,7 +17,12 @@ extern "C" {
  * ADC quantisation and interference put an effective SNR ceiling of ~30 dB on any receiver; 1e-3 is the order of the symbol error rate that
  * ceiling gives for the densest constellations (~256QAM at 30 dB; QPSK and 16QAM are far below it, so there the floor is a conservative bound), NOT tuned on any cell. Without it a high-SNR PRB with one real mismatch would fail. */
 #define NR_SENSE_RECON_IMPL_LOSS 1e-3
+/* Why PRBs of a record are not valid, per rule, in evaluation order (a PRB is charged to the FIRST rule that rejects it). The first four are producer-side, set by nr_sense_quality_absent():
+ * PRBs of the grant (nb_rb) that have no RE in the frame. TRUNC: the frame was cut at cfr_max_re; PARTIAL: data-aided partial TB (invalid REs left out); ABSENT: any other (e.g. REs not exported). */
+enum { NR_SENSE_INV_TRUNC, NR_SENSE_INV_PARTIAL, NR_SENSE_INV_ABSENT, NR_SENSE_INV_FEW_RE, NR_SENSE_INV_NOSIG, NR_SENSE_INV_SNR, NR_SENSE_INV_RESID, NR_SENSE_INV_SYM, NR_SENSE_INV_RECON, NR_SENSE_INV_N };
+const char *nr_sense_inv_name(int rule);
 typedef struct {
+  uint16_t inval[NR_SENSE_INV_N]; /* PRBs removed per rule (diagnostic only; no rule or threshold depends on it) */
   uint16_t allocated_prbs, estimated_usable_prbs, valid_cfr_prbs;
   uint8_t valid_mask[(NR_SENSE_MAX_PRB + 7) / 8]; /* bit p = PRB (k_abs/12 - first_prb) valid */
   int16_t first_prb;
@@ -50,6 +56,8 @@ void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_
                               const uint8_t *l_sym, float noise_var, nr_sense_quality_t *q);
 /* Spec 4(d): AND the producer's per-PRB reconstruction pass mask (bit = ABSOLUTE PRB k/12, 1 = pass; a PRB without a verdict is 0) into
  * q->valid_mask, recount valid_cfr_prbs. snr/resid percentiles are left as computed over the PRBs that passed (a) and (b). */
+/* Wide-record bookkeeping (writer, after recon): charges the grant's PRBs missing from the frame (nb_rb - allocated_prbs) to TRUNC / PARTIAL / ABSENT. Returns the PRBs removed in total. */
+int nr_sense_quality_absent(nr_sense_quality_t *q, int nb_rb, bool truncated, bool partial_tb);
 void nr_sense_quality_apply_recon(nr_sense_quality_t *q, const uint8_t recon_ok_abs[(NR_SENSE_MAX_PRB + 7) / 8]);
 #ifdef __cplusplus
 }

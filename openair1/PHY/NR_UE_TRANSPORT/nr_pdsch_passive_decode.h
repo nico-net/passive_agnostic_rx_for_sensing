@@ -70,7 +70,7 @@ extern "C" {
 /// be told rather than read off the air.
 /// The decoder's own DM-RS channel estimate of the last body on this thread (sensing mode, copied before the working buffer is freed): the first DM-RS symbol, every layer and RX branch, the grant's
 /// subcarriers only (a shared-slot estimate band is cut to the grant). h[(l*nant + a)*nsc + j] in the LS units of nr_pdsch_channel_estimation, i.e. what the DM-RS tap exports. nvar = that estimate's noise
-/// variance (first DM-RS symbol, layer 0). Valid until the next decode on the thread; the result's est has nant == 0 (why says why; NULL if the decode returned early) when the decoder kept none (single-branch chest, segmented / PRB-list grant, cached estimate, a pass that was gated or refused). A GPU graph pass hands its own estimate back (a copy, nr_gpu_pass_result_t.est_rows).
+/// variance (first DM-RS symbol, layer 0). Valid until the next decode on the thread; the result's est is never read as a flag "has an estimate": it may be NULL (decode returned early) or non-NULL with nant == 0 (why says why) when the decoder kept none (single-branch chest, segmented grant on the GPU chest or a probe, a pass that was gated or refused); the only reader (consumer_dmrs_tap) tests NULL and nant. A GPU graph pass hands its own estimate back (a copy, nr_gpu_pass_result_t.est_rows).
 struct nr_pdsch_dec_est { uint8_t nant, nl, dmrs_sym; uint16_t nsc; uint32_t nvar; const c16_t *h; uint16_t rnti, first_rb, ports; long slot; /* the grant and hypothesis it belongs to (identity guard of the consumer) */
                           uint8_t kind, why; /* kind: NR_DER_EXACT / NR_DER_SEG (first run of a segmented grant) / NR_DER_BAND (noise variance of a wider band); why: NR_DER_* reason when nant == 0 */ };
 
@@ -194,7 +194,7 @@ typedef struct {
   float                sdisp_p10_db, sdisp_std_db; ///< XDIAG: p10 and std (dB) of the per-group (48 packed REs) decision-directed SNR of layer 0 on that output, -99 = n/a (EVMGRANT sdisp=)
   uint8_t              hq_mode;      ///< DL HARQ store: 0 first transmission / no store, 1 a retransmission combined into the stored sum, 2 a retransmission decoded alone (no usable history) (EVMGRANT hq=)
   uint64_t             cb_map;       ///< per-code-block CRC result, bit r = block r passed (blocks >= 64 not shown; an untried block reads 0) (EVMGRANT cbmap=)
-  const struct nr_pdsch_dec_est *est; ///< the decoder's own DM-RS channel estimate (nr_pdsch_dec_est), NULL when none was kept
+  const struct nr_pdsch_dec_est *est; ///< the decoder's own DM-RS channel estimate (nr_pdsch_dec_est), non-NULL on a completed decode with nant == 0 when none was kept, NULL on an early return (readers: test nant, not NULL)
   nr_da_cb_pass_t      cb_pass;      ///< the same for every block (up to NR_DA_CB_MAX), for the partial-TB data-aided export; sensing mode only, C = 0 when no LDPC ran. tb holds the payload of the passing blocks (and only those) when the TB failed
 } nr_pdsch_passive_decode_result_t;
 

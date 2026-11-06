@@ -744,3 +744,21 @@ TEST(DaBlocksZero, TakeKeepsValidSymbolsInOrderForEveryNl)
     EXPECT_TRUE(nr_da_re_take(valid.data(), false, 0, nl, 0, work.data())); /* whole TB: everything taken, nothing moved */
   }
 }
+
+TEST_F(Unit, WbqCountsRulesOfShortWideRecords)
+{
+  nr_sense_quality_t q{};
+  q.valid_cfr_prbs = 100; q.inval[NR_SENSE_INV_SNR] = 20; q.inval[NR_SENSE_INV_RECON] = 5;
+  nr_sense_wbq_note(&q);
+  q.valid_cfr_prbs = 130; q.inval[NR_SENSE_INV_RECON] = 0; q.inval[NR_SENSE_INV_RESID] = 3; /* wide enough: counted as wide, not as short */
+  nr_sense_wbq_note(&q);
+  q.valid_cfr_prbs = 120; memset(q.inval, 0, sizeof q.inval); q.inval[NR_SENSE_INV_RECON] = 8;
+  nr_sense_wbq_note(&q);
+  nr_sense_wbq_stats_t w;
+  nr_sense_wbq_stats(0, &w);
+  EXPECT_EQ(w.wide, 3u); EXPECT_EQ(w.shorts, 2u);
+  EXPECT_EQ(w.hit[NR_SENSE_INV_SNR], 1u); EXPECT_EQ(w.first[NR_SENSE_INV_SNR], 1u); EXPECT_EQ(w.prbs[NR_SENSE_INV_SNR], 20u);
+  EXPECT_EQ(w.hit[NR_SENSE_INV_RECON], 2u); EXPECT_EQ(w.first[NR_SENSE_INV_RECON], 1u); EXPECT_EQ(w.prbs[NR_SENSE_INV_RECON], 13u);
+  EXPECT_EQ(w.hit[NR_SENSE_INV_RESID], 0u);
+  nr_sense_wbq_stats(1, &w); EXPECT_EQ(w.wide, 0u); // per cell
+}

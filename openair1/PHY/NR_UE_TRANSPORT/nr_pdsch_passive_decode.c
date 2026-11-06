@@ -3768,6 +3768,12 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     }
   }
   uint32_t est_nv0 = 0; /* noise variance of the first DM-RS symbol, layer 0 (the decoder-estimate export) */
+  int seg_run = 0, seg_run_n = 0; /* seg_path: PRBs / segments of the first run (adjacent segments re-merge, as the GPU hand-back and the tap) */
+  uint64_t seg_nv0_w = 0;         /* its width-weighted first-symbol layer-0 noise variance (CPU chest) */
+  if (seg_path && nseg > 0) {
+    seg_run = seg[0].n_prb, seg_run_n = 1;
+    for (int i = 1; i < nseg && seg[i].prb_start == seg[i - 1].prb_start + seg[i - 1].n_prb; i++) seg_run += seg[i].n_prb, seg_run_n++;
+  }
   uint32_t gch_nv[14][4], gch_nva[14][4][NR_DL_CHEST_MAX_ANT]; /* GPU-DEMOD stage 2 (ISAC_PDSCH_GPU_EXACT_CHEST) */
   const int gseg = seg_path ? nr_pdsch_gpu_chest_grant(ue, proc, dlsch_config, freq_alloc, seg, nseg, cw->Nl, dmrs_full, pdsch_est_size,
                                                        pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, 0, gch_nv, gch_nva) : -1;
@@ -3800,6 +3806,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                     get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                     pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
         nv += (uint64_t)nvar_tmp * seg[s].n_prb;
+        if (nl == 0 && m == dmrs_first && s < seg_run_n) seg_nv0_w += (uint64_t)nvar_tmp * seg[s].n_prb;
         for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++)
           nv_ant[a] += (uint64_t)nr_dl_chest_nvar_ant[a] * seg[s].n_prb;
         for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++)
@@ -3821,6 +3828,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     }
     n_dmrs_sym++;
   }
+  if (seg_path && gseg != 0 && seg_run > 0) est_nv0 = (uint32_t)(seg_nv0_w / (uint64_t)seg_run);
   nr_dl_chest_only_ant = chest_only; /* P39: non-segmented path only; reset after the loop */
   const int gch = (!seg_path && !chest_hit && chest_only < 0) ? nr_pdsch_gpu_chest_grant(ue, proc, &chest_cfg, &chest_alloc, NULL, 0, cw->Nl,
       dmrs_full, pdsch_est_size, pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, 0, gch_nv, gch_nva) : -1;
@@ -3856,20 +3864,22 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * miss's first-symbol noise variance (nv0); when the estimate band is wider than the grant the noise variance is the band's (kind NR_DER_BAND, labelled). */
   if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_blind_dmrs_source() >= 0) {
     if (chest_hit) est_nv0 = t_chest_cache.nv0;
-    if (seg_path) {
-      t_dec_est.why = NR_DER_SEG_CPU;
-    } else if (!chest_estimate_usable(chest_only)) {
+    if (seg_path && (gseg == 0 || t_probe_first_seg)) {
+      t_dec_est.why = NR_DER_SEG_CPU; /* left to the tap: the GPU chest (gseg == 0) gives no per-segment noise variance on the host, and a probe decodes segment 0 only */
+    } else if (!seg_path && !chest_estimate_usable(chest_only)) {
       t_dec_est.why = NR_DER_SINGLE_BRANCH;
     } else if (dmrs_first >= 0) {
       t_dec_est.why = NR_DER_BUF;
       const int nant_e = fp->nb_antennas_rx, nl_e = cw->Nl < NR_MAX_NB_LAYERS ? cw->Nl : NR_MAX_NB_LAYERS;
-      const int nsc_e = freq_alloc->num_rbs * NR_NB_SC_PER_RB, off_e = ((int)freq_alloc->first_rb - (int)chest_alloc.first_rb) * NR_NB_SC_PER_RB;
+      /* seg_path: the first run of the data-ordered composed estimate, rows [0, 12 * run) (what the GPU hand-back gives and the tap exports) */
+      const int nsc_e = (seg_path ? seg_run : freq_alloc->num_rbs) * NR_NB_SC_PER_RB, off_e = seg_path ? 0 : ((int)freq_alloc->first_rb - (int)chest_alloc.first_rb) * NR_NB_SC_PER_RB;
+      const int band_e = seg_path ? nsc_seg : (int)chest_alloc.num_rbs * NR_NB_SC_PER_RB;
       const size_t need_e = (size_t)nl_e * nant_e * nsc_e;
-      if (off_e >= 0 && off_e + nsc_e <= (int)chest_alloc.num_rbs * NR_NB_SC_PER_RB && nsc_e > 0 && nant_e <= 8 && dec_est_buf(need_e)) {
+      if (off_e >= 0 && off_e + nsc_e <= band_e && nsc_e > 0 && nant_e <= 8 && dec_est_buf(need_e)) {
         nr_dec_est_copy((int32_t *)t_dec_est_buf, &pdsch_dl_ch_estimates[0][0], (size_t)pdsch_est_size, nl_e, nant_e, dmrs_first, fp->ofdm_symbol_size, off_e, nsc_e);
         t_dec_est = (struct nr_pdsch_dec_est){.nant = (uint8_t)nant_e, .nl = (uint8_t)nl_e, .dmrs_sym = (uint8_t)dmrs_first, .nsc = (uint16_t)nsc_e, .nvar = est_nv0, .h = t_dec_est_buf, .rnti = grant->rnti,
                                               .slot = grant->source_absolute_slot, .first_rb = (uint16_t)(freq_alloc->n_prb_list > 0 ? freq_alloc->prb_list[0] : freq_alloc->first_rb), .ports = dlsch_config->dmrs_ports,
-                                              .kind = chest_alloc.num_rbs != freq_alloc->num_rbs ? NR_DER_BAND : NR_DER_EXACT};
+                                              .kind = seg_path ? NR_DER_SEG : chest_alloc.num_rbs != freq_alloc->num_rbs ? NR_DER_BAND : NR_DER_EXACT};
       }
     }
   }

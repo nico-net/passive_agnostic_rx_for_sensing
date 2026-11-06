@@ -189,10 +189,20 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
   int nv = 0;
   for (int p = 0; p < NR_SENSE_MAX_PRB; p++) {
     if (sparse) { /* one RE per PRB is enough: there is no local fit, so the producer's noise estimate is required and the residual test is not applied */
-      if (tot[p] < 1 || !isfinite(pwr[p]) || !(pwr[p] > 0) || !(noise_var > 0))
+      if (tot[p] < 1 || !isfinite(pwr[p]) || !(pwr[p] > 0) || !(noise_var > 0)) {
+        if (tot[p]) q->inval[NR_SENSE_INV_NOSIG]++;
         continue;
-    } else if (tot[p] < 3 || cnt[p][best[p]] < 3 || !(sig[p] > 0) || !isfinite(pwr[p]) || !isfinite(sse[p]))
-      continue;
+      }
+    } else {
+      if (tot[p] < 3 || cnt[p][best[p]] < 3) {
+        if (tot[p]) q->inval[NR_SENSE_INV_FEW_RE]++;
+        continue;
+      }
+      if (!(sig[p] > 0) || !isfinite(pwr[p]) || !isfinite(sse[p])) {
+        q->inval[NR_SENSE_INV_NOSIG]++;
+        continue;
+      }
+    }
     const double mean_pwr = pwr[p] / ((double)tot[p] * n_ant);
     /* noise of this PRB: the producer's estimate; none (<= 0 or NaN) -> the PRB's own local-fit residual. The fit removes one complex constant and one
      * complex slope from cnt REs per antenna, so for white noise E[sse] = (cnt - 2) n_ant noise_var. */
@@ -201,8 +211,10 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
      * below that fraction of the PRB power (a noiseless simulation gives exactly 0) is raised to it: high SNR, never "invalid" */
     if (npw < NR_SENSE_RECON_IMPL_LOSS * mean_pwr)
       npw = NR_SENSE_RECON_IMPL_LOSS * mean_pwr;
-    if (!(npw > 0))
+    if (!(npw > 0)) {
+      q->inval[NR_SENSE_INV_NOSIG]++;
       continue;
+    }
     /* channel SNR (spec 4.2a): E[mean|H|^2] = S + N, so subtract the noise; no signal left -> -100 dB (invalid) */
     double sp = mean_pwr - npw;
     float s = sp > 0 ? (float)(10.0 * log10(sp / npw)) : -100.0f;
@@ -211,7 +223,8 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
       q->valid_mask[p >> 3] |= (uint8_t)(1u << (p & 7));
       snr[nv] = s;
       res[nv++] = r;
-    }
+    } else
+      q->inval[s < NR_SENSE_PRB_SNR_MIN_DB ? NR_SENSE_INV_SNR : NR_SENSE_INV_RESID]++;
   }
   q->valid_cfr_prbs = (uint16_t)nv;
   if (nv) {
@@ -256,6 +269,7 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
   /* sparse source with two or more symbols: a failed symbol consistency invalidates the record's PRBs (nothing else checks them) */
   if (sparse && q->sym_consist == q->sym_consist && q->sym_consist < NR_SENSE_SPARSE_SYM_MIN) {
     memset(q->valid_mask, 0, sizeof q->valid_mask);
+    q->inval[NR_SENSE_INV_SYM] = q->valid_cfr_prbs;
     q->valid_cfr_prbs = 0;
     q->snr_db_p10 = q->snr_db_p50 = NAN;
   }
@@ -264,6 +278,7 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
 void nr_sense_quality_apply_recon(nr_sense_quality_t *q, const uint8_t recon_ok_abs[(NR_SENSE_MAX_PRB + 7) / 8])
 {
   int n = 0;
+  const int before = q->valid_cfr_prbs;
   for (int p = 0; p < NR_SENSE_MAX_PRB; p++) {
     const int a = q->first_prb + p;
     const bool ok = a >= 0 && a < NR_SENSE_MAX_PRB && (recon_ok_abs[a >> 3] >> (a & 7) & 1);
@@ -275,4 +290,23 @@ void nr_sense_quality_apply_recon(nr_sense_quality_t *q, const uint8_t recon_ok_
     }
   }
   q->valid_cfr_prbs = (uint16_t)n;
+  q->inval[NR_SENSE_INV_RECON] = (uint16_t)(before - n);
+}
+
+int nr_sense_quality_absent(nr_sense_quality_t *q, int nb_rb, bool truncated, bool partial_tb)
+{
+  int miss = nb_rb - (int)q->allocated_prbs, tot = 0;
+  if (miss > 0) {
+    q->inval[truncated ? NR_SENSE_INV_TRUNC : partial_tb ? NR_SENSE_INV_PARTIAL : NR_SENSE_INV_ABSENT] = (uint16_t)miss;
+    tot = miss;
+  }
+  for (int i = NR_SENSE_INV_FEW_RE; i < NR_SENSE_INV_N; i++)
+    tot += q->inval[i];
+  return tot;
+}
+
+const char *nr_sense_inv_name(int r)
+{
+  static const char *const n[NR_SENSE_INV_N] = {"trunc", "da_partial", "absent", "few_re", "nosig", "snr", "resid", "sym", "recon"};
+  return r >= 0 && r < NR_SENSE_INV_N ? n[r] : "?";
 }
