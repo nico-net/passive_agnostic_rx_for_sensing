@@ -486,7 +486,10 @@ TEST_F(Unit, ArrivalGapsWindowAndWrap)
 TEST_F(Unit, WbgUnlimitedBeforeADecisionAndNarrowIsRefused)
 {
   for (int i = 0; i < 50; i++) EXPECT_TRUE(nr_sense_wbg_admit(217, tb(1) + i));
-  EXPECT_FALSE(nr_sense_wbg_admit(127, tb(1))); /* below the cell's wideband target: not this path (not even counted) */
+  EXPECT_FALSE(nr_sense_wbg_admit(127, tb(1))); /* below the wideband target (sense_min_prb): not this path (not even counted) */
+  nr_sense_cell_floor_publish(0, 32);
+  EXPECT_FALSE(nr_sense_wbg_admit(100, tb(1))); /* the continuity floor T_cell does not lower it */
+  nr_sense_cell_floor_publish(0, 0);
   nr_sense_wbg_stats_t s;
   nr_sense_wbg_stats(0, &s);
   EXPECT_EQ(s.offered, 50u);

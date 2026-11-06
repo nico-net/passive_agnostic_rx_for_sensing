@@ -87,7 +87,7 @@ typedef struct {
   int floor_prb[NR_SENSE_CELLS]; bool in_gap[NR_SENSE_CELLS]; uint64_t gap_p95_ns[NR_SENSE_CELLS]; /* S9: T_cell after this decision, whether the cell is in a continuity gap at it, its p95 gap */
   int enables, disables, bad_cap; nr_res_id_t binding; nr_res_id_t top; int n_elig, cold_deferred; float value_last_admitted; /* value of the lowest-valued admitted unit */
   int n_admitted; nr_sense_admit_t admitted[NR_SENSE_ADMIT_LOG]; /* the admitted set in rank order (n_admitted counts all, the list holds the first NR_SENSE_ADMIT_LOG) */
-  /* the per-cell "wideband grant" resource: priced in the pool first (before any unit); wbg_rate_hz = wide grants/s the pool leaves it, < 0 = not limited (nothing measured yet), wbg_frac = rate / offered */
+  /* the per-cell "wideband grant" resource: priced in the pool first (before any unit); wbg_rate_hz = wide grants/s the pool leaves it, < 0 = not limited (nothing measured yet, or it fits whole), wbg_frac = share of the offered rate that fits */
   float wbg_rate_hz[NR_SENSE_CELLS], wbg_frac[NR_SENSE_CELLS];
 } nr_sense_sched_out_t;
 

@@ -315,7 +315,7 @@ bool nr_sense_wbg_admit(uint16_t prbs, uint64_t t_ns)
 {
   if (nr_isac_mode() != NR_ISAC_MODE_SENSING) return false;
   const int cell = nr_cell_idx();
-  if (prbs < (unsigned)nr_sense_cell_floor(cell)) return false;
+  if (prbs < (unsigned)nr_isac_sense_min_prb()) return false; /* the wideband target, not the continuity floor T_cell */
   unit_tab_t *T = tab_of(cell);
   atomic_fetch_add_explicit(&T->wbg_offered, 1, memory_order_relaxed);
   const uint32_t rm = atomic_load_explicit(&T->wbg_rate_m1, memory_order_relaxed);

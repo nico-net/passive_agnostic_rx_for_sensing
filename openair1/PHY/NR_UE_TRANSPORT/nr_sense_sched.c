@@ -340,7 +340,7 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
     if (f > 1.0) f = 1.0;
     wbg_pool[c] = f * dem;
     use.sh[NR_RES_POOL] += wbg_pool[c];
-    out->wbg_frac[c] = (float)f; out->wbg_rate_hz[c] = (float)(f * (double)in->wbg_offered_hz[c]);
+    out->wbg_frac[c] = (float)f; out->wbg_rate_hz[c] = f >= 1.0 ? -1.f : (float)(f * (double)in->wbg_offered_hz[c]); /* it fits whole: no throttle (a bucket at exactly the offered rate would cut bursts) */
   }
   bool rejected = false, cold_taken = false;
   out->binding = NR_RES_N; /* none: binding is only the resource that rejected a candidate; top (below) is the tightest one when nothing was rejected */

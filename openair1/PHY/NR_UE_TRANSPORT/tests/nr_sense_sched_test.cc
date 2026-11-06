@@ -868,7 +868,7 @@ TEST(Wbg, FitsInThePoolWholeAndShrinksTheUnitBudget)
   h.add(0, 1, 250); h.add(0, 2, 250);
   h.steps(4);
   EXPECT_FLOAT_EQ(h.out.wbg_frac[0], 1.f);
-  EXPECT_FLOAT_EQ(h.out.wbg_rate_hz[0], 100.f);
+  EXPECT_LT(h.out.wbg_rate_hz[0], 0.f); /* fits whole: not throttled */
   EXPECT_EQ(h.nen(0), 1); /* 600 - 300 leaves room for one 250 unit, not two (two would fit without the wideband grants) */
   H g(1, 1000);
   g.add(0, 1, 250); g.add(0, 2, 250);
