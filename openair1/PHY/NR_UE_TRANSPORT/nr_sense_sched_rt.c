@@ -261,7 +261,9 @@ void nr_sense_sched_step(uint64_t now_ns)
   static nr_sense_sched_out_t out;
   nr_sense_sched_decide(&in, &g_st, &out);
   apply(&in);
-  nr_sense_single_set(in.n_cells == 1); /* from this decision on: exactly one active cell = no rationing; two or more = the scheduler's admission */
+  { int active = 0; /* cells that are actually running: registered AND their PCI is known (set at sync); a registered cell that has not synced does not count, one that syncs counts from the next decision */
+    for (int c = 0; c < in.n_cells; c++) active += in.pci[c] >= 0;
+    nr_sense_single_set(active == 1); } /* from this decision on: exactly one active cell = no rationing; two or more = the scheduler's admission */
   for (int c = 0; c < in.n_cells; c++) nr_sense_wbg_set_rate(c, out.wbg_rate_hz[c]);
   for (int c = 0; c < in.n_cells; c++) {
     nr_sense_cell_floor_publish(c, out.floor_prb[c]);

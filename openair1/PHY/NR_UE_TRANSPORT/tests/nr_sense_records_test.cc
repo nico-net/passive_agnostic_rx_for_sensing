@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include "PHY/defs_nr_common.h"
 #include "nr_passive_ue_ctx.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 
 static std::atomic<bool> test_reconf{false};
 static std::atomic<uint32_t> test_epoch{0};
@@ -204,16 +205,23 @@ TEST(SenseRecords, PartialTbKeysAreAppendedAndOnlyForPartialRecords)
   EXPECT_NE(strstr(part,",\"partial_tb\":1,\"cb_ok\":3,\"cb_total\":90}"),nullptr);
 }
 
-TEST(SenseRecords, DecoderEstimateKeysOnlyWhenTheCfrIsTheDecodersEstimate)
+TEST(SenseRecords, DmrsRecordsSayWhichEstimateTheyAre)
 {
   nr_sense_rs_meta_t m{};
   m.rnti=77; m.ports=1; m.port_mask=1; m.dmrs_type=1; m.dmrs_add_pos=-1; m.dmrs_n_scid=0;
-  char a[2048], b[2048];
+  char a[2048], b[2048], c[2048], d[2048];
   ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,a,sizeof a),0);
-  EXPECT_EQ(strstr(a,"cfr_est"),nullptr);
-  m.est_dec=true; m.est_sym=2; m.est_layers=2;
+  EXPECT_EQ(strstr(a,"cfr_est"),nullptr); // outside sensing mode nothing is added
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
   ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,b,sizeof b),0);
-  EXPECT_NE(strstr(b,",\"cfr_est\":\"decoder\",\"est_dmrs_sym\":2,\"est_layers\":2"),nullptr);
+  EXPECT_NE(strstr(b,",\"cfr_est\":\"own\""),nullptr);
+  m.est_dec=true; m.est_sym=2; m.est_layers=2; m.tb_cb_ok=1; m.tb_cb_total=3;
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,c,sizeof c),0);
+  EXPECT_NE(strstr(c,",\"cfr_est\":\"decoder\",\"est_dmrs_sym\":2,\"est_layers\":2,\"partial_tb\":1,\"cb_ok\":1,\"cb_total\":3}"),nullptr);
+  nr_sense_rs_meta_t n{}; n.rnti=77; n.ports=1; n.port_mask=1; n.dmrs_type=1; n.dmrs_add_pos=-1; n.dmrs_n_scid=0;
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DATA,&n,1,d,sizeof d),0);
+  EXPECT_EQ(strstr(d,"cfr_est"),nullptr); // other sources are untouched
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
 }
 
 TEST(SenseRecords, NullsForUnknown)

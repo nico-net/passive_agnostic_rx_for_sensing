@@ -366,6 +366,7 @@ void nr_sense_wbg_refund(void)
   if ((unsigned)cell >= NR_SENSE_CELLS) return;
   unit_tab_t *T = tab_of(cell);
   atomic_fetch_add_explicit(&T->wbg_refunded, 1, memory_order_relaxed);
+  if (nr_sense_single()) return; /* a single-mode admit took no token, so there is none to give back (admitted - refunded == taps holds either way) */
   uint64_t o = atomic_load_explicit(&T->wbg_tok, memory_order_relaxed), n;
   do {
     if (!o) return; /* never used: the bucket is full */
@@ -523,6 +524,7 @@ bool nr_sense_unit_gate(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs
 {
   if (nr_sense_unit_enabled(s, rnti))
     return true;
+  if (s == NR_UNIT_PDSCH_DMRS && nr_sense_single()) return false; /* single cell: the grant-level path handles it; no counted skip, no row */
   if (s == NR_UNIT_SRS && !est_usable_prbs)
     est_usable_prbs = (uint16_t)nr_isac_sense_min_prb();
   nr_sense_unit_skip_w(s, rnti, est_usable_prbs, now_ns(), take_weight(s, rnti));
@@ -544,6 +546,7 @@ bool nr_sense_unit_gate_deferred(nr_unit_src_t s, uint16_t rnti, uint16_t est_us
 {
   if (nr_sense_unit_enabled(s, rnti))
     return true;
+  if (s == NR_UNIT_PDSCH_DMRS && nr_sense_single()) return false;
   if (s == NR_UNIT_SRS && !est_usable_prbs)
     est_usable_prbs = (uint16_t)nr_isac_sense_min_prb();
   if (tl_pend_n == PEND_N)

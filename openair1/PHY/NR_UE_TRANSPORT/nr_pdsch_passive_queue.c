@@ -1427,7 +1427,7 @@ extern __thread uint32_t nr_gp_tt[26]; /* nr_gpu_pass_dl.c */
  * history through nr_sense_unit_gate), so the scheduler never saw it and no record was ever produced. Here, after the TB CRC verified the identity: gate
  * (counts the message, skips when disabled), FEP of the first DM-RS symbol, the same estimator, the same comb-2 export as the monitor tap. */
 static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdsch_passive_job_t *job, int rxdataF_sz,
-                              c16_t rxdataF[][rxdataF_sz], bool crc_ok, bool iq_ok, bool *tok_open, const struct nr_pdsch_dec_est *de)
+                              c16_t rxdataF[][rxdataF_sz], bool crc_ok, bool iq_ok, bool *tok_open, const struct nr_pdsch_dec_est *de, const nr_da_cb_pass_t *partial)
 {
   const int src = nr_sense_blind_dmrs_source();
   if (src < 0 || nr_isac_mode() != NR_ISAC_MODE_SENSING)
@@ -1447,7 +1447,7 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
   bool *tok = job->wbg_pre ? tok_open : &local_tok; /* true while this tap holds a wideband-grant token that has not bought a tap yet */
   if (!wbg) {
     const bool open = nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, job->rnti, (uint16_t)ca.num_rbs);
-    const int w = nr_sense_wbg_after_gate(open, nr_sense_wbg_consumer_ok(crc_ok, job->rnti_class == NR_BLIND_RNTI_CLASS_C), (uint16_t)ca.num_rbs, nr_sense_now_ns());
+    const int w = nr_sense_wbg_after_gate(open, nr_sense_wbg_consumer_ok(crc_ok || nr_sense_single(), job->rnti_class == NR_BLIND_RNTI_CLASS_C), (uint16_t)ca.num_rbs, nr_sense_now_ns());
     if (w < 0) return;
     wbg = w > 0;
     local_tok = wbg;
@@ -1465,7 +1465,7 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
     if ((use_de ? n : n + atomic_load(&n_dec)) % 500 == 1)
       LOG_A(PHY, "SENSING: DMRS_TAP_EST decoder_estimate=%lu own_fep_chest=%lu\n", (unsigned long)atomic_load(&n_dec), (unsigned long)atomic_load(&n_own));
   }
-  if (wbg && !nr_sense_wbg_tap_ok(crc_ok, iq_ok)) { /* CRC failed (solved-layout rescue path), or the ring no longer holds the slot: the FEP would read another slot's IQ */
+  if (wbg && !nr_sense_wbg_tap_ok(crc_ok || nr_sense_single(), iq_ok)) { /* single mode: the solved-layout CRC-fail rescue tap keeps working (a token-free admit) */ /* CRC failed (solved-layout rescue path), or the ring no longer holds the slot: the FEP would read another slot's IQ */
     WBG_GIVE_BACK();
     return;
   }
@@ -1523,7 +1523,7 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
     const nr_sense_rs_meta_t meta = nr_sense_meta_with_snr((nr_sense_rs_meta_t){.rnti = job->rnti, .prg_valid = prg >= 0, .prg_size = prg >= 0 ? prg : 0,
         .start_rb = pdu->BWPStart + ca.first_rb, .nb_rb = ca.num_rbs, .ports = __builtin_popcount((unsigned)pdu->dmrs_ports),
         .port_mask = (int)pdu->dmrs_ports, .ssb_index = -1, .k_ssb = -1, .ta_est_samples = -1, .transform_precoding = -1,
-        .dmrs_type = pdu->dmrsConfigType ? 2 : 1, .dmrs_add_pos = -1, .dmrs_n_scid = pdu->nscid, .wbg = wbg, .est_dec = use_de, .est_sym = use_de ? dmrs_sym : 0, .est_layers = use_de ? de->nl : 0},
+        .dmrs_type = pdu->dmrsConfigType ? 2 : 1, .dmrs_add_pos = -1, .dmrs_n_scid = pdu->nscid, .wbg = wbg, .tb_cb_ok = partial ? partial->ok : 0, .tb_cb_total = partial ? partial->C : 0, .est_dec = use_de, .est_sym = use_de ? dmrs_sym : 0, .est_layers = use_de ? de->nl : 0},
         nvar > 0 && pw > 0.0 ? (float)(10.0 * log10(pw / n / (double)nvar)) : NAN);
     const nr_isac_carrier_t carrier = {.nof_prb = (uint32_t)fp->N_RB_DL, .scs_hz = fp->subcarrier_spacing, .dl_center_hz = fp->dl_CarrierFreq,
                                        .pci = fp->Nid_cell, .slots_per_frame = fp->slots_per_frame};
@@ -2518,12 +2518,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       const bool tap_iq_ok = owned || nr_passive_credit_allowed(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame); /* at tap time: the ring may have moved on since the decode */
       /* Partial-TB proof (operator 2026-11-06): a TB that failed its CRC but has a code block that passed CRC24B (C > 1) is as proven as one that passed the TB CRC: a chance DCI or a wrong layout does not pass a 24-bit CRC. */
       const bool tb_partial = st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.dmrs_tap && nr_isac_mode() == NR_ISAC_MODE_SENSING
-                              && nr_sense_tb_proven(false, dec.cb_total, dec.cb_ok);
+                              && nr_sense_tb_proven(false, dec.cb_pass.C, dec.cb_pass.ok); /* the cleaned view (all-zero blocks dropped), not the EVMGRANT counters */
       if (tb_partial)
-        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, true, tap_iq_ok, &wbg_tok, dec.est);
+        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, true, tap_iq_ok, &wbg_tok, dec.est, tb_partial ? &dec.cb_pass : NULL);
       else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.dmrs_tap
           && nr_dmrs_tap_wanted(true, false, false, true, nr_pdsch_solver_layout_state(job.rnti, NULL, NULL)))
-        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, false, tap_iq_ok, &wbg_tok, dec.est); /* SOLVED layout: the DM-RS CFR does not need a CRC pass (not for the wbg path: it needs the CRC) */
+        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, false, tap_iq_ok, &wbg_tok, dec.est, NULL); /* SOLVED layout: the DM-RS CFR does not need a CRC pass (not for the wbg path: it needs the CRC) */
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.want_data && nr_isac_mode() == NR_ISAC_MODE_SENSING
           && dec.cb_pass.C > 1 && dec.cb_pass.ok >= 1 && dec.tb != NULL) {
         /* partial TB: the data-aided export of the code blocks that passed (the REs of the others are marked invalid; the record says partial_tb) */
@@ -2539,7 +2539,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         lock_verify_note_crc_ok(job.absolute_slot);
         if (job.dmrs_tap)
-          consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, true, tap_iq_ok, &wbg_tok, dec.est);
+          consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, true, tap_iq_ok, &wbg_tok, dec.est, NULL);
         if (job.want_data) {
           /* Publish THIS job's monotonic slot so the CPI grid indexes it correctly. Without this the
            * submit derives the index from proc->frame_rx, which wraps at 1024 -- harmless in order,

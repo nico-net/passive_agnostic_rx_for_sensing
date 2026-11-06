@@ -14,13 +14,14 @@ static const uint64_t T0 = 200000ull * B;
 static uint64_t tb(uint64_t k) { return (T0 + k) * B + 1000; }
 static const uint64_t DEC = SENSE_DECIDE_NS / B; /* buckets per decision */
 static nr_sense_res_t g_cap[NR_RES_N];
+static int g_pci1 = 923; /* -1: the second cell is registered but has not synced */
 static int g_ncells = 2; /* the multi-cell scheduler is what the older tests exercise; the single-cell tests set 1 */
 
 static bool stub_sampler(nr_sense_sched_sample_t *o, uint64_t)
 {
   memset(o, 0, sizeof *o);
   o->n_cells = g_ncells;
-  o->pci[0] = 415; o->pci[1] = 923;
+  o->pci[0] = 415; o->pci[1] = g_pci1;
   memcpy(o->res, g_cap, sizeof g_cap);
   return true;
 }
@@ -34,7 +35,7 @@ class Sched : public ::testing::Test {
     nr_cell_bind(0);
     for (int c = 0; c < 2; c++) nr_sense_unit_reset(c);
     nr_sense_sched_reset();
-    g_ncells = 2;
+    g_ncells = 2; g_pci1 = 923;
     for (int r = 0; r < NR_RES_N; r++) g_cap[r] = {200e6f, 0.f};
     g_cap[NR_RES_GPU] = {0.f, 0.f}; /* no GPU on this host: absent, not invalid */
     nr_sense_sched_set_sampler(stub_sampler);
@@ -390,4 +391,64 @@ TEST_F(Sched, SingleCellBypassFollowsTheCellCountBothWays)
   EXPECT_FALSE(nr_sense_single()); /* traffic mode is never affected */
   EXPECT_TRUE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DMRS, 1)); /* gates open outside sensing as before */
   EXPECT_FALSE(nr_sense_wbg_admit(217, tb(1)));
+}
+
+TEST_F(Sched, RegisteredButUnsyncedSecondCellKeepsSingleModeAndItSwitchesWhenItSyncs)
+{
+  g_ncells = 2; g_pci1 = -1;
+  nr_sense_sched_step(tb(DEC)); nr_sense_sched_step(tb(2 * DEC));
+  EXPECT_TRUE(nr_sense_single()); /* two registered cells, one running */
+  g_pci1 = 923; /* the second cell syncs */
+  EXPECT_TRUE(nr_sense_single()); /* not before the decision */
+  nr_sense_sched_step(tb(3 * DEC));
+  EXPECT_FALSE(nr_sense_single());
+  g_pci1 = -1; /* a cell without a PCI (never synced) */
+  nr_sense_sched_step(tb(4 * DEC));
+  EXPECT_TRUE(nr_sense_single());
+  g_pci1 = 923; g_ncells = 1; /* zero running cells is not single */
+  nr_sense_sched_step(tb(5 * DEC));
+  EXPECT_TRUE(nr_sense_single());
+}
+
+/* The old decide()/apply() assertions with ONE cell: the scheduler still decides and applies (views), while the gates are bypassed. */
+TEST_F(Sched, OneCellDecidePathStillEnablesAndRemovesUnitsInTheViews)
+{
+  g_ncells = 1;
+  auto enabled = [&](uint16_t rnti) {
+    nr_sense_unit_view_t v[16]; const int n = snap_now(v, 16);
+    for (int i = 0; i < n; i++) if (v[i].rnti == rnti && v[i].src == NR_UNIT_PDSCH_DATA) return v[i].enabled;
+    return false;
+  };
+  feed_skips(0x4609, NR_UNIT_PDSCH_DATA, 0, 4 * DEC);
+  nr_sense_sched_step(tb(DEC));
+  EXPECT_FALSE(enabled(0x4609));
+  nr_sense_sched_step(tb(2 * DEC));
+  EXPECT_TRUE(enabled(0x4609));
+  EXPECT_TRUE(nr_sense_single());
+  EXPECT_EQ(stats().enables, 1u);
+  nr_sense_unit_violation(NR_UNIT_PDSCH_DATA, 0x4609); /* the gate is open in single mode, the violation books on the enabled unit */
+  nr_sense_sched_step(tb(3 * DEC));
+  EXPECT_FALSE(enabled(0x4609));
+  EXPECT_EQ(stats().disables, 1u);
+  EXPECT_TRUE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DATA, 0x4609)); /* ... while the gate itself stays open */
+}
+
+TEST_F(Sched, SingleModeDoesNotInflateSkipsAndRefundsKeepTheIdentity)
+{
+  g_ncells = 1;
+  nr_sense_sched_step(tb(DEC)); nr_sense_sched_step(tb(2 * DEC));
+  ASSERT_TRUE(nr_sense_single());
+  nr_sense_unit_cell_stats_t cs0, cs1;
+  nr_sense_unit_cell_stats(0, &cs0);
+  for (int i = 0; i < 50; i++) EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, 0x4700, 217));
+  nr_sense_unit_cell_stats(0, &cs1);
+  EXPECT_EQ(cs1.skips, cs0.skips); /* the closed DM-RS gate books nothing */
+  for (int i = 0; i < 10; i++) { EXPECT_TRUE(nr_sense_wbg_admit(217, tb(1))); if (i < 3) nr_sense_wbg_refund(); else nr_sense_wbg_cost(1000); }
+  nr_sense_wbg_stats_t s; nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.admitted - s.refunded, s.taps);
+  g_ncells = 2; nr_sense_sched_step(tb(3 * DEC)); /* back to the scheduler: the refunds did not stock the bucket */
+  int ok = 0; for (int i = 0; i < 100; i++) ok += nr_sense_wbg_admit(217, tb(3 * DEC) + 5) ? 1 : 0;
+  EXPECT_LE(ok, 5);
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.admitted - s.refunded, s.taps + (uint64_t)ok); /* multi mode: the same identity once the tokens are spent */
 }
