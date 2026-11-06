@@ -55,3 +55,48 @@ bT1 (base) vs nT1 (new), traffic cfg: ISAC_METRICS key set identical (336 keys),
 5. Measured on a 12 s October capture at 0.25x speed, not on air and not on the daytime traffic; no OTA validation.
 6. Traffic/legacy identity is structural plus counter-set equality, not byte equality (replay timing).
 7. One invalid record in new-96 rfsim (above).
+
+## Fix round 1 (review findings F1-F12)
+Commit: "wbg fix round 1" (on top of b2db1d870f). Design doc rewritten to the implemented behaviour (F11). Tests were written first; they failed to compile against the old API (red), then passed.
+
+| finding | change |
+|---|---|
+| F1 | `consumer_dmrs_tap(..., crc_ok)`: wbg only after the TB CRC passed and for a C-RNTI (`nr_sense_wbg_consumer_ok`); the SOLVED-layout CRC-fail rescue tap stays unit-only. A wbg record is submitted only with nvar > 0, channel power > 0 and at least one RE (`nr_sense_wbg_export_ok`). |
+| F2 | The monitor no longer runs any chest for wbg. Under g_phase2_mu it takes one token (a CAS) and enqueues the job with `wbg_pre` (and `dmrs_tap`); the PDSCH consumer taps after the CRC. Hold time: the added work under the lock is one atomic CAS [CODE READ]; the logs contain no LOCKHOLD line (count 0), so there is no timing line to show. |
+| F3 | The wbg is priced on POOL, QUEUE_DL (max semantics, f x demand) and SENSE_RING. |
+| F4 | The bucket is never unlimited. Startup/reset rate = 1 tap per SENSE_DECIDE_NS. Published rate = f x offered x 1.25 (INCUMBENT margin), never -1. Unmeasured cost: rate from the cell's pdsch_dmrs unit model (wide message rate, p99 bucket CPU per message), holding no budget; none: 0.25 Hz. |
+| F5 | Order: enabled incumbents and units with history (rank order, so a challenger beating an incumbent by the margin still displaces it) -> wbg with pool share = remaining room / cells with offered wide grants -> cold units. CellsShareThePoolInOrder rewritten (fair share, incumbent kept). |
+| F6 | `g_wbgp[c]` cleared on cell reset; all counter deltas guarded (a decrease re-baselines, offered_hz 0 for that period). |
+| F7 | Cells >= NR_SENSE_CELLS admit nothing (test with cell index 8). |
+| F8 | wbg writer cost -> `nr_sense_wbg_ring_cost` (cell resource), priced on SENSE_RING. |
+| F9 | `nr_sense_wbg_monitor_ok` includes (!sweep_generation \|\| settled). |
+| F10 | Moot: the monitor does no chest; the consumer books `nr_sense_wbg_cost` after every tap that ran. |
+| F12 | New tests: site conditions (class, dl_auto, sweep, CRC, export), no double export (`nr_sense_wbg_after_gate`), cell reset, counter decrease, concurrent admit (8 threads x 2000 on one bucket: 4..6 admitted), cell 8, ring cost, queue/ring pricing, unit-model startup, rt test asserts published rate (125 Hz = 1.25 x 100 Hz offered; < 0.1 Hz with a tiny pool) and offered_hz / cost. |
+
+Tests [SIM VERIFIED, DGX]: unit 37 (+8 wbg), sched 62 (+10 Wbg), sched_rt 20 (+3) pass. ctest -j4: 397 tests, exactly the 16 known failures (7 Not-Run pusch_uci, qam64, qam256, ul_disc, nr_td_sim_test, ssb_rate_match_prod, gpu_pass_cells, dft_test, ldpc_cuda_pool_cpu, modulation); static_audit and test_nr_gpu_pass pass.
+
+### Replay A/B, raw_pci415_12s_b, 217 PRB, 4 RX, sensing cfg [MEASURED replay, DGX]
+Speed 1.0x (real-time ingest; the raw_iq tooling takes ISAC_RAW_IQ_SPEED=1.0), 2 arms per build:
+
+| arm | wide grants | wideband pdsch_dmrs rec/s | wide grants with >=128 PRB rs (slot+rnti) | CPU cores | scanq full+stale / queued | pdschq full+stale / queued |
+|---|---|---|---|---|---|---|
+| base b1 | 438 | 0.00 | 2.7 % | 2.41 | 0 / 17442 | 0 / 3294 |
+| base b2 | 412 | 0.00 | 2.9 % | 2.53 | 0 / 17542 | 0 / 4213 |
+| new n1 | 465 | 1.22 | 3.0 % | 2.49 | 0 / 17513 | 0 / 3543 |
+| new n2 | 452 | 2.43 | 7.5 % | 2.53 | 0 / 17486 | 0 / 3444 |
+
+SNR p10/p50/p90 of the new wideband records: 7.2/8.4/16.2 and 6.4/8.3/16.6 (base has none at 1.0x). Scan and PDSCH queue full and stale drops: 0 in all four arms, so the new tap does not raise drops at 1.0x. CPU: new 2.49/2.53 vs base 2.41/2.53 (inside the spread).
+The gain is small at 1.0x because the run is 12 s long and the first decision (that publishes a measured rate) comes only after ~8 s: until then the startup rate is 1 tap/4 s (+ bucket of 4). In n1/n2 offered 55/72 and admitted 17/33. This is the price of "never unlimited" in a short run; on a long OTA run the startup lasts one 4 s interval.
+Tap cost 330-430 us (higher than before at real-time load), writer cost 74-79 us per wbg record.
+
+Speed 0.25x, new build, 2 arms (same capture as round 0; base arms bS1/bS2 from round 0 are unchanged code): f2: 491 wide grants, 3.88 wideband rec/s, 11.2 % of wide grants with a >=128 PRB rs record (23.6 % with any), SNR 7.1/8.9/16.2, CPU 2.14, scan and pdschq drops 0/0. f1: INVALID run (the replay produced only 6 wide grants: the receiver did not hold sync on that run; not used). So at 0.25x: 3.9 rec/s and 11 % vs round 0's 7 rec/s and 19 % before the fixes, against base 0.18-1.39 rec/s and 0.4-8.3 %. The loss against round 0 is the CRC gate (F1) and the finite startup (F4) [MEASURED, n=1 valid arm; not decomposed].
+
+### s9 rfsim, sense_min_prb 96 [SIM VERIFIED, 150 s, 4 RX, one arm each]
+base: ssb 9582, csirs 799, pdsch_dmrs 14649, pdsch_data 3381, 0 records with valid_cfr_prbs 0, violations 0. new: ssb 9609, csirs 801, pdsch_dmrs 15342, pdsch_data 3381, 0 records with valid_cfr_prbs 0 (was 1 before F1), violations 0; wbg offered 641, admitted 107, taps 107, 112 us per tap.
+
+### Concerns
+1. At 1.0x the 12 s capture is mostly startup; the benefit of the measured-rate regime is only seen at 0.25x (3.9 rec/s). A longer real-time capture or an OTA run is needed to show the steady state.
+2. F1 and F4 cost coverage (about 11 % vs 19 % of wide grants at 0.25x, n=1 valid arm).
+3. The cold-unit-last ordering changes admission order only when a cold unit would have outranked a warm one; existing sched tests pass unchanged except two rewritten Wbg tests.
+4. Hold time under g_phase2_mu is argued by code read (one CAS), not measured: no LOCKHOLD line exists in these logs.
+5. Mean tap cost is still compared with p99 budgets; the unit-model startup estimate is rough (p99 bucket CPU divided by messages per bucket).
