@@ -23,7 +23,7 @@ __attribute__((weak)) int nr_gpu_pass_active(void);
 __attribute__((weak)) int nr_isac_pdsch_data_aided_workers(void);
 
 static const char *const k_res_name[NR_RES_N] = {"pool", "queue_dl", "queue_ul", "gpu", "sense_ring", "da"};
-const char *nr_sense_res_name(int r) { return (unsigned)r < NR_RES_N ? k_res_name[r] : "?"; }
+const char *nr_sense_res_name(int r) { return (unsigned)r < NR_RES_N ? k_res_name[r] : "none"; }
 
 /* Process-wide: there is one scheduler thread (it serves every cell). The state is touched by that thread (or by a test calling step() alone). */
 static nr_sense_sched_state_t g_st;
@@ -251,8 +251,8 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
     nr_sense_unit_cell_stats(c, &cs);
     viol += cs.violations; skips += cs.skips; en += cs.units_enabled; drops += sm->ring_drops[c];
   }
-  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s admitted=%d [%s] t_cell=[%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_ul_base=unmeasured gpu_base=unmeasured\n",
-        (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), out->n_admitted, set, tc, en,
+  LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s top=%s elig=%d cold_deferred=%d admitted=%d [%s] t_cell=[%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_ul_base=unmeasured gpu_base=unmeasured\n",
+        (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), nr_sense_res_name((int)out->top), out->n_elig, out->cold_deferred, out->n_admitted, set, tc, en,
         (unsigned long)viol, (unsigned long)skips, (unsigned long)drops, sm->res[NR_RES_POOL].cap_ns * 1e-6, sm->res[NR_RES_POOL].base_p99_ns * 1e-6); /* per 50 ms bucket */
   {
     int steps[SENSE_FLOOR_MAX_STEPS];

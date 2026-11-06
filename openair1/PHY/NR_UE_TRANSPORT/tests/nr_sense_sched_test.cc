@@ -276,8 +276,8 @@ TEST(Sched, NewUnitWithoutCfrIsNotDisabled)
 {
   H h(1, 1000); auto &u = h.add(0, 1, 5); u.enabled = true; u.n_cfr = 0; u.valid_ratio = 0;
   EXPECT_TRUE(nr_sense_unit_eligible(&u, NOW));
-  h.steps(6);
-  EXPECT_TRUE(h.en(0, 1)); /* unknown ratio is not a bad ratio */
+  h.steps(3);
+  EXPECT_TRUE(h.en(0, 1)); /* unknown ratio is not a bad ratio (a full window without any record is: SchedGate F1) */
   h.find(0, 1)->n_cfr = 5; h.find(0, 1)->valid_ratio = 0.1f; /* CFRs below the floor */
   h.step(); EXPECT_TRUE(h.en(0, 1));
   h.step(); EXPECT_FALSE(h.en(0, 1));
@@ -604,4 +604,160 @@ TEST(Floor, PerCellIndependentAndPublished)
   EXPECT_EQ(nr_sense_cell_floor(1), 48);
   EXPECT_EQ(nr_sense_cell_floor(0), nr_isac_sense_min_prb());
   nr_sense_cell_floor_reset();
+}
+
+/* ---- SENSE_SCHED gating fix (SENSE-SCHED-GATING-20261106 F1-F4) ---- */
+static void tick(H &h) { h.in.now_ns += 4 * S; h.step(); } /* one decision period later */
+static nr_sense_unit_view_t &zero_yield(H &h, uint16_t rnti, nr_unit_src_t s, float wb, float cpu = 5)
+{
+  auto &u = h.add(0, rnti, cpu, s);
+  u.wb_rate_hz = wb; u.rate_hz = wb; u.n_cfr = 0; u.last_cfr_ns = 0; u.valid_ratio = 0; u.last_valid_wb_ns = 0; u.est_usable_prbs = 128;
+  return u;
+}
+
+TEST(SchedGate, F1ZeroYieldSrsIsShedAndReprobedWithBackoff)
+{
+  H h(1, 100);
+  zero_yield(h, 0, NR_UNIT_SRS, 600);
+  std::vector<int> on;
+  for (int i = 0; i < 80; i++) { tick(h); on.push_back(h.en(0, 0, NR_UNIT_SRS)); }
+  int rise = 0, first_off = -1;
+  for (int i = 0; i < 80; i++) {
+    if (on[i] && (i == 0 || !on[i - 1])) rise++;
+    if (first_off < 0 && i && on[i - 1] && !on[i]) first_off = i;
+  }
+  EXPECT_TRUE(on[2]);                          /* enabled at once: an unprobed source is not penalised */
+  ASSERT_GT(first_off, 0);
+  EXPECT_LE(first_off, 2 + SENSE_WIN_DECISIONS + SENSE_CONFIRM + 1); /* gone after one window + confirm */
+  int off_run = 0;
+  for (int i = first_off; i < 80 && !on[i]; i++) off_run++;
+  EXPECT_GE(off_run, SENSE_REPROBE_BASE);      /* the existing back-off */
+  EXPECT_GE(rise, 3);                          /* ... and it is probed again, periodically */
+  EXPECT_FALSE(on[first_off + 1]);
+}
+
+TEST(SchedGate, F1RareSourceIsReprobedAndKeepsRecords)
+{
+  H h(1, 100);
+  zero_yield(h, 0, NR_UNIT_SRS, 600);
+  int t = 0;
+  bool seen_off = false;
+  for (; t < 60; t++) { tick(h); if (t > 3 && !h.en(0, 0, NR_UNIT_SRS)) seen_off = true; if (seen_off && h.en(0, 0, NR_UNIT_SRS)) break; }
+  ASSERT_TRUE(seen_off); ASSERT_TRUE(h.en(0, 0, NR_UNIT_SRS)); /* demoted, then re-probed */
+  for (int i = 0; i < 30; i++) { /* a record every 3rd decision (one per 12 s: rare, below the window) */
+    if (i % 3 == 0) { auto *u = h.find(0, 0, NR_UNIT_SRS); u->n_cfr++; u->last_cfr_ns = h.in.now_ns; u->valid_ratio = 0.9f; u->last_valid_wb_ns = h.in.now_ns; }
+    tick(h);
+    EXPECT_TRUE(h.en(0, 0, NR_UNIT_SRS)) << "decision " << i;
+  }
+}
+
+/* known zero-ratio PUSCH rows of the cell: the prior of a new PUSCH RNTI is the floor */
+static void known_dead_pusch(H &h)
+{
+  for (uint16_t r = 900; r < 903; r++) { auto &u = h.add(0, r, 0, NR_UNIT_PUSCH_DMRS); u.valid_ratio = 0.0f; u.n_cfr = 5; u.wb_rate_hz = 3; }
+}
+
+TEST(SchedGate, F2NewPuschRntiPricedAtSourcePrior)
+{
+  H h(1, 100);
+  known_dead_pusch(h);
+  auto &p = h.add(0, 17, 0, NR_UNIT_PDSCH_DMRS); p.n_cfr = 0; p.last_cfr_ns = 0; p.wb_rate_hz = 10; p.valid_ratio = 0; p.last_valid_wb_ns = 0; /* never probed: prior 1.0 */
+  auto &q = h.add(0, 18, 0, NR_UNIT_PUSCH_DMRS); q.n_cfr = 0; q.last_cfr_ns = 0; q.wb_rate_hz = 40; q.valid_ratio = 0; q.last_valid_wb_ns = 0;   /* 40 x 0.2 = 8 < 10 x 1.0 */
+  h.step();
+  ASSERT_GE(h.out.n_admitted, 1);
+  EXPECT_EQ(h.out.admitted[0].rnti, 17); EXPECT_EQ(h.out.admitted[0].src, NR_UNIT_PDSCH_DMRS);
+  EXPECT_EQ(h.out.admitted[0].val, h.out.admitted[0].val); /* finite */
+}
+
+TEST(SchedGate, F2SrsUsesTheCellFloorNotTheEstimate)
+{
+  H h(1, 100);
+  auto &s = h.add(0, 0, 10, NR_UNIT_SRS); s.wb_rate_hz = 10; s.valid_ratio = 0.8f; s.est_usable_prbs = 400;
+  h.step();
+  ASSERT_EQ(h.out.n_admitted, 1);
+  EXPECT_NEAR(h.out.admitted[0].val, 10 * 0.8 * 128, 1e-3);
+}
+
+TEST(SchedGate, F3PendingUnitKeepsTheColdSlot)
+{
+  H h(1, 100);
+  auto &p = h.add(0, 17, 0, NR_UNIT_PDSCH_DMRS); p.n_cfr = 0; p.last_cfr_ns = 0; p.wb_rate_hz = 10; p.valid_ratio = 0;
+  h.step();
+  EXPECT_EQ(h.out.admitted[0].rnti, 17); EXPECT_FALSE(h.en(0, 17));
+  auto &q = h.add(0, 18, 0, NR_UNIT_PUSCH_DMRS); q.n_cfr = 0; q.last_cfr_ns = 0; q.wb_rate_hz = 400; q.valid_ratio = 0; /* a better cold unit appears */
+  h.step();
+  EXPECT_TRUE(h.en(0, 17));  /* confirmed: it is not cold any more */
+}
+
+TEST(SchedGate, HighYieldSrsStillBeatsLowYieldPdsch)
+{
+  H h(1, 100); /* the pool holds one of them */
+  auto &s = h.add(0, 0, 40, NR_UNIT_SRS); s.wb_rate_hz = 300; s.valid_ratio = 0.9f; s.n_cfr = 200;
+  auto &p = h.add(0, 17, 40, NR_UNIT_PDSCH_DMRS); p.wb_rate_hz = 10; p.valid_ratio = 0.4f;
+  h.steps(4);
+  EXPECT_TRUE(h.en(0, 0, NR_UNIT_SRS)); EXPECT_FALSE(h.en(0, 17));
+}
+
+TEST(SchedGate, F4Counters)
+{
+  H h(1, 100);
+  for (uint16_t r = 1; r <= 3; r++) { auto &u = h.add(0, r, 0); u.n_cfr = 0; u.last_cfr_ns = 0; u.valid_ratio = 0; }
+  h.step();
+  EXPECT_EQ(h.out.n_elig, 3);
+  EXPECT_EQ(h.out.cold_deferred, 2);
+  EXPECT_EQ(h.out.binding, NR_RES_N); /* nothing rejected */
+  EXPECT_LT(h.out.top, NR_RES_N);
+  H g(1, 100);
+  for (uint16_t r = 1; r <= 4; r++) g.add(0, r, 25);
+  g.steps(4);
+  EXPECT_EQ(g.out.binding, NR_RES_POOL); EXPECT_EQ(g.out.top, g.out.top);
+}
+
+/* Replay of 923 S1 (sp_ota_20261105_225342, [OTA LOW LOAD, DGX GB10, 4 RX], cell 923 only): the first decisions as logged in SENSE_SCHED / SENSE_UNITS.
+ * SRS wb ~600 with no CFR, PDSCH wb as logged (decaying to 0 by decision 7), one fresh PUSCH-DMRS RNTI per decision with value = logged admitted value (wb = val / (0.2 x 128 x 2)). */
+struct RRow { uint16_t rnti; nr_unit_src_t src; float wb; };
+TEST(SchedGate, Replay923S1AdmitsAndConfirmsPdschWithinThreeDecisions)
+{
+  const nr_unit_src_t D = NR_UNIT_PDSCH_DMRS, A = NR_UNIT_PDSCH_DATA, P = NR_UNIT_PUSCH_DMRS;
+  const std::vector<std::vector<RRow>> tab = {
+    /* 1 */ {},
+    /* 2 */ {{23144, D, 2.4f}, {23144, A, 0}, {18356, D, 8.0f}, {18356, A, 249.1f}},
+    /* 3 */ {{23144, D, 4.9f}, {23144, A, 0}, {18356, D, 13.6f}, {18356, A, 30.3f}, {22590, D, 13.9f}},
+    /* 4 */ {{23144, D, 4.1f}, {18356, D, 7.5f}, {18356, A, 15.6f}, {22590, D, 10.9f}, {19216, P, 35.1f}},
+    /* 5 */ {{23144, D, 3.1f}, {18356, D, 5.2f}, {18356, A, 10.5f}, {22590, D, 11.5f}, {19216, P, 19.1f}},
+    /* 6 */ {{23144, D, 2.4f}, {18356, D, 3.7f}, {18356, A, 4.6f}, {22590, D, 11.0f}, {23144, P, 1.1f}, {17942, P, 28.6f}},
+    /* 7 */ {{23144, D, 0.8f}, {22590, D, 11.0f}, {23144, P, 0.5f}, {17942, P, 19.1f}},
+    /* 8 */ {{22590, D, 3.0f}, {23144, P, 0.3f}, {20398, P, 14.6f}},
+    /* 9 */ {{22590, D, 1.0f}, {23144, P, 0.4f}, {18210, P, 21.1f}},
+    /* 10 */ {{23144, P, 0.1f}, {18382, P, 18.4f}},
+  };
+  H h(1, 300e6f);
+  h.in.res[NR_RES_POOL].base_p99_ns = 170e6f;
+  h.in.res[NR_RES_QUEUE_UL].cap_ns = 20e6f;
+  int first_adm = 0, first_en = 0;
+  for (size_t d = 1; d <= tab.size(); d++) {
+    h.v[0].clear();
+    h.in.now_ns = NOW + d * 4 * S;
+    std::vector<nr_sense_unit_view_t> keep;
+    auto &srs = zero_yield(h, 0, NR_UNIT_SRS, 598, d >= 3 ? 2.7e6f : 0);
+    srs.wait_p99_ns = d >= 3 ? 1.2e6f : 0; srs.first_ns = NOW; srs.enabled = d >= 3;
+    for (auto &r : tab[d - 1]) {
+      auto &u = zero_yield(h, r.rnti, r.src, r.wb, 0);
+      u.first_ns = NOW; u.enabled = false;
+    }
+    /* carry the decision of the previous step (S7 applies st->enabled) */
+    for (auto &u : h.v[0])
+      for (int sl = 0; sl < NR_SENSE_SLOTS; sl++)
+        if (u.rnti == 0 ? sl == 0 : h.st.rnti[0][sl] == u.rnti) u.enabled = h.st.enabled[0][sl][u.src];
+    h.step();
+    bool adm = false;
+    for (int i = 0; i < h.out.n_admitted && i < NR_SENSE_ADMIT_LOG; i++) adm = adm || h.out.admitted[i].src == D || h.out.admitted[i].src == A;
+    bool en = false;
+    for (auto &u : h.v[0]) en = en || ((u.src == D || u.src == A) && u.enabled);
+    if (adm && !first_adm) first_adm = (int)d;
+    if (en && !first_en) first_en = (int)d;
+  }
+  ASSERT_GT(first_adm, 0);
+  ASSERT_GT(first_en, 0) << "a PDSCH unit was admitted at decision " << first_adm << " but never confirmed";
+  EXPECT_LE(first_en - first_adm + 1, 3);
 }
