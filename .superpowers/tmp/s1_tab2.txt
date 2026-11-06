@@ -1,0 +1,124 @@
+
+### cell 415
+base ['s1_415B1', 's1_415B2', 's1_415B3', 's1_415B4', 's1_415B5']
+fix ['s1_415N1', 's1_415N2', 's1_415N3', 's1_415N4', 's1_415N5']
+| metric | BASE | NEW |
+|---|---|---|
+| wide dec/s | 97.65 (45.27-151.68) | 72.48 (29.99-167.71) |
+| wide TB crc-ok/s | 41.78 (26.16-65.14) | 40.23 (13.08-122.44) |
+| wide partial-TB proven/s | 5.63 (2.57-8.38) | 4.75 (2.69-7.86) |
+| wide proven/s | 47.41 (34.53-67.92) | 44.98 (15.77-130.30) |
+| dmrs rec/s | 77.44 (18.56-163.46) | 347.12 (278.12-567.68) |
+| dmrs nb>=128 /s | 36.78 (9.00-68.87) | 64.92 (16.96-203.18) |
+| dmrs valid>=128 /s | 35.18 (8.95-64.40) | 62.92 (16.72-197.17) |
+| proven wide w/ dmrs-or-data rec | 0.548 (0.196-0.784) | 1.000 (1.000-1.000) |
+| proven wide w/ >=128 valid | 0.355 (0.135-0.512) | 0.732 (0.658-0.857) |
+| data rec/s | 24.84 (9.73-35.90) | 368.31 (328.04-454.51) |
+| data whole/s | 24.84 (9.73-35.90) | 357.71 (315.06-446.87) |
+| data partial/s | 0.00 (0.00-0.00) | 10.60 (6.68-14.44) |
+| data valid>=128 /s | 2.72 (0.94-6.58) | 29.38 (7.24-106.22) |
+| avail PDSCH 25ms | 0.147 (0.061-0.297) | 0.267 (0.115-0.638) |
+| avail PDSCH 100ms | 0.246 (0.133-0.480) | 0.401 (0.218-0.803) |
+| avail PDSCH 1s | 0.617 (0.436-0.875) | 0.749 (0.629-0.986) |
+| avail ALL 25ms | 0.147 (0.061-0.297) | 0.267 (0.115-0.638) |
+| avail ALL 100ms | 0.246 (0.133-0.480) | 0.401 (0.218-0.803) |
+| avail ALL 1s | 0.617 (0.436-0.875) | 0.749 (0.629-0.986) |
+| lat all p50 us | 1711.40 (1233.00-2396.00) | 948.40 (751.00-1126.00) |
+| lat all p99 us | 11152.24 (6184.50-18218.64) | 7861.74 (5442.96-10490.00) |
+| lat wide p50 us | 2596.40 (1517.00-4121.00) | 2832.20 (1377.00-4021.00) |
+| lat wide p99 us | 12817.33 (6953.88-20700.04) | 14298.17 (6723.45-21914.16) |
+| cpu cores | 7.27 (6.79-7.61) | 7.45 (7.22-7.71) |
+
+per-run:
+s1_415B1 base wide/s 86.3 crc/s 26.2 part/s 8.4 | per-wide-grant: dmrs_v128 0.104 data_v128 0.011 | dmrs/s 18.6 v128 8.95 | match any 0.196 v128 0.135 | est {'none': 3932} | partial_tb dmrs 0 | funnel {'none': 5883, 'lt128': 443, 'v128': 988} | cpu 6.789 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336042, 'scanq_drop_full': 50, 'scanq_drop_stale': 140, 'pdschq_queued': 55573, 'pdschq_drop_stale': 2947, 'sense_cfr_drop': 5, 'sense_async_drop_pdsch_data': 1, 'sense_async_queued_pdsch_data': 1661, 'sense_cfr_exported_pdsch_dmrs': 3923, 'sense_cfr_exported_pdsch_data': 3252, 'sense_rec_count': 765029} 
+   tap None
+s1_415N1 fix wide/s 30.0 crc/s 13.1 part/s 2.7 | per-wide-grant: dmrs_v128 0.557 data_v128 0.325 | dmrs/s 278.1 v128 16.72 | match any 1.000 v128 0.711 | est {'decoder': 42392, 'decoder_seg': 16065, 'own': 16} | partial_tb dmrs 1156 | funnel {'v128': 2357, 'lt128': 959} | cpu 7.219 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336097, 'scanq_drop_full': 118, 'scanq_drop_stale': 1097, 'pdschq_queued': 65767, 'pdschq_drop_stale': 312, 'sense_cfr_drop': 189, 'sense_cfr_drop_pdsch_dmrs': 6, 'sense_cfr_drop_pdsch_data': 15, 'sense_async_drop_pdsch_data': 159, 'sense_async_queued_pdsch_data': 41752, 'sense_cfr_exported_pdsch_dmrs': 58414, 'sense_cfr_exported_pdsch_data': 95451, 'sense_rec_count': 1422974} 
+   tap decoder_estimate=57985 own_fep_chest=16 | exact=42033 seg=15952 band=0 nodec=2 pass_noest=0 gw=0 single_branch=0 seg_cpu=14 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+s1_415N2 fix wide/s 66.7 crc/s 21.7 part/s 5.8 | per-wide-grant: dmrs_v128 0.552 data_v128 0.227 | dmrs/s 284.1 v128 36.80 | match any 1.000 v128 0.691 | est {'decoder_seg': 31778, 'decoder': 28917, 'own': 350} | partial_tb dmrs 2177 | funnel {'v128': 4080, 'lt128': 1828} | cpu 7.424 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336048, 'scanq_drop_full': 984, 'scanq_drop_stale': 3926, 'pdschq_queued': 76573, 'pdschq_drop_stale': 3506, 'sense_cfr_drop': 42, 'sense_cfr_drop_pdsch_dmrs': 3, 'sense_cfr_drop_pdsch_data': 10, 'sense_async_drop_pdsch_data': 1179, 'sense_async_queued_pdsch_data': 33766, 'sense_cfr_exported_pdsch_dmrs': 60685, 'sense_cfr_exported_pdsch_data': 72735, 'sense_rec_count': 1155966} 
+   tap decoder_estimate=60651 own_fep_chest=350 | exact=28876 seg=31775 band=0 nodec=33 pass_noest=0 gw=0 single_branch=0 seg_cpu=317 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+s1_415B2 base wide/s 104.7 crc/s 30.0 part/s 7.5 | per-wide-grant: dmrs_v128 0.180 data_v128 0.015 | dmrs/s 46.0 v128 18.81 | match any 0.350 v128 0.233 | est {'none': 9886} | partial_tb dmrs 0 | funnel {'none': 5240, 'v128': 1881, 'lt128': 941} | cpu 7.608 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336064, 'scanq_drop_full': 41, 'scanq_drop_stale': 125, 'pdschq_queued': 65280, 'pdschq_drop_stale': 3494, 'sense_async_drop_pdsch_data': 1, 'sense_async_queued_pdsch_data': 1048, 'sense_cfr_exported_pdsch_dmrs': 9605, 'sense_cfr_exported_pdsch_data': 2036, 'sense_rec_count': 778505} 
+   tap None
+s1_415N3 fix wide/s 60.7 crc/s 29.9 part/s 3.2 | per-wide-grant: dmrs_v128 0.693 data_v128 0.119 | dmrs/s 297.7 v128 42.06 | match any 1.000 v128 0.741 | est {'decoder_seg': 30807, 'own': 212, 'decoder': 32842} | partial_tb dmrs 1292 | funnel {'v128': 5260, 'lt128': 1835} | cpu 7.412 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336068, 'scanq_drop_full': 526, 'scanq_drop_stale': 2540, 'pdschq_queued': 73995, 'pdschq_drop_stale': 3496, 'sense_cfr_drop': 12, 'sense_cfr_drop_pdsch_dmrs': 2, 'sense_async_drop_pdsch_data': 387, 'sense_async_queued_pdsch_data': 32928, 'sense_cfr_exported_pdsch_dmrs': 62868, 'sense_cfr_exported_pdsch_data': 70606, 'sense_rec_count': 1217120} 
+   tap decoder_estimate=63289 own_fep_chest=212 | exact=32660 seg=30629 band=0 nodec=36 pass_noest=0 gw=0 single_branch=0 seg_cpu=176 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+s1_415B3 base wide/s 100.3 crc/s 65.1 part/s 2.8 | per-wide-grant: dmrs_v128 0.623 data_v128 0.026 | dmrs/s 117.2 v128 62.44 | match any 0.784 v128 0.512 | est {'none': 25235} | partial_tb dmrs 0 | funnel {'v128': 7491, 'lt128': 3972, 'none': 3158} | cpu 7.419 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336071, 'scanq_drop_full': 16, 'scanq_drop_stale': 165, 'pdschq_queued': 43971, 'pdschq_drop_stale': 142, 'sense_cfr_drop': 3, 'sense_async_drop_pdsch_data': 22, 'sense_async_queued_pdsch_data': 3541, 'sense_cfr_exported_pdsch_dmrs': 24777, 'sense_cfr_exported_pdsch_data': 7135, 'sense_rec_count': 819722} 
+   tap None
+s1_415B4 base wide/s 45.3 crc/s 36.4 part/s 2.6 | per-wide-grant: dmrs_v128 0.470 data_v128 0.042 | dmrs/s 42.0 v128 21.28 | match any 0.738 v128 0.470 | est {'none': 9107} | partial_tb dmrs 0 | funnel {'none': 2214, 'v128': 3977, 'lt128': 2269} | cpu 7.571 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336044, 'scanq_drop_full': 60, 'scanq_drop_stale': 247, 'pdschq_queued': 34641, 'pdschq_drop_stale': 1519, 'sense_cfr_drop': 54, 'sense_cfr_drop_pdsch_data': 1, 'sense_async_drop_pdsch_data': 112, 'sense_async_queued_pdsch_data': 4070, 'sense_cfr_exported_pdsch_dmrs': 8842, 'sense_cfr_exported_pdsch_data': 7773, 'sense_rec_count': 883248} 
+   tap None
+s1_415N4 fix wide/s 37.4 crc/s 14.0 part/s 4.2 | per-wide-grant: dmrs_v128 0.585 data_v128 0.230 | dmrs/s 308.0 v128 21.87 | match any 1.000 v128 0.658 | est {'decoder': 35517, 'decoder_seg': 30906, 'own': 216} | partial_tb dmrs 2594 | funnel {'lt128': 1351, 'v128': 2597} | cpu 7.503 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336062, 'scanq_drop_full': 65, 'scanq_drop_stale': 2334, 'pdschq_queued': 82642, 'pdschq_drop_stale': 928, 'sense_cfr_drop': 22, 'sense_cfr_drop_pdsch_dmrs': 1, 'sense_cfr_drop_pdsch_data': 4, 'sense_async_drop_pdsch_data': 98, 'sense_async_queued_pdsch_data': 30187, 'sense_cfr_exported_pdsch_dmrs': 65325, 'sense_cfr_exported_pdsch_data': 69162, 'sense_rec_count': 1250022} 
+   tap decoder_estimate=66285 own_fep_chest=216 | exact=35407 seg=30878 band=0 nodec=11 pass_noest=0 gw=0 single_branch=0 seg_cpu=205 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+s1_415B5 base wide/s 151.7 crc/s 51.2 part/s 7.0 | per-wide-grant: dmrs_v128 0.425 data_v128 0.043 | dmrs/s 163.5 v128 64.40 | match any 0.673 v128 0.425 | est {'none': 35388} | partial_tb dmrs 0 | funnel {'none': 4119, 'v128': 5348, 'lt128': 3118} | cpu 6.978 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336110, 'scanq_drop_full': 40, 'scanq_drop_stale': 64, 'pdschq_queued': 76042, 'pdschq_drop_stale': 2503, 'sense_cfr_drop': 6, 'sense_cfr_drop_pdsch_dmrs': 5, 'sense_async_drop_pdsch_data': 153, 'sense_async_queued_pdsch_data': 3204, 'sense_cfr_exported_pdsch_dmrs': 34390, 'sense_cfr_exported_pdsch_data': 5900, 'sense_rec_count': 938569} 
+   tap None
+s1_415N5 fix wide/s 167.7 crc/s 122.4 part/s 7.9 | per-wide-grant: dmrs_v128 1.176 data_v128 0.633 | dmrs/s 567.7 v128 197.17 | match any 1.000 v128 0.857 | est {'decoder_seg': 59928, 'decoder': 62034, 'own': 186} | partial_tb dmrs 4796 | funnel {'v128': 24041, 'lt128': 3996} | cpu 7.705 RX_EXIT=130 pci ['415']
+   drops {'scanq_queued': 336110, 'scanq_drop_full': 80, 'scanq_drop_stale': 2076, 'pdschq_queued': 124912, 'pdschq_drop_stale': 592, 'sense_cfr_drop': 12, 'sense_async_drop_pdsch_data': 9180, 'sense_async_queued_pdsch_data': 53336, 'sense_cfr_exported_pdsch_dmrs': 119683, 'sense_cfr_exported_pdsch_data': 79137, 'sense_rec_count': 1588530} 
+   tap decoder_estimate=121815 own_fep_chest=186 | exact=61926 seg=59889 band=0 nodec=19 pass_noest=0 gw=0 single_branch=0 seg_cpu=167 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+
+### cell 923
+base ['s1_923B1', 's1_923B2', 's1_923B3', 's1_923B4', 's1_923B5']
+fix ['s1_923N1', 's1_923N2', 's1_923N3', 's1_923N4', 's1_923N5']
+| metric | BASE | NEW |
+|---|---|---|
+| wide dec/s | 13.92 (11.77-18.15) | 12.74 (4.40-25.59) |
+| wide TB crc-ok/s | 3.61 (0.43-8.63) | 4.58 (1.26-11.79) |
+| wide partial-TB proven/s | 0.95 (0.80-1.34) | 1.29 (0.31-2.87) |
+| wide proven/s | 4.56 (1.24-9.47) | 5.87 (1.57-14.66) |
+| dmrs rec/s | 41.00 (7.44-84.39) | 247.67 (185.00-318.10) |
+| dmrs nb>=128 /s | 3.83 (1.91-5.45) | 12.64 (4.05-26.51) |
+| dmrs valid>=128 /s | 3.01 (1.31-4.81) | 10.33 (2.71-21.87) |
+| proven wide w/ dmrs-or-data rec | 0.424 (0.187-0.569) | 1.000 (1.000-1.000) |
+| proven wide w/ >=128 valid | 0.328 (0.144-0.453) | 0.864 (0.820-0.920) |
+| data rec/s | 43.10 (0.66-113.59) | 406.51 (309.34-467.62) |
+| data whole/s | 43.10 (0.66-113.59) | 398.07 (301.49-459.05) |
+| data partial/s | 0.00 (0.00-0.00) | 8.44 (2.99-16.68) |
+| data valid>=128 /s | 0.50 (0.00-1.31) | 5.04 (1.58-16.07) |
+| avail PDSCH 25ms | 0.037 (0.017-0.058) | 0.108 (0.038-0.246) |
+| avail PDSCH 100ms | 0.107 (0.049-0.170) | 0.251 (0.091-0.523) |
+| avail PDSCH 1s | 0.480 (0.228-0.737) | 0.710 (0.417-0.967) |
+| avail ALL 25ms | 0.636 (0.629-0.644) | 0.663 (0.639-0.716) |
+| avail ALL 100ms | 0.996 (0.995-0.998) | 0.995 (0.992-0.997) |
+| avail ALL 1s | 0.999 (0.995-1.000) | 0.997 (0.995-1.000) |
+| lat all p50 us | 984.40 (835.00-1180.00) | 731.20 (708.00-787.00) |
+| lat all p99 us | 7211.76 (4770.08-11369.96) | 3525.97 (2637.95-4257.04) |
+| lat wide p50 us | 1798.10 (1643.00-1989.00) | 1744.40 (1553.00-1973.00) |
+| lat wide p99 us | 13049.64 (8618.32-20585.75) | 11945.18 (6902.58-17386.26) |
+| cpu cores | 7.39 (7.18-7.58) | 7.47 (7.37-7.57) |
+
+per-run:
+s1_923B1 base wide/s 13.5 crc/s 2.8 part/s 0.9 | per-wide-grant: dmrs_v128 0.324 data_v128 0.047 | dmrs/s 84.4 v128 4.37 | match any 0.510 v128 0.390 | est {'none': 18320} | partial_tb dmrs 0 | funnel {'v128': 315, 'lt128': 97, 'none': 396} | cpu 7.578 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336048, 'scanq_drop_full': 10, 'scanq_drop_stale': 39, 'pdschq_queued': 72610, 'pdschq_drop_stale': 153, 'sense_async_drop_pdsch_data': 14, 'sense_async_queued_pdsch_data': 12100, 'sense_cfr_exported_pdsch_dmrs': 17808, 'sense_cfr_exported_pdsch_data': 24010, 'sense_rec_count': 308529} 
+   tap None
+s1_923N1 fix wide/s 4.4 crc/s 1.3 part/s 0.3 | per-wide-grant: dmrs_v128 0.615 data_v128 0.385 | dmrs/s 266.8 v128 2.71 | match any 1.000 v128 0.820 | est {'decoder': 51041, 'decoder_seg': 4879, 'own': 792, 'decoder_band': 2} | partial_tb dmrs 725 | funnel {'v128': 273, 'lt128': 60} | cpu 7.514 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336049, 'scanq_drop_full': 130, 'scanq_drop_stale': 874, 'pdschq_queued': 94097, 'pdschq_drop_stale': 94, 'sense_async_drop_pdsch_data': 47, 'sense_async_queued_pdsch_data': 46244, 'sense_cfr_exported_pdsch_dmrs': 55958, 'sense_cfr_exported_pdsch_data': 94563, 'sense_rec_count': 824869} 
+   tap decoder_estimate=55711 own_fep_chest=790 | exact=50848 seg=4861 band=2 nodec=32 pass_noest=0 gw=0 single_branch=0 seg_cpu=758 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+s1_923N2 fix wide/s 6.9 crc/s 3.1 part/s 0.6 | per-wide-grant: dmrs_v128 0.735 data_v128 0.525 | dmrs/s 279.0 v128 5.10 | match any 1.000 v128 0.878 | est {'decoder': 52213, 'decoder_seg': 7207, 'own': 923, 'decoder_band': 6} | partial_tb dmrs 1005 | funnel {'lt128': 98, 'v128': 705} | cpu 7.421 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336042, 'scanq_drop_stale': 385, 'pdschq_queued': 93090, 'pdschq_drop_stale': 185, 'sense_async_drop_pdsch_data': 45, 'sense_async_queued_pdsch_data': 48693, 'sense_cfr_exported_pdsch_dmrs': 58779, 'sense_cfr_exported_pdsch_data': 98785, 'sense_rec_count': 822735} 
+   tap decoder_estimate=59083 own_fep_chest=918 | exact=51886 seg=7191 band=6 nodec=36 pass_noest=0 gw=0 single_branch=0 seg_cpu=882 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+s1_923B2 base wide/s 18.1 crc/s 8.6 part/s 0.8 | per-wide-grant: dmrs_v128 0.265 data_v128 0.072 | dmrs/s 65.7 v128 4.81 | match any 0.569 v128 0.357 | est {'none': 14129} | partial_tb dmrs 0 | funnel {'none': 878, 'lt128': 431, 'v128': 728} | cpu 7.511 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336048, 'scanq_drop_full': 37, 'scanq_drop_stale': 33, 'pdschq_queued': 61731, 'pdschq_drop_stale': 465, 'sense_async_drop_pdsch_data': 4, 'sense_async_queued_pdsch_data': 6971, 'sense_cfr_exported_pdsch_dmrs': 13732, 'sense_cfr_exported_pdsch_data': 10723, 'sense_rec_count': 254978} 
+   tap None
+s1_923N3 fix wide/s 25.6 crc/s 11.8 part/s 2.9 | per-wide-grant: dmrs_v128 0.855 data_v128 0.628 | dmrs/s 318.1 v128 21.87 | match any 1.000 v128 0.866 | est {'decoder_seg': 8111, 'decoder': 58100, 'own': 932} | partial_tb dmrs 2101 | funnel {'lt128': 415, 'v128': 2680} | cpu 7.480 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336049, 'scanq_drop_full': 298, 'scanq_drop_stale': 2583, 'pdschq_queued': 102894, 'pdschq_drop_stale': 380, 'sense_async_drop_pdsch_data': 761, 'sense_async_queued_pdsch_data': 51287, 'sense_cfr_exported_pdsch_dmrs': 66950, 'sense_cfr_exported_pdsch_data': 96796, 'sense_rec_count': 844192} 
+   tap decoder_estimate=66072 own_fep_chest=929 | exact=57968 seg=8104 band=0 nodec=98 pass_noest=0 gw=0 single_branch=0 seg_cpu=831 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+s1_923B3 base wide/s 13.6 crc/s 2.8 part/s 1.3 | per-wide-grant: dmrs_v128 0.096 data_v128 0.000 | dmrs/s 7.4 v128 1.31 | match any 0.187 v128 0.144 | est {'none': 1603} | partial_tb dmrs 0 | funnel {'lt128': 38, 'v128': 129, 'none': 728} | cpu 7.284 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336029, 'scanq_drop_stale': 68, 'pdschq_queued': 51581, 'pdschq_drop_stale': 406, 'sense_async_queued_pdsch_data': 70, 'sense_cfr_exported_pdsch_dmrs': 1345, 'sense_cfr_exported_pdsch_data': 142, 'sense_rec_count': 180387} 
+   tap None
+s1_923B4 base wide/s 11.8 crc/s 3.4 part/s 0.9 | per-wide-grant: dmrs_v128 0.140 data_v128 0.047 | dmrs/s 30.3 v128 1.65 | match any 0.341 v128 0.296 | est {'none': 6517} | partial_tb dmrs 0 | funnel {'none': 598, 'v128': 269, 'lt128': 41} | cpu 7.395 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336046, 'scanq_drop_stale': 25, 'pdschq_queued': 52957, 'pdschq_drop_stale': 175, 'sense_async_drop_pdsch_data': 3, 'sense_async_queued_pdsch_data': 4137, 'sense_cfr_exported_pdsch_dmrs': 5951, 'sense_cfr_exported_pdsch_data': 10325, 'sense_rec_count': 252651} 
+   tap None
+s1_923N4 fix wide/s 19.1 crc/s 5.0 part/s 1.6 | per-wide-grant: dmrs_v128 0.867 data_v128 0.083 | dmrs/s 185.0 v128 16.57 | match any 1.000 v128 0.836 | est {'decoder': 28500, 'own': 917, 'decoder_seg': 10340, 'decoder_band': 1} | partial_tb dmrs 732 | funnel {'v128': 1185, 'lt128': 232} | cpu 7.371 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336034, 'scanq_drop_full': 34, 'scanq_drop_stale': 107, 'pdschq_queued': 73274, 'pdschq_drop_stale': 223, 'sense_async_drop_pdsch_data': 607, 'sense_async_queued_pdsch_data': 27719, 'sense_cfr_exported_pdsch_dmrs': 39497, 'sense_cfr_exported_pdsch_data': 65993, 'sense_rec_count': 526046} 
+   tap decoder_estimate=38590 own_fep_chest=911 | exact=28319 seg=10270 band=1 nodec=30 pass_noest=0 gw=0 single_branch=0 seg_cpu=881 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+s1_923B5 base wide/s 12.6 crc/s 0.4 part/s 0.8 | per-wide-grant: dmrs_v128 0.230 data_v128 0.001 | dmrs/s 17.2 v128 2.90 | match any 0.513 v128 0.453 | est {'none': 3688} | partial_tb dmrs 0 | funnel {'none': 129, 'v128': 120, 'lt128': 16} | cpu 7.180 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336048, 'scanq_drop_full': 43, 'scanq_drop_stale': 114, 'pdschq_queued': 48011, 'pdschq_drop_stale': 492, 'sense_async_queued_pdsch_data': 191, 'sense_cfr_exported_pdsch_dmrs': 3504, 'sense_cfr_exported_pdsch_data': 436, 'sense_rec_count': 146352} 
+   tap None
+s1_923N5 fix wide/s 7.7 crc/s 1.8 part/s 1.1 | per-wide-grant: dmrs_v128 0.701 data_v128 0.289 | dmrs/s 189.5 v128 5.39 | match any 1.000 v128 0.920 | est {'decoder_seg': 4665, 'own': 414, 'decoder': 35883, 'decoder_band': 3} | partial_tb dmrs 384 | funnel {'v128': 563, 'lt128': 49} | cpu 7.572 RX_EXIT=130 pci ['923']
+   drops {'scanq_queued': 336044, 'scanq_drop_full': 40, 'scanq_drop_stale': 100, 'pdschq_queued': 75115, 'pdschq_drop_stale': 386, 'sense_async_drop_pdsch_data': 429, 'sense_async_queued_pdsch_data': 31438, 'sense_cfr_exported_pdsch_dmrs': 39758, 'sense_cfr_exported_pdsch_data': 72068, 'sense_rec_count': 594388} 
+   tap decoder_estimate=40091 own_fep_chest=410 | exact=35445 seg=4643 band=3 nodec=39 pass_noest=0 gw=0 single_branch=0 seg_cpu=371 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0

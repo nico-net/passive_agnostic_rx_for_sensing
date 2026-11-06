@@ -1,0 +1,68 @@
+
+## 415
+| metric | BASE | NEW | NEW mean range vs BASE min-max (all 5 NEW runs) |
+|---|---|---|---|
+| wide dec/s | 97.653 (45.266-151.677) | 72.476 (29.989-167.710) | inside |
+| wide proven/s | 47.412 (34.532-67.922) | 44.978 (15.772-130.302) | inside |
+| dmrs v128 per wide grant | 0.360 (0.104-0.623) | 0.713 (0.552-1.176) | inside |
+| data v128 per wide grant | 0.027 (0.011-0.043) | 0.307 (0.119-0.633) | above |
+| dmrs v128+data v128 per wide grant | 0.388 (0.115-0.649) | 1.020 (0.779-1.809) | above |
+| scanq drop % (full+stale+epoch) | 0.056 (0.031-0.091) | 0.818 (0.362-1.461) | above |
+| scanq full % | 0.012 (0.005-0.018) | 0.106 (0.019-0.293) | above |
+| scanq stale % | 0.044 (0.019-0.074) | 0.713 (0.326-1.168) | above |
+| pdschq full % | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| pdschq stale % | 3.731 (0.323-5.352) | 2.275 (0.474-4.725) | inside |
+| sense ring rec drop /1e6 recs | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| sense_cfr_drop (count) | 13.600 (0.000-54.000) | 55.400 (12.000-189.000) | inside |
+| DA async drop pdsch_data % of queued | 1.661 (0.060-4.775) | 4.517 (0.325-17.212) | inside |
+| DA async drop pdsch_dmrs (count) | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| records total (sense_rec_count) | 3889.162 (3612.008-4335.212) | 6196.441 (5379.374-7382.689) | above |
+| lat wide p50 ms | 2.596 (1.517-4.121) | 2.832 (1.377-4.021) | inside |
+| lat wide p99 ms | 12.817 (6.954-20.700) | 14.298 (6.723-21.914) | inside |
+| lat all p50 ms | 1.711 (1.233-2.396) | 0.948 (0.751-1.126) | below |
+| lat all p99 ms | 11.152 (6.184-18.219) | 7.862 (5.443-10.490) | inside |
+base cfr_est all dmrs recs (5 runs summed): {'none': 83548} | v128: {'none': 37943} | partial_tb dmrs recs 0 of which v128 0
+base funnel proven wide (summed, 5 runs): {'none': 20614, 'lt128': 10743, 'v128': 19685} tot 51042
+fix cfr_est all dmrs recs (5 runs summed): {'decoder': 201702, 'decoder_seg': 169484, 'own': 980} | v128: {'decoder_seg': 14086, 'decoder': 53088, 'own': 425} | partial_tb dmrs recs 12015 of which v128 4689
+fix funnel proven wide (summed, 5 runs): {'v128': 38335, 'lt128': 9969} tot 48304
+pdsch_data partial/whole per s: NEW 10.605 (6.676-14.435) 357.707 (315.058-446.872)
+tap totals NEW (last line per run):
+   s1_415N1 decoder_estimate=57985 own_fep_chest=16 | exact=42033 seg=15952 band=0 nodec=2 pass_noest=0 gw=0 single_branch=0 seg_cpu=14 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   s1_415N2 decoder_estimate=60651 own_fep_chest=350 | exact=28876 seg=31775 band=0 nodec=33 pass_noest=0 gw=0 single_branch=0 seg_cpu=317 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   s1_415N3 decoder_estimate=63289 own_fep_chest=212 | exact=32660 seg=30629 band=0 nodec=36 pass_noest=0 gw=0 single_branch=0 seg_cpu=176 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   s1_415N4 decoder_estimate=66285 own_fep_chest=216 | exact=35407 seg=30878 band=0 nodec=11 pass_noest=0 gw=0 single_branch=0 seg_cpu=205 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   s1_415N5 decoder_estimate=121815 own_fep_chest=186 | exact=61926 seg=59889 band=0 nodec=19 pass_noest=0 gw=0 single_branch=0 seg_cpu=167 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+
+## 923
+| metric | BASE | NEW | NEW mean range vs BASE min-max (all 5 NEW runs) |
+|---|---|---|---|
+| wide dec/s | 13.922 (11.772-18.149) | 12.744 (4.403-25.588) | inside |
+| wide proven/s | 4.560 (1.238-9.467) | 5.873 (1.566-14.663) | inside |
+| dmrs v128 per wide grant | 0.211 (0.096-0.324) | 0.755 (0.615-0.867) | above |
+| data v128 per wide grant | 0.034 (0.000-0.072) | 0.382 (0.083-0.628) | above |
+| dmrs v128+data v128 per wide grant | 0.245 (0.096-0.371) | 1.136 (0.949-1.483) | above |
+| scanq drop % (full+stale+epoch) | 0.022 (0.007-0.047) | 0.271 (0.042-0.857) | inside |
+| scanq full % | 0.005 (0.000-0.013) | 0.030 (0.000-0.089) | inside |
+| scanq stale % | 0.017 (0.007-0.034) | 0.241 (0.030-0.769) | inside |
+| pdschq full % | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| pdschq stale % | 0.621 (0.211-1.025) | 0.297 (0.100-0.514) | inside |
+| sense ring rec drop /1e6 recs | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| sense_cfr_drop (count) | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| DA async drop pdsch_data % of queued | 0.049 (0.000-0.116) | 1.046 (0.092-2.190) | inside |
+| DA async drop pdsch_dmrs (count) | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| records total (sense_rec_count) | 1060.209 (683.760-1421.163) | 3376.032 (2447.760-3999.436) | above |
+| lat wide p50 ms | 1.798 (1.643-1.989) | 1.744 (1.553-1.973) | inside |
+| lat wide p99 ms | 13.050 (8.618-20.586) | 11.945 (6.903-17.386) | inside |
+| lat all p50 ms | 0.984 (0.835-1.180) | 0.731 (0.708-0.787) | below |
+| lat all p99 ms | 7.212 (4.770-11.370) | 3.526 (2.638-4.257) | below |
+base cfr_est all dmrs recs (5 runs summed): {'none': 44257} | v128: {'none': 3241} | partial_tb dmrs recs 0 of which v128 0
+base funnel proven wide (summed, 5 runs): {'v128': 1561, 'lt128': 623, 'none': 2729} tot 4913
+fix cfr_est all dmrs recs (5 runs summed): {'decoder': 225737, 'decoder_seg': 35202, 'own': 3978, 'decoder_band': 12} | v128: {'own': 430, 'decoder': 9316, 'decoder_seg': 1273} | partial_tb dmrs recs 4947 of which v128 1851
+fix funnel proven wide (summed, 5 runs): {'v128': 5406, 'lt128': 854} tot 6260
+pdsch_data partial/whole per s: NEW 8.440 (2.993-16.676) 398.071 (301.495-459.048)
+tap totals NEW (last line per run):
+   s1_923N1 decoder_estimate=55711 own_fep_chest=790 | exact=50848 seg=4861 band=2 nodec=32 pass_noest=0 gw=0 single_branch=0 seg_cpu=758 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   s1_923N2 decoder_estimate=59083 own_fep_chest=918 | exact=51886 seg=7191 band=6 nodec=36 pass_noest=0 gw=0 single_branch=0 seg_cpu=882 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   s1_923N3 decoder_estimate=66072 own_fep_chest=929 | exact=57968 seg=8104 band=0 nodec=98 pass_noest=0 gw=0 single_branch=0 seg_cpu=831 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   s1_923N4 decoder_estimate=38590 own_fep_chest=911 | exact=28319 seg=10270 band=1 nodec=30 pass_noest=0 gw=0 single_branch=0 seg_cpu=881 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   s1_923N5 decoder_estimate=40091 own_fep_chest=410 | exact=35445 seg=4643 band=3 nodec=39 pass_noest=0 gw=0 single_branch=0 seg_cpu=371 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
