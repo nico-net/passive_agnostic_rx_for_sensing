@@ -532,9 +532,9 @@ TEST(GpuPassDl, DiscreteEqualsDirectFullResult) {
       nr_gpu_pass_result_t g{}, s{};
       g.tb = gb.data(); s.tb = sb.data();
       g.brfo_rows = brfo.data(); g.qm_row = qm.data();
-      const int e_off = 12, e_nsc = 12 * fx.nrb - 24; /* sensing hand-back: the grant's inner subcarriers of the first DM-RS symbol, every layer and RX (a probe and a segmented grant get none) */
+      const int e_off = c.kind == 2 ? 0 : 12, e_nsc = c.kind == 2 ? 12 * fx.nrb : 12 * fx.nrb - 24; /* sensing hand-back: the grant's inner subcarriers of the first DM-RS symbol, every layer and RX; a segmented grant: its first run in data order (here all of it); a probe gets none */
       std::vector<int16_t> eh((size_t)c.nl * 4 * e_nsc * 2, 0x7e);
-      if (c.kind != 1 && c.kind != 2) { j.est_off = (uint16_t)e_off; j.est_nsc = (uint16_t)e_nsc; g.est_rows = eh.data(); }
+      if (c.kind != 1) { j.est_off = (uint16_t)e_off; j.est_nsc = (uint16_t)e_nsc; g.est_rows = eh.data(); }
       j.llr_out_all = c.kind == 1 ? 0 : 1; /* a probe's LLRs reach llr_out without it; the others: whatever the verdict, so the LLR path is compared on every grant */
       const int rc = m.pass_try(&j, &g);
       ASSERT_EQ(0, rc) << what;

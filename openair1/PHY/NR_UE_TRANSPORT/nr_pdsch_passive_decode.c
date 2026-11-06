@@ -7,6 +7,7 @@
 #include <sched.h>
 #include "nr_pdsch_gpu_exact.h"
 #include "nr_pdsch_dec_est_copy.h"
+#include "nr_pdsch_dec_est_guard.h"
 #include "nr_sense_gating.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pdsch_gpu_demod_host.h"
@@ -1225,8 +1226,8 @@ static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last
  * every body; a layout probe leaves them 0. */
 static __thread uint16_t t_cb_ok = 0, t_cb_tried = 0, t_cb_total = 0;
 static __thread struct nr_pdsch_dec_est t_dec_est; /* h points into t_dec_est_buf; nant == 0: none kept */
-/* a list grant that is one contiguous run is not seg_path (the caller checks it): its estimate is the grant's */
-static inline bool chest_estimate_usable(int chest_hit, int chest_only, const freq_alloc_bitmap_t *fa) { (void)fa; return !chest_hit && chest_only < 0; }
+/* a list grant that is one contiguous run is not seg_path (the caller checks it): its estimate is the grant's; a cache hit restores the raw estimate the miss stored (with its noise variance) */
+static inline bool chest_estimate_usable(int chest_only) { return chest_only < 0; }
 static __thread c16_t *t_dec_est_buf;
 static __thread size_t t_dec_est_cap;
 /* the per-thread buffer of the decoder-estimate export (grows once to the largest grant); NULL when it cannot hold `need` c16 */
@@ -1238,6 +1239,15 @@ static c16_t *dec_est_buf(size_t need)
     t_dec_est_cap = t_dec_est_buf ? need : 0;
   }
   return t_dec_est_cap >= need ? t_dec_est_buf : NULL;
+}
+/* the estimate the GPU pass copied into `dst` (sensing hand-back), as the decoder's kept estimate; else the reason it is missing */
+static void dec_est_from_pass(const nr_gpu_pass_dl_out_t *g, c16_t *dst, int nant, int nl, int nsc, int kind, uint16_t rnti, long slot, int first_rb, uint16_t ports)
+{
+  if (dst && g->r.est_valid && g->r.est_rows == (int16_t *)dst)
+    t_dec_est = (struct nr_pdsch_dec_est){.nant = (uint8_t)nant, .nl = (uint8_t)nl, .dmrs_sym = (uint8_t)g->dmrs_first, .nsc = (uint16_t)nsc, .nvar = g->r.est_nvar, .h = dst, .rnti = rnti, .slot = slot,
+                                          .first_rb = (uint16_t)first_rb, .ports = ports, .kind = (uint8_t)kind};
+  else
+    t_dec_est.why = NR_DER_PASS_NOEST;
 }
 static __thread nr_da_cb_pass_t t_cb_pass; /* every block's CRC24B result (sensing mode), same lifetime as t_cb_map */
 static __thread uint64_t t_cb_map = 0; /* EVMGRANT cbmap=: bit r = code block r passed its CRC (blocks >= 64 not shown), same lifetime as t_cb_ok */
@@ -2499,6 +2509,7 @@ static __thread struct { long slot; double fo; int valid; } t_fep_cache = {0, 0.
 static __thread struct {
   nr_pdsch_chest_key_t key;
   int valid;
+  uint32_t nv0; /* noise variance of the first DM-RS symbol, layer 0 (the decoder-estimate export) */
   uint32_t nvar_sum; /* sum over (DM-RS symbol x layer) of the per-antenna mean, before the divisor */
   uint32_t nvar_ant[NR_DL_CHEST_MAX_ANT]; /* nr_dl_chest_nvar_ant[] as the last estimator call left it */
   int n_dmrs_sym, dmrs_first, dmrs_last;
@@ -2776,6 +2787,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   t_cb_map = 0;
   memset(&t_cb_pass, 0, sizeof t_cb_pass);
   t_dec_est.nant = 0;
+  t_dec_est.why = NR_DER_EARLY;
   nr_irc_grant.valid = 0; /* D4 IRC: this grant's DM-RS whitening is set below, after the channel estimate */
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   t_fep_done_ns = 0;
@@ -3262,7 +3274,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
    * failing grant costs the pass on top of the old path. Every ISAC_GPU_PASS_CHECK-th taken grant (default 64) is decoded by the old path too and compared. */
   bool gp_ok = false, gp_cmp = false, gp_tb = false, gp_tried = false, gp_fcmp = false;
   c16_t *gp_est_dst = NULL; /* sensing: the buffer the pass hands its first-DM-RS-symbol estimate back into (nr_gpu_pass_result_t.est_rows), NULL = not asked */
-  int gp_est_nsc = 0;
+  int gp_est_nsc = 0, gp_est_off = 0, gp_est_kind = NR_DER_EXACT;
   harqc_entry_t *gp_he = NULL; /* DL HARQ combining in the pass: the held (busy) store entry of this grant, released below */
   int gp_hq_mode = 0;          /* 0 none, 1 first transmission (the pass stores the soft sum), 2 retransmission (the pass combines with the stored sum) */
   uint32_t gp_hq_A = 0;
@@ -3365,12 +3377,20 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
         }
       }
     }
-    if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_blind_dmrs_source() >= 0 && !seg_path && !t_probe_first_seg && cw->Nl <= NR_MAX_NB_LAYERS && fp->nb_antennas_rx <= 4) {
-      const int nsc_e = freq_alloc->num_rbs * NR_NB_SC_PER_RB, off_e = ((int)freq_alloc->first_rb - (int)gp_chest_fa.first_rb) * NR_NB_SC_PER_RB;
-      if (nsc_e > 0 && off_e >= 0 && (gp_est_dst = dec_est_buf((size_t)cw->Nl * fp->nb_antennas_rx * nsc_e)) != NULL) gp_est_nsc = nsc_e;
+    if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_blind_dmrs_source() >= 0 && !t_probe_first_seg && cw->Nl <= NR_MAX_NB_LAYERS && fp->nb_antennas_rx <= 4) {
+      /* a contiguous grant: its subcarriers of the estimate band; a segmented one: the first run (the estimate is composed in data order, the tap exports the first run only) */
+      int run = freq_alloc->num_rbs;
+      if (seg_path) {
+        run = nseg > 0 ? seg[0].n_prb : 0;
+        for (int i = 1; i < nseg && seg[i].prb_start == seg[i - 1].prb_start + seg[i - 1].n_prb; i++) run += seg[i].n_prb;
+      }
+      gp_est_kind = seg_path ? NR_DER_SEG : gp_chest_fa.num_rbs != freq_alloc->num_rbs ? NR_DER_BAND : NR_DER_EXACT;
+      gp_est_off = seg_path ? 0 : ((int)freq_alloc->first_rb - (int)gp_chest_fa.first_rb) * NR_NB_SC_PER_RB;
+      const int nsc_e = run * NR_NB_SC_PER_RB;
+      if (nsc_e > 0 && gp_est_off >= 0 && (gp_est_dst = dec_est_buf((size_t)cw->Nl * fp->nb_antennas_rx * nsc_e)) != NULL) gp_est_nsc = nsc_e;
     }
     {
-      const nr_gpu_pass_dl_in_t gin = {.est_dst = gp_est_dst, .est_cap = gp_est_dst ? t_dec_est_cap : 0, .est_off = gp_est_dst ? ((int)freq_alloc->first_rb - (int)gp_chest_fa.first_rb) * NR_NB_SC_PER_RB : 0, .est_nsc = gp_est_nsc,.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .seg = seg_path ? seg : NULL, .nseg = seg_path ? nseg : 0, .cw = cw,
+      const nr_gpu_pass_dl_in_t gin = {.est_dst = gp_est_dst, .est_cap = gp_est_dst ? t_dec_est_cap : 0, .est_off = gp_est_off, .est_nsc = gp_est_nsc,.ue = ue, .proc = proc, .dlsch_config = dlsch_config, .freq_alloc = freq_alloc, .seg = seg_path ? seg : NULL, .nseg = seg_path ? nseg : 0, .cw = cw,
                                        .ssb_rm = ssb_unav ? &ssb.dem : &gp_no_ssb, .rxdataF = &rxdataF[0][0], .rx_stride = fp->samples_per_slot_wCP,
                                        .rnti = grant->rnti, .G = G, .tbslbrm = dlsch_config->tbslbrm,
                                        .est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16,
@@ -3427,6 +3447,9 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       if (gp_rc == 0 && t_gpp->r.skip) { /* the in-graph gate fired: no demod / LDPC / CRC ran; the verdict is CRC fail, skip = 1, and no arm can help */
         if (gp_he) atomic_store(&gp_he->busy, 0);
         out->skip = 1;
+        dec_est_from_pass(t_gpp, gp_est_dst, fp->nb_antennas_rx, cw->Nl, gp_est_nsc, gp_est_kind, grant->rnti,
+                          grant->source_absolute_slot, freq_alloc->n_prb_list > 0 ? freq_alloc->prb_list[0] : freq_alloc->first_rb, dlsch_config->dmrs_ports); /* the chest ran before the gate: its estimate is still the grant's */
+        out->est = &t_dec_est;
         nr_dmrs_snr_init(&out->dmrs_snr); /* EVMGRANT shows the SNR the gate compared (it was dmrs_snr=0 / unprocessed-looking); skip=1 still tells a gated grant apart */
         if (t_gpp->r.gate_db > -90.f) out->dmrs_snr.comb_db = t_gpp->r.gate_db, out->dmrs_path = 3;
         out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
@@ -3829,15 +3852,24 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
     return out->status; // no DM-RS in the allocation: nothing to equalise against
   }
   /* Sensing mode: keep the DM-RS estimate for the CFR export (nr_pdsch_dec_est), raw, before the time-domain average / IRC touch it. Only an estimate the export can use as is: every branch estimated (not
-   * the single-branch mode), a contiguous grant (no segments / PRB list), made here (not restored from the slot cache: its noise figure belongs to another grant), at the grant's own subcarriers. */
-  if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_blind_dmrs_source() >= 0 && !seg_path && chest_estimate_usable(chest_hit, chest_only, freq_alloc) && dmrs_first >= 0) {
-    const int nant_e = fp->nb_antennas_rx, nl_e = cw->Nl < NR_MAX_NB_LAYERS ? cw->Nl : NR_MAX_NB_LAYERS;
-    const int nsc_e = freq_alloc->num_rbs * NR_NB_SC_PER_RB, off_e = ((int)freq_alloc->first_rb - (int)chest_alloc.first_rb) * NR_NB_SC_PER_RB;
-    const size_t need_e = (size_t)nl_e * nant_e * nsc_e;
-    if (off_e >= 0 && off_e + nsc_e <= (int)chest_alloc.num_rbs * NR_NB_SC_PER_RB && nsc_e > 0 && nant_e <= 8) {
-      if (dec_est_buf(need_e)) {
+   * the single-branch mode), a contiguous grant (a list that is one run is not seg_path), at the grant's own subcarriers. A slot-cache hit restores the raw estimate a miss of the same key stored, with that
+   * miss's first-symbol noise variance (nv0); when the estimate band is wider than the grant the noise variance is the band's (kind NR_DER_BAND, labelled). */
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_blind_dmrs_source() >= 0) {
+    if (chest_hit) est_nv0 = t_chest_cache.nv0;
+    if (seg_path) {
+      t_dec_est.why = NR_DER_SEG_CPU;
+    } else if (!chest_estimate_usable(chest_only)) {
+      t_dec_est.why = NR_DER_SINGLE_BRANCH;
+    } else if (dmrs_first >= 0) {
+      t_dec_est.why = NR_DER_BUF;
+      const int nant_e = fp->nb_antennas_rx, nl_e = cw->Nl < NR_MAX_NB_LAYERS ? cw->Nl : NR_MAX_NB_LAYERS;
+      const int nsc_e = freq_alloc->num_rbs * NR_NB_SC_PER_RB, off_e = ((int)freq_alloc->first_rb - (int)chest_alloc.first_rb) * NR_NB_SC_PER_RB;
+      const size_t need_e = (size_t)nl_e * nant_e * nsc_e;
+      if (off_e >= 0 && off_e + nsc_e <= (int)chest_alloc.num_rbs * NR_NB_SC_PER_RB && nsc_e > 0 && nant_e <= 8 && dec_est_buf(need_e)) {
         nr_dec_est_copy((int32_t *)t_dec_est_buf, &pdsch_dl_ch_estimates[0][0], (size_t)pdsch_est_size, nl_e, nant_e, dmrs_first, fp->ofdm_symbol_size, off_e, nsc_e);
-        t_dec_est = (struct nr_pdsch_dec_est){.nant = (uint8_t)nant_e, .nl = (uint8_t)nl_e, .dmrs_sym = (uint8_t)dmrs_first, .nsc = (uint16_t)nsc_e, .nvar = est_nv0, .h = t_dec_est_buf, .rnti = grant->rnti, .slot = grant->source_absolute_slot, .first_rb = (uint16_t)freq_alloc->first_rb};
+        t_dec_est = (struct nr_pdsch_dec_est){.nant = (uint8_t)nant_e, .nl = (uint8_t)nl_e, .dmrs_sym = (uint8_t)dmrs_first, .nsc = (uint16_t)nsc_e, .nvar = est_nv0, .h = t_dec_est_buf, .rnti = grant->rnti,
+                                              .slot = grant->source_absolute_slot, .first_rb = (uint16_t)(freq_alloc->n_prb_list > 0 ? freq_alloc->prb_list[0] : freq_alloc->first_rb), .ports = dlsch_config->dmrs_ports,
+                                              .kind = chest_alloc.num_rbs != freq_alloc->num_rbs ? NR_DER_BAND : NR_DER_EXACT};
       }
     }
   }
@@ -3865,6 +3897,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       }
       t_chest_cache.key = chest_key;
       t_chest_cache.nvar_sum = nvar;
+      t_chest_cache.nv0 = est_nv0;
       memcpy(t_chest_cache.nvar_ant, nr_dl_chest_nvar_ant, sizeof(t_chest_cache.nvar_ant));
       t_chest_cache.n_dmrs_sym = n_dmrs_sym;
       t_chest_cache.dmrs_first = dmrs_first;
@@ -4052,7 +4085,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   // header). `status = NR_ACTIVE` is what makes it apply the PTRS/symbol-span branch consistently
   // with the attached path -- with pduBitmap==0 it only selects the symbol bookkeeping. ----
 gpu_llr_ready:;
-  if (gpu_llr) { nvar = 0; nvar_den = 1u; n_dmrs_sym = 0; } /* skipped by the jump; read only on the guarded retries */
+  if (gpu_llr) { nvar = 0; nvar_den = 1u; n_dmrs_sym = 0; t_dec_est.why = NR_DER_GW; } /* skipped by the jump; read only on the guarded retries */
   if (gp_ok) { /* skipped by the jump too: what the graph pass measured (the chest post, the DM-RS FO tracker, the per-branch FO estimate) */
     nvar = t_gpp->r.nvar; nvar_den = 1u; n_dmrs_sym = t_gpp->ndmrs;
     out->dmrs_snr = t_gpp->r.dsnr; /* LS units: rx power = LS power * 4 beta^2 (see the chest-side fill) */
@@ -4064,15 +4097,15 @@ gpu_llr_ready:;
     if (out->dmrs_snr.comb_db > -90.f)
       memcpy(out->psinr_db, t_gpp->r.psinr_db, sizeof(out->psinr_db));
     dmrs_first = t_gpp->dmrs_first; dmrs_last = t_gpp->dmrs_last;
-    if (gp_est_dst && t_gpp->r.est_valid && t_gpp->r.est_rows == (int16_t *)gp_est_dst) /* the pass's own estimate of THIS grant, copied out by the pass (same slot/RNTI: the buffer is this thread's, written by this call) */
-      t_dec_est = (struct nr_pdsch_dec_est){.nant = (uint8_t)fp->nb_antennas_rx, .nl = (uint8_t)cw->Nl, .dmrs_sym = (uint8_t)dmrs_first, .nsc = (uint16_t)gp_est_nsc, .nvar = t_gpp->r.est_nvar, .h = gp_est_dst,
-                                            .rnti = grant->rnti, .slot = grant->source_absolute_slot, .first_rb = (uint16_t)freq_alloc->first_rb};
+    dec_est_from_pass(t_gpp, gp_est_dst, fp->nb_antennas_rx, cw->Nl, gp_est_nsc, gp_est_kind, grant->rnti,
+                      grant->source_absolute_slot, freq_alloc->n_prb_list > 0 ? freq_alloc->prb_list[0] : freq_alloc->first_rb, dlsch_config->dmrs_ports); /* the pass's own estimate of THIS grant, copied out by the pass (buffer of this thread, written by this call) */
     out->nvar = nvar;
     for (int a = 0; a < NR_DL_CHEST_MAX_ANT; a++)
       nr_dl_chest_nvar_ant[a] = a < 4 ? t_gpp->nvar_ant[a] : 0;
     nr_gpu_pass_note(NR_GPU_PASS_EV_COMMIT);
   }
   if (gw_ready) { /* skipped by the jump too: what the entry's computation measured */
+    t_dec_est.why = NR_DER_GW;
     nvar = gw_meta->nvar; nvar_den = 1u; n_dmrs_sym = 0;
     dmrs_first = dmrs_last = -1;
     out->nvar = gw_meta->nvar;
@@ -4630,7 +4663,7 @@ gpu_llr_ready:;
   out->cb_total = t_cb_total;
   out->cb_map = t_cb_map;
   out->cb_pass = t_cb_pass;
-  out->est = t_dec_est.nant ? &t_dec_est : NULL;
+  out->est = &t_dec_est;
   out->hq_mode = t_last_hq_retx ? 1 : t_hq_nohist ? 2 : 0;
   /* GrantWork admissibility (fix round 1, I2): what the job's full decode did that CB0 from shared work does not. */
   if (t_gw != NULL && !t_quiet && !t_gw_capture) {

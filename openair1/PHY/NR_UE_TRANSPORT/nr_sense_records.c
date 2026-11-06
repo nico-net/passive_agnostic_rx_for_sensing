@@ -161,7 +161,7 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
     else put(&j,",\"cfg_ref\":null");
     if (m->prg_valid) integer(&j,"prg_size",m->prg_size); else put(&j,",\"prg_size\":null");
   }
-  if (m->est_dec) { put(&j,",\"cfr_est\":\"decoder\""); integer(&j,"est_dmrs_sym",m->est_sym); integer(&j,"est_layers",m->est_layers); }
+  if (m->est_dec) { put(&j,m->est_dec==2?",\"cfr_est\":\"decoder_seg\"":m->est_dec==3?",\"cfr_est\":\"decoder_band\"":",\"cfr_est\":\"decoder\""); integer(&j,"est_dmrs_sym",m->est_sym); integer(&j,"est_layers",m->est_layers); }
   else if (src==NR_SENSE_SRC_PDSCH_DMRS && nr_isac_mode()==NR_ISAC_MODE_SENSING) put(&j,",\"cfr_est\":\"own\""); /* every sensing-mode pdsch_dmrs record says its estimate: the decoder's, or the tap's own FEP + chest */
   if (m->tb_cb_total>0) { integer(&j,"partial_tb",1); integer(&j,"cb_ok",m->tb_cb_ok); integer(&j,"cb_total",m->tb_cb_total); } /* appended last; valid REs = n_re, valid PRBs = valid_cfr_prbs */
   put(&j,"}");

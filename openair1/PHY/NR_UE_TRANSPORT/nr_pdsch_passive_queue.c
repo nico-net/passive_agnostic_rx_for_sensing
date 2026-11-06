@@ -2,6 +2,7 @@
 #define _GNU_SOURCE /* FATTAILS DECSLOW: RUSAGE_THREAD, sched_getcpu */
 #endif
 #include "common/utils/nr_cell.h" /* mpci A5: per-cell state (NR_CELL_STATIC) */
+#include "nr_pdsch_dec_est_guard.h"
 #include "nr_pdsch_cell_prealloc.h"
 #include "nr_pdsch_slot_spread.h"
 #include "PHY/TOOLS/nr_stage_split.h"
@@ -1453,17 +1454,37 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
     local_tok = wbg;
   }
 #define WBG_GIVE_BACK() do { if (wbg && *tok) { nr_sense_wbg_refund(); *tok = false; } } while (0)
-  int dmrs_sym0 = -1; /* the first DM-RS symbol of the grant, as the tap below picks it */
-  for (int m = pdu->start_symbol; m < pdu->start_symbol + pdu->number_symbols && m < 32; m++)
-    if (pdu->dlDmrsSymbPos & (1u << m)) { dmrs_sym0 = m; break; }
-  /* The decoder's own estimate (sensing mode, kept by the decode on this thread): same symbol and width as this tap would estimate, so no FEP, no chest, and no IQ ring credit is needed. */
-  const bool use_de = de != NULL && de->rnti == job->grant.rnti && de->slot == job->grant.source_absolute_slot && de->nant == (uint8_t)fp->nb_antennas_rx && dmrs_sym0 >= 0 && de->dmrs_sym == (uint8_t)dmrs_sym0 && de->nsc == (uint16_t)(ca.num_rbs * NR_NB_SC_PER_RB) && ca.n_prb_list == 0 && de->first_rb == (uint16_t)ca.first_rb && de->nvar > 0; /* a list grant of one run is not seg_path: the decoder kept an estimate only then */
+  /* The decoder's own estimate (sensing mode, kept by the decode of this job on this thread): used when it was made for this grant and hypothesis (rnti, slot, RX count, layers, DM-RS ports, width, first PRB) and
+   * its symbol is a DM-RS symbol of the grant (not necessarily the first: the record says which). No FEP, no chest, and no IQ ring credit needed. Every refusal is counted by reason (DMRS_TAP_EST). */
+  int de_why = de == NULL ? NR_DER_NODEC : de->nant == 0 ? de->why : NR_DER_EXACT;
+  if (de != NULL && de->nant != 0) {
+    const struct nr_dec_est_id have = {.rnti = de->rnti, .first_rb = de->first_rb, .nsc = de->nsc, .ports = de->ports, .slot = de->slot, .nant = de->nant, .nl = de->nl};
+    const struct nr_dec_est_id want = {.rnti = job->grant.rnti, .first_rb = (uint16_t)ca.first_rb, .nsc = (uint16_t)(ca.num_rbs * NR_NB_SC_PER_RB), .ports = pdu->dmrs_ports, .slot = job->grant.source_absolute_slot,
+                                       .nant = (uint8_t)fp->nb_antennas_rx, .nl = (uint8_t)__builtin_popcount((unsigned)pdu->dmrs_ports)};
+    const int m = nr_dec_est_match(&have, &want);
+    if (m) de_why = m;
+    else if (!nr_dec_est_sym_ok(de->dmrs_sym, pdu->dlDmrsSymbPos, pdu->start_symbol, pdu->number_symbols) || de->dmrs_sym >= fp->symbols_per_slot) de_why = NR_DER_G_SYM;
+    else if (de->nvar == 0) de_why = NR_DER_NVAR0;
+    else de_why = de->kind;
+  }
+  const bool use_de = de_why <= NR_DER_BAND;
   if (use_de) iq_ok = true;
-  { /* which estimate the tap used: the decoder's (no FEP/chest) or its own (FEP + chest because the decoder kept none) */
-    static _Atomic uint64_t n_dec, n_own;
-    const uint64_t n = use_de ? atomic_fetch_add(&n_dec, 1) + 1 : atomic_fetch_add(&n_own, 1) + 1;
-    if ((use_de ? n : n + atomic_load(&n_dec)) % 500 == 1)
-      LOG_A(PHY, "SENSING: DMRS_TAP_EST decoder_estimate=%lu own_fep_chest=%lu\n", (unsigned long)atomic_load(&n_dec), (unsigned long)atomic_load(&n_own));
+  { /* which estimate the tap used: the decoder's (no FEP/chest) or its own (FEP + chest) and, for the own, why the decoder's was not usable */
+    static _Atomic uint64_t n_why[NR_DER_N];
+    atomic_fetch_add(&n_why[de_why], 1);
+    uint64_t tot = 0;
+    for (int w = 0; w < NR_DER_N; w++) tot += atomic_load(&n_why[w]);
+    if (tot % 500 == 1) {
+      char b[400];
+      int u = 0;
+      uint64_t dec = 0;
+      for (int w = 0; w < NR_DER_N && u < (int)sizeof(b) - 40; w++) {
+        const uint64_t c = atomic_load(&n_why[w]);
+        if (w <= NR_DER_BAND) dec += c;
+        u += snprintf(b + u, sizeof(b) - (size_t)u, "%s%s=%lu", u ? " " : "", nr_der_name[w], (unsigned long)c);
+      }
+      LOG_A(PHY, "SENSING: DMRS_TAP_EST decoder_estimate=%lu own_fep_chest=%lu | %s\n", (unsigned long)dec, (unsigned long)(tot - dec), b);
+    }
   }
   if (wbg && !nr_sense_wbg_tap_ok(crc_ok || nr_sense_single(), iq_ok)) { /* single mode: the solved-layout CRC-fail rescue tap keeps working (a token-free admit) */ /* CRC failed (solved-layout rescue path), or the ring no longer holds the slot: the FEP would read another slot's IQ */
     WBG_GIVE_BACK();
@@ -1480,6 +1501,7 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
     WBG_GIVE_BACK();
     return;
   }
+  const int esym = use_de ? (int)de->dmrs_sym : dmrs_sym; /* the symbol the estimate is of */
   const uint64_t uc0 = nr_sense_unit_cpu_ns();
   const uint32_t est_sz = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16, ncomb = (uint32_t)(nsc + 1) / 2;
   /* per-thread reusable estimate buffer (zeroed per grant like the calloc it replaces): no mmap/munmap + page faults per CRC-OK grant */
@@ -1499,7 +1521,7 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
     uint32_t nvar = 0;
     if (use_de) { /* layer 0 of the decoder's estimate into the slot-shaped rows the export below reads (the same values the tap would have estimated) */
       nvar = de->nvar;
-      for (int a = 0; a < nant; a++) memcpy(&est[a][fp->ofdm_symbol_size * dmrs_sym], &de->h[(size_t)a * de->nsc], (size_t)de->nsc * sizeof(c16_t));
+      for (int a = 0; a < nant; a++) memcpy(&est[a][fp->ofdm_symbol_size * esym], &de->h[(size_t)a * de->nsc], (size_t)de->nsc * sizeof(c16_t));
     } else {
       nr_slot_fep(ue, fp, proc->nr_slot_rx, dmrs_sym, rxdataF, link_type_dl, 0, nr_pdsch_passive_iq_for_slot(proc->nr_slot_rx, ue->common_vars.rxdata));
       nr_pdsch_channel_estimation(ue, proc, pdu, &ca, 0, get_dmrs_port(0, pdu->dmrs_ports), (unsigned char)dmrs_sym, est_sz, est,
@@ -1510,20 +1532,20 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
     double pw = 0;
     for (int j = 0; j < nsc; j += 2, n++) {
       for (int a = 0; a < nant; a++) {
-        const c16_t *e = (const c16_t *)&est[a][fp->ofdm_symbol_size * dmrs_sym];
+        const c16_t *e = (const c16_t *)&est[a][fp->ofdm_symbol_size * esym];
         h[2 * ((size_t)a * ncomb + n)] = (float)e[j].r;
         h[2 * ((size_t)a * ncomb + n) + 1] = (float)e[j].i;
         if (a == 0)
           pw += (double)e[j].r * e[j].r + (double)e[j].i * e[j].i;
       }
       k[n] = base_sc + (uint32_t)j;
-      l[n] = (uint32_t)dmrs_sym;
+      l[n] = (uint32_t)esym;
     }
     const int prg = nr_pdsch_prg_latched(job->rnti);
     const nr_sense_rs_meta_t meta = nr_sense_meta_with_snr((nr_sense_rs_meta_t){.rnti = job->rnti, .prg_valid = prg >= 0, .prg_size = prg >= 0 ? prg : 0,
         .start_rb = pdu->BWPStart + ca.first_rb, .nb_rb = ca.num_rbs, .ports = __builtin_popcount((unsigned)pdu->dmrs_ports),
         .port_mask = (int)pdu->dmrs_ports, .ssb_index = -1, .k_ssb = -1, .ta_est_samples = -1, .transform_precoding = -1,
-        .dmrs_type = pdu->dmrsConfigType ? 2 : 1, .dmrs_add_pos = -1, .dmrs_n_scid = pdu->nscid, .wbg = wbg, .tb_cb_ok = partial ? partial->ok : 0, .tb_cb_total = partial ? partial->C : 0, .est_dec = use_de, .est_sym = use_de ? dmrs_sym : 0, .est_layers = use_de ? de->nl : 0},
+        .dmrs_type = pdu->dmrsConfigType ? 2 : 1, .dmrs_add_pos = -1, .dmrs_n_scid = pdu->nscid, .wbg = wbg, .tb_cb_ok = partial ? partial->ok : 0, .tb_cb_total = partial ? partial->C : 0, .est_dec = use_de ? (uint8_t)(de->kind + 1) : 0, .est_sym = use_de ? esym : 0, .est_layers = use_de ? de->nl : 0},
         nvar > 0 && pw > 0.0 ? (float)(10.0 * log10(pw / n / (double)nvar)) : NAN);
     const nr_isac_carrier_t carrier = {.nof_prb = (uint32_t)fp->N_RB_DL, .scs_hz = fp->subcarrier_spacing, .dl_center_hz = fp->dl_CarrierFreq,
                                        .pci = fp->Nid_cell, .slots_per_frame = fp->slots_per_frame};

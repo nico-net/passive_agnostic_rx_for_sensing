@@ -218,6 +218,12 @@ TEST(SenseRecords, DmrsRecordsSayWhichEstimateTheyAre)
   m.est_dec=true; m.est_sym=2; m.est_layers=2; m.tb_cb_ok=1; m.tb_cb_total=3;
   ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,c,sizeof c),0);
   EXPECT_NE(strstr(c,",\"cfr_est\":\"decoder\",\"est_dmrs_sym\":2,\"est_layers\":2,\"partial_tb\":1,\"cb_ok\":1,\"cb_total\":3}"),nullptr);
+  m.est_dec=2; // the first run of a segmented grant / a wider estimate band are labelled, never passed off as the exact decoder estimate
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,c,sizeof c),0);
+  EXPECT_NE(strstr(c,",\"cfr_est\":\"decoder_seg\",\"est_dmrs_sym\":2"),nullptr);
+  m.est_dec=3;
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,c,sizeof c),0);
+  EXPECT_NE(strstr(c,",\"cfr_est\":\"decoder_band\",\"est_dmrs_sym\":2"),nullptr);
   nr_sense_rs_meta_t n{}; n.rnti=77; n.ports=1; n.port_mask=1; n.dmrs_type=1; n.dmrs_add_pos=-1; n.dmrs_n_scid=0;
   ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DATA,&n,1,d,sizeof d),0);
   EXPECT_EQ(strstr(d,"cfr_est"),nullptr); // other sources are untouched

@@ -2041,12 +2041,19 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
                                     cudaEventRecord(I.evC, ls) == cudaSuccess && cudaGraphLaunch(es[1]->exec[id], ls) == cudaSuccess && cudaEventRecord(I.evD, ls) == cudaSuccess &&
                                     cudaGraphLaunch(es[2]->exec[id], ls) == cudaSuccess /* back to back: stream order, no host wait between (evC / evD: measurement markers) */
                               : cudaGraphLaunch(e->exec[id], ls) == cudaSuccess);
-  /* sensing hand-back, DISCRETE: the first DM-RS symbol's estimate rows (all layers, RX) into the host mirror of I.est, on the pass's own stream before `done` (DIRECT: the host reads the mapped estimate, no copy) */
-  const bool est_hb = launched && r->est_rows && j->est_nsc > 0 && (int)j->est_off + (int)j->est_nsc <= 12 * j->nrb && j->nl * j->nbRx <= 16 && !j->nseg && !j->probe && j->ndmrs > 0;
-  const bool est_ok = !est_hb || nr_gpu_model() != NR_GPU_MODEL_DISCRETE ||
-                      cudaMemcpy2DAsync((char *)I.est.host + (size_t)(j->dmrs_sym[0] * N + j->est_off) * 4, (size_t)NSYM * N * 4, (const char *)I.est.dev + (size_t)(j->dmrs_sym[0] * N + j->est_off) * 4,
-                                        (size_t)NSYM * N * 4, (size_t)j->est_nsc * 4, (size_t)j->nl * nrx_of(job_gid(j)), cudaMemcpyDeviceToHost, ls) == cudaSuccess;
-  const bool recorded = launched && est_ok && cudaEventRecord(I.done, ls) == cudaSuccess;
+  /* sensing hand-back, DISCRETE: the first DM-RS symbol's estimate rows (all layers, RX) into the host mirror of I.est, on the pass's own stream before `done` (DIRECT: the host reads the mapped estimate, no copy).
+   * A segmented grant's estimate is composed in data order (rows [0, 12 nrb)), so the same copy hands back its first run. A failed copy only drops the hand-back (counted): it must never kill the pass. */
+  bool est_hb = launched && r->est_rows && j->est_nsc > 0 && (int)j->est_off + (int)j->est_nsc <= 12 * j->nrb && j->nl * j->nbRx <= 16 && j->nbRx == nrx_of(job_gid(j)) && !j->probe && j->ndmrs > 0;
+  if (est_hb && nr_gpu_model() == NR_GPU_MODEL_DISCRETE &&
+      cudaMemcpy2DAsync((char *)I.est.host + (size_t)(j->dmrs_sym[0] * N + j->est_off) * 4, (size_t)NSYM * N * 4, (const char *)I.est.dev + (size_t)(j->dmrs_sym[0] * N + j->est_off) * 4,
+                        (size_t)NSYM * N * 4, (size_t)j->est_nsc * 4, (size_t)j->nl * nrx_of(job_gid(j)), cudaMemcpyDeviceToHost, ls) != cudaSuccess) {
+    cudaGetLastError(); /* clear a non-sticky argument error; a sticky one fails the launch checks below as before */
+    est_hb = false;
+    static std::atomic<uint64_t> n_fail{0};
+    const uint64_t nf = ++n_fail;
+    if (nf == 1 || (nf & 1023) == 0) fprintf(stderr, "GPUPASS estimate hand-back copy failed (%llu): the grant takes the tap's own estimate\n", (unsigned long long)nf);
+  }
+  const bool recorded = launched && cudaEventRecord(I.done, ls) == cudaSuccess;
   const uint64_t ts_l2 = nr_gpu_pass_now_ns();
   if (!recorded) {
     ++g_fb_err;
@@ -2088,6 +2095,25 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
   if (split) split_stamps(I, !skip_c, r);
   r->skip = split && rb.skip ? 1 : 0; /* Fix A+D: the in-graph gate fired (D's IF body and L did not run); a full (non-split) graph has no gate and leaves rb.skip stale */
   r->gate_db = rb.gate_db;
+  if (est_hb) { /* a copy of what the chest wrote (and, per row, its noise variance); also for a grant the in-graph gate skipped (the chest ran). The instance is released at return, so the caller's buffer owns it */
+    const int nbRxE = j->nbRx;
+    nr_dec_est_copy((int32_t *)r->est_rows, (const int32_t *)I.est.host, (size_t)NSYM * N, j->nl, nbRxE, j->dmrs_sym[0], N, j->est_off, j->est_nsc);
+    const uint32_t *nv = (const uint32_t *)((const char *)I.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)); /* rows (k, layer, segment, RX): DM-RS symbol 0, layer 0 = segment * nbRx + a */
+    const int nsg = j->nseg ? j->nseg : 1;
+    uint64_t acc = 0;
+    int cnt = 0;
+    for (int a = 0; a < nbRxE; a++) {
+      uint64_t sw = 0, w = 0; /* a segmented grant: the width-weighted mean over its segments (as the chest post) */
+      for (int sg = 0; sg < nsg; sg++) {
+        const uint32_t wd = j->nseg ? (uint32_t)j->seg[sg].n_prb : 1u;
+        sw += (uint64_t)nv[(size_t)sg * nbRxE + a] * wd, w += wd;
+      }
+      const uint32_t v = w ? (uint32_t)(sw / w) : 0;
+      if (v > 0) acc += v, cnt++;
+    }
+    r->est_nvar = cnt ? (uint32_t)(acc / (uint64_t)cnt) : 0;
+    r->est_valid = 1;
+  }
   if (r->skip) {
     r->need_cpu = 0;
     ++g_gate_skips;
@@ -2145,16 +2171,6 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
                                                    : (const int16_t *)I.scratch.host + 2 * (size_t)((size_t)j->qm_sym * NR_GPU_DEMOD_MAX_NL * ext),
            (size_t)j->qm_n * 4);
     r->qm_valid = 1;
-  }
-  if (est_hb) { /* a copy of what the chest wrote (and, per row, its noise variance); the instance is released at return, so the caller's buffer owns it */
-    nr_dec_est_copy((int32_t *)r->est_rows, (const int32_t *)I.est.host, (size_t)NSYM * N, j->nl, nbRxJ, j->dmrs_sym[0], N, j->est_off, j->est_nsc);
-    const uint32_t *nv = (const uint32_t *)((const char *)I.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)); /* rows: DM-RS symbol 0, layer 0, RX a = row a */
-    uint64_t acc = 0;
-    int cnt = 0;
-    for (int a = 0; a < nbRxJ; a++)
-      if (nv[a] > 0) acc += nv[a], cnt++;
-    r->est_nvar = cnt ? (uint32_t)(acc / (uint64_t)cnt) : 0;
-    r->est_valid = 1;
   }
   if (r->brfo_rows && j->fo_first >= 0 && j->fo_last > j->fo_first) {
     const int16_t *e0 = (const int16_t *)I.est.host;
