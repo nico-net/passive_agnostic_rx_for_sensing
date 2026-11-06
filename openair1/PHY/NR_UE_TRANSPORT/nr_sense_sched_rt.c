@@ -41,6 +41,13 @@ static struct {
   uint64_t sub_t_ns, sub_hold, sub_unattr; double sub_max; bool sub_have; /* 500 ms sub-windows within the decision period */
   int no_sample;                                           /* consecutive periods without a pool sample (M3) */
 } g_prev;
+/* grant-level wideband path, per cell: cumulative counters at the previous decision and the recent mean cost per tap (scheduler thread only) */
+static struct { uint64_t t_ns, offered, taps, cost_ns, records, ring_ns; float cost_per_tap, ring_per_rec, offered_hz; } g_wbgp[NR_SENSE_CELLS];
+void nr_sense_sched_wbg_info(int cell, double *offered_hz, double *cost_ns)
+{
+  *offered_hz = *cost_ns = 0;
+  if ((unsigned)cell < NR_SENSE_CELLS) { *offered_hz = g_wbgp[cell].offered_hz; *cost_ns = g_wbgp[cell].cost_per_tap; }
+}
 
 /* last decision per cell, for ISAC_METRICS (written by the scheduler thread, read by the metrics thread): prb(16) | in_gap(1) | gap_ms(47) in one atomic word, so a read is never torn */
 static _Atomic uint64_t g_floor_log[NR_SENSE_CELLS];
@@ -150,6 +157,7 @@ void nr_sense_sched_reset(void)
 {
   memset(&g_st, 0, sizeof g_st);
   memset(&g_prev, 0, sizeof g_prev);
+  memset(g_wbgp, 0, sizeof g_wbgp);
   nr_sense_cell_floor_reset();
   for (int c = 0; c < NR_SENSE_CELLS; c++) atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed);
   (void)nr_sense_sched_take_cell_resets();
@@ -183,7 +191,7 @@ void nr_sense_sched_step(uint64_t now_ns)
 {
   const uint32_t rm = nr_sense_sched_take_cell_resets(); /* a cell that changed starts its T_cell over (a decision already in flight may publish the old level once) */
   for (int c = 0; c < NR_SENSE_CELLS; c++)
-    if (rm & (1u << c)) { g_st.fl_idx[c] = g_st.fl_pend[c] = g_st.fl_cnt[c] = g_st.fl_warm[c] = 0; memset(g_st.pr_sum[c], 0, sizeof g_st.pr_sum[c]); memset(g_st.pr_w[c], 0, sizeof g_st.pr_w[c]); nr_sense_cell_floor_publish(c, 0); atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed); }
+    if (rm & (1u << c)) { g_st.fl_idx[c] = g_st.fl_pend[c] = g_st.fl_cnt[c] = g_st.fl_warm[c] = 0; memset(g_st.pr_sum[c], 0, sizeof g_st.pr_sum[c]); memset(g_st.pr_w[c], 0, sizeof g_st.pr_w[c]); memset(&g_wbgp[c], 0, sizeof g_wbgp[c]); nr_sense_cell_floor_publish(c, 0); atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed); }
   nr_sense_sched_sample_t sm;
   bool (*smp)(nr_sense_sched_sample_t *, uint64_t) = atomic_load(&g_sampler);
   if (!(smp ? smp(&sm, now_ns) : sample_prod(&sm, now_ns))) {
@@ -217,9 +225,42 @@ void nr_sense_sched_step(uint64_t now_ns)
     }
   }
   in.now_ns = now_ns;
+  for (int c = 0; c < in.n_cells; c++) { /* the wideband-grant resource: offered rate and recent costs, from the cell's cumulative counters (a counter that went down was reset under us: re-baseline) */
+    nr_sense_wbg_stats_t ws;
+    nr_sense_wbg_stats(c, &ws);
+    const bool mono = ws.offered >= g_wbgp[c].offered && ws.taps >= g_wbgp[c].taps && ws.cost_ns >= g_wbgp[c].cost_ns && ws.records >= g_wbgp[c].records && ws.ring_ns >= g_wbgp[c].ring_ns;
+    const bool first = !g_wbgp[c].t_ns; /* the first decision of the cell: the counters since start are one period's worth, so a cost measured from even one tap is used at once */
+    if ((first || now_ns > g_wbgp[c].t_ns) && mono) {
+      const double dt = first ? (double)SENSE_DECIDE_NS : (double)(now_ns - g_wbgp[c].t_ns);
+      g_wbgp[c].offered_hz = (float)((double)(ws.offered - g_wbgp[c].offered) * 1e9 / dt);
+      if (ws.taps > g_wbgp[c].taps) {
+        const float m = (float)((double)(ws.cost_ns - g_wbgp[c].cost_ns) / (double)(ws.taps - g_wbgp[c].taps));
+        g_wbgp[c].cost_per_tap = g_wbgp[c].cost_per_tap > 0.f ? 0.5f * g_wbgp[c].cost_per_tap + 0.5f * m : m;
+      }
+      if (ws.records > g_wbgp[c].records) {
+        const float m = (float)((double)(ws.ring_ns - g_wbgp[c].ring_ns) / (double)(ws.records - g_wbgp[c].records));
+        g_wbgp[c].ring_per_rec = g_wbgp[c].ring_per_rec > 0.f ? 0.5f * g_wbgp[c].ring_per_rec + 0.5f * m : m;
+      }
+    } else if (!mono) {
+      g_wbgp[c].offered_hz = 0.f; /* counters restarted: this period has no rate */
+    }
+    in.wbg_offered_hz[c] = g_wbgp[c].offered_hz;
+    in.wbg_cost_ns[c] = g_wbgp[c].cost_per_tap;
+    in.wbg_ring_ns[c] = g_wbgp[c].ring_per_rec;
+    g_wbgp[c].t_ns = now_ns; g_wbgp[c].offered = ws.offered; g_wbgp[c].taps = ws.taps; g_wbgp[c].cost_ns = ws.cost_ns; g_wbgp[c].records = ws.records; g_wbgp[c].ring_ns = ws.ring_ns;
+  }
+  if (!smp) { /* R3: cells the scheduler does not decide for (>= NR_SENSE_CELLS) get no wideband-grant tap; say so once per cell */
+    static bool warned[NR_CELL_MAX]; /* scheduler thread only */
+    for (int c = NR_SENSE_CELLS; c < NR_CELL_MAX; c++) {
+      nr_sense_wbg_stats_t ws;
+      nr_sense_wbg_stats(c, &ws);
+      if (ws.overcap && !warned[c]) { warned[c] = true; LOG_W(PHY, "SENSING: SENSE_WBG cell %d is beyond NR_SENSE_CELLS=%d: no scheduler decision, no wideband-grant CFR for it (offered_wbg_overcap counts its wide grants)\n", c, NR_SENSE_CELLS); }
+    }
+  }
   static nr_sense_sched_out_t out;
   nr_sense_sched_decide(&in, &g_st, &out);
   apply(&in);
+  for (int c = 0; c < in.n_cells; c++) nr_sense_wbg_set_rate(c, out.wbg_rate_hz[c]);
   for (int c = 0; c < in.n_cells; c++) {
     nr_sense_cell_floor_publish(c, out.floor_prb[c]);
     atomic_store_explicit(&g_floor_log[c], ((out.gap_p95_ns[c] / 1000000ull) << 17) | ((uint64_t)out.in_gap[c] << 16) | ((uint64_t)out.floor_prb[c] & 0xFFFF), memory_order_relaxed);
@@ -254,6 +295,12 @@ static void sched_log(const nr_sense_sched_in_t *in, const nr_sense_sched_sample
   LOG_A(PHY, "SENSING: SENSE_SCHED decision=%lu cells=%d enables=%d disables=%d bad_cap=%d binding=%s top=%s elig=%d cold_deferred=%d admitted=%d [%s] t_cell=[%s] enabled_now=%u violations=%lu disabled_skips=%lu ring_drops=%lu pool_cap_ms=%.1f pool_base_ms=%.1f queue_ul_base=unmeasured gpu_base=unmeasured\n",
         (unsigned long)atomic_load(&g_decisions), sm->n_cells, out->enables, out->disables, out->bad_cap, nr_sense_res_name((int)out->binding), nr_sense_res_name((int)out->top), out->n_elig, out->cold_deferred, out->n_admitted, set, tc, en,
         (unsigned long)viol, (unsigned long)skips, (unsigned long)drops, sm->res[NR_RES_POOL].cap_ns * 1e-6, sm->res[NR_RES_POOL].base_p99_ns * 1e-6); /* per 50 ms bucket */
+  for (int c = 0; c < in->n_cells; c++) {
+    nr_sense_wbg_stats_t ws;
+    nr_sense_wbg_stats(c, &ws);
+    LOG_A(PHY, "SENSING: SENSE_WBG cell=%d offered_hz=%.1f cost_us=%.1f frac=%.2f rate_hz=%.2f ring_ns=%.0f offered=%lu admitted=%lu taps=%lu records=%lu\n", c, in->wbg_offered_hz[c], in->wbg_cost_ns[c] * 1e-3,
+          out->wbg_frac[c], out->wbg_rate_hz[c], (double)in->wbg_ring_ns[c], (unsigned long)ws.offered, (unsigned long)ws.admitted, (unsigned long)ws.taps, (unsigned long)ws.records);
+  }
   {
     int steps[SENSE_FLOOR_MAX_STEPS];
     const int ns = nr_sense_floor_steps(in->min_prb, in->floor_prb, steps);

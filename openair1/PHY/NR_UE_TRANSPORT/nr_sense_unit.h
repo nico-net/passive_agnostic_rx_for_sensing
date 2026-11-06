@@ -51,6 +51,34 @@ void nr_sense_unit_offer(nr_unit_src_t s, uint16_t rnti, unsigned grants);
  * nr_sense_unit_flush_pending() books the queued skips and must be called by the same thread after the unlock. */
 bool nr_sense_unit_gate_deferred(nr_unit_src_t s, uint16_t rnti, uint16_t est_usable_prbs);
 void nr_sense_unit_flush_pending(void);
+/* Grant-level wideband path: a DL grant of >= sense_min_prb PRBs (the wideband target; NOT the continuity floor T_cell) with proven fields gets a DM-RS-only CFR whichever RNTI it belongs to,
+ * whatever its unit says. wbg_admit (calling thread's cell, SENSING only) is asked by a tap site after the unit gate refused: true = run the tap. Per cell it is a token bucket
+ * (depth 4 tokens) refilled at the rate the scheduler published (nr_sense_wbg_set_rate), NEVER unlimited: before the first decision, and after a cell reset, the rate is one tap per
+ * SENSE_DECIDE_NS. A grant takes one token; with none left, a grant wider than the widest admitted since the last decision may borrow down to -2 tokens (so the widest of the window is
+ * not starved), every other grant waits for the refill, which is time: tokens that accrued over the longest gap serve the next grant. This is a rate limiter with a widest-grant
+ * exception, not a ranking of grants. A cell the scheduler does not decide for (index >= NR_SENSE_CELLS) admits nothing.
+ * wbg_cost books the tap's thread CPU, wbg_ring_cost the writer's cost of its record (the scheduler prices both), wbg_cfr its record to the cell totals (never to an RNTI unit). */
+bool nr_sense_wbg_admit(uint16_t prbs, uint64_t t_ns);
+void nr_sense_wbg_cost(uint64_t cpu_ns);
+void nr_sense_wbg_ring_cost(uint64_t ns);
+void nr_sense_wbg_cfr(uint16_t valid_prbs, uint64_t t_ns);
+/* A token that bought no tap goes back (atomic add on the bucket, capped at its depth): the enqueue was refused, the job was dropped / evicted / went stale, the CRC failed, the ring no longer held the slot,
+ * the DM-RS symbol was invalid or nothing was exported. admitted - refunded == taps. nr_sense_wbg_wasted books the CPU of such a tap (no tap counted). */
+void nr_sense_wbg_refund(void);
+void nr_sense_wbg_wasted(uint64_t cpu_ns);
+/* offered_wbg_overcap: wide grants offered by a cell at or beyond NR_SENSE_CELLS (no scheduler decision, hence no rate, hence no tap), per cell, in stats.overcap. NR_SENSE_CELLS is not raised. */
+void nr_sense_wbg_set_rate(int cell, float rate_hz); /* scheduler: grants/s allowed (>= 0); a negative value is the startup rate */
+typedef struct { uint64_t offered, admitted, taps, cost_ns, records, ring_ns, refunded, overcap; float rate_hz; } nr_sense_wbg_stats_t; /* counters cumulative; rate_hz = the rate in force */
+void nr_sense_wbg_stats(int cell, nr_sense_wbg_stats_t *out);
+/* Site conditions (pure). Consumer site (solver-path job): the TB CRC must have passed (a CRC-failed grant's DCI was never verified: a chance DCI gives a random allocation) and the RNTI is a C-RNTI.
+ * Monitor site: C-RNTI, proven fields (DCI 1_0 or a non-dl_auto 1_1) and no unsettled sweep hypothesis. Export: a record needs nvar > 0, a channel power > 0 and at least one RE. */
+static inline bool nr_sense_wbg_consumer_ok(bool crc_ok, bool c_rnti) { return crc_ok && c_rnti; }
+static inline bool nr_sense_wbg_monitor_ok(bool c_rnti, bool proven_fields, bool sweep_generation, bool sweep_settled) { return c_rnti && proven_fields && (!sweep_generation || sweep_settled); }
+/* The tap itself (at tap time, not decode time): the TB CRC passed and the ring still holds the slot (credit), else the FEP would read another slot's IQ. */
+static inline bool nr_sense_wbg_tap_ok(bool crc_ok, bool iq_ok) { return crc_ok && iq_ok; }
+static inline bool nr_sense_wbg_export_ok(float nvar, double pw, uint32_t n_re) { return nvar > 0.f && pw > 0.0 && n_re > 0; }
+/* After the unit gate of a tap site: unit_open (the gate returned true) -> 0, the unit's own tap runs and wbg takes nothing (no double export); else 1 = wbg admitted, -1 = none. */
+int nr_sense_wbg_after_gate(bool unit_open, bool site_ok, uint16_t prbs, uint64_t t_ns);
 /* Per-cell totals for the metrics (cumulative since start; survive row eviction). */
 typedef struct {
   uint64_t violations, skips;                 /* drops inside enabled units / messages gated off */

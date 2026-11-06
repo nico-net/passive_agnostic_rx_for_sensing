@@ -166,6 +166,7 @@ void nr_passive_metrics_collect(nr_passive_metrics_t *m)
     { bool ig = false; uint64_t g = 0; m->su_floor_prb = (uint64_t)nr_sense_sched_floor_info(nr_cell_idx(), &g, &ig); m->su_cont_gap_p95_ms = g; m->su_in_gap = ig; }
     m->ss_decisions = ss.decisions; m->ss_enables = ss.enables; m->ss_disables = ss.disables; m->ss_bad_cap = ss.bad_cap; m->ss_deferrals = ss.deferrals;
     m->ss_binding = ss.decisions ? ss.binding : -1;
+    { nr_sense_wbg_stats_t w; nr_sense_wbg_stats(nr_cell_idx(), &w); m->sw_offered = w.offered; m->sw_admitted = w.admitted; m->sw_taps = w.taps; m->sw_refunded = w.refunded; m->sw_overcap = w.overcap; }
   }
   m->abs_slot = (int64_t)atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
   if(nr_srs_passive_metrics) nr_srs_passive_metrics(&m->srs_us,&m->srs_jobs_dropped,
