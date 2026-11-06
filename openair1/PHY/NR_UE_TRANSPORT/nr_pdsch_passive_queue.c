@@ -176,11 +176,14 @@ int nr_passive_e2e_trace(void)
 {
   return 1; /* frozen ISAC_E2E_TRACE=1 */
 }
+/* R6: the job struct is copied through the ring (~1.8 KB): the wbg_pre flag must fit in existing padding (base value, compiled at 6abc464153) */
+_Static_assert(sizeof(nr_pdsch_passive_job_t) == 1792, "nr_pdsch_passive_job_t changed size");
 /* release_solver: drops a queued decode variant without decoding it: returns its pending solver entry with no credit, at once.
  *   Called when a job is evicted, refused or skipped, so the solver's FIFO does not keep it as a lost CRC. Caller: enqueue_one() and queue_thread().
  */
 static void release_solver(const nr_pdsch_passive_job_t *j)
 {
+  if (j->wbg_pre) nr_sense_wbg_refund(); /* a monitor-admitted wideband-grant job that never reaches its tap gives its token back */
   if (j->solver_token) nr_pdsch_solver_feedback(j->solver_token, false, false);
 }
 
@@ -1424,7 +1427,7 @@ extern __thread uint32_t nr_gp_tt[26]; /* nr_gpu_pass_dl.c */
  * history through nr_sense_unit_gate), so the scheduler never saw it and no record was ever produced. Here, after the TB CRC verified the identity: gate
  * (counts the message, skips when disabled), FEP of the first DM-RS symbol, the same estimator, the same comb-2 export as the monitor tap. */
 static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, const nr_pdsch_passive_job_t *job, int rxdataF_sz,
-                              c16_t rxdataF[][rxdataF_sz], bool crc_ok)
+                              c16_t rxdataF[][rxdataF_sz], bool crc_ok, bool iq_ok, bool *tok_open)
 {
   const int src = nr_sense_blind_dmrs_source();
   if (src < 0 || nr_isac_mode() != NR_ISAC_MODE_SENSING)
@@ -1440,15 +1443,20 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
   }
   /* grant-level wideband path: a wide grant of a disabled unit is still tapped when the cell's wbg bucket allows, only after the TB CRC passed (a CRC-failed grant's DCI was never verified)
    * and only for a C-RNTI. A monitor-site grant (wbg_pre) was admitted there and booked its unit message there: no second gate, no second token. */
-  bool wbg = job->wbg_pre;
+  bool wbg = job->wbg_pre, local_tok = false;
+  bool *tok = job->wbg_pre ? tok_open : &local_tok; /* true while this tap holds a wideband-grant token that has not bought a tap yet */
   if (!wbg) {
     const bool open = nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, job->rnti, (uint16_t)ca.num_rbs);
     const int w = nr_sense_wbg_after_gate(open, nr_sense_wbg_consumer_ok(crc_ok, job->rnti_class == NR_BLIND_RNTI_CLASS_C), (uint16_t)ca.num_rbs, nr_sense_now_ns());
     if (w < 0) return;
     wbg = w > 0;
+    local_tok = wbg;
   }
-  if (wbg && !crc_ok)
-    return; /* a wbg_pre job that failed the CRC (solved-layout rescue path) */
+#define WBG_GIVE_BACK() do { if (wbg && *tok) { nr_sense_wbg_refund(); *tok = false; } } while (0)
+  if (wbg && !nr_sense_wbg_tap_ok(crc_ok, iq_ok)) { /* CRC failed (solved-layout rescue path), or the ring no longer holds the slot: the FEP would read another slot's IQ */
+    WBG_GIVE_BACK();
+    return;
+  }
   int dmrs_sym = -1;
   for (int m = pdu->start_symbol; m < pdu->start_symbol + pdu->number_symbols && m < 32; m++)
     if (pdu->dlDmrsSymbPos & (1u << m)) {
@@ -1456,8 +1464,10 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
       break;
     }
   const int nsc = ca.num_rbs * NR_NB_SC_PER_RB, nant = fp->nb_antennas_rx < 8 ? fp->nb_antennas_rx : 8;
-  if (dmrs_sym < 0 || dmrs_sym >= fp->symbols_per_slot || nsc < 2 || nant < 1)
+  if (dmrs_sym < 0 || dmrs_sym >= fp->symbols_per_slot || nsc < 2 || nant < 1) {
+    WBG_GIVE_BACK();
     return;
+  }
   const uint64_t uc0 = nr_sense_unit_cpu_ns();
   const uint32_t est_sz = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16, ncomb = (uint32_t)(nsc + 1) / 2;
   /* per-thread reusable estimate buffer (zeroed per grant like the calloc it replaces): no mmap/munmap + page faults per CRC-OK grant */
@@ -1470,6 +1480,7 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
   }
   int32_t(*est)[est_sz] = t_est_cap >= est_bytes ? (int32_t(*)[est_sz])t_est_buf : NULL;
   if (est) memset(est, 0, est_bytes);
+  bool exported = false;
   float *h = malloc(sizeof(float) * 2 * (size_t)nant * ncomb);
   uint32_t *k = malloc(sizeof(uint32_t) * 2 * (size_t)ncomb), *l = k + ncomb;
   if (est && h && k) {
@@ -1499,15 +1510,21 @@ static void consumer_dmrs_tap(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
         nvar > 0 && pw > 0.0 ? (float)(10.0 * log10(pw / n / (double)nvar)) : NAN);
     const nr_isac_carrier_t carrier = {.nof_prb = (uint32_t)fp->N_RB_DL, .scs_hz = fp->subcarrier_spacing, .dl_center_hz = fp->dl_CarrierFreq,
                                        .pci = fp->Nid_cell, .slots_per_frame = fp->slots_per_frame};
-    if (!wbg || nr_sense_wbg_export_ok((float)nvar, pw, n)) /* a wbg record needs a noise variance, a channel power and an RE (an overwritten-IQ slot gives pw = 0: no record) */
+    if (!wbg || nr_sense_wbg_export_ok((float)nvar, pw, n)) { /* a wbg record needs a noise variance, a channel power and an RE */
+      exported = true;
       nr_isac_submit_cfr_multi_meta((uint32_t)job->absolute_slot, 0.0f, src, &carrier, h, (uint32_t)nant, ncomb, k, l, n, nvar > 0 ? (float)nvar : NAN, &meta);
+    }
   }
   free(h);
   free(k);
   const uint64_t uc1 = nr_sense_unit_cpu_ns();
-  if (uc1 && wbg) /* the grant-level path pays the cell's wideband-grant resource, not the RNTI's unit */
+  if (wbg && !exported) { /* nothing exported: the token goes back, the CPU is still booked (no tap counted) */
+    WBG_GIVE_BACK();
+    if (uc1) nr_sense_wbg_wasted(uc1 > uc0 ? uc1 - uc0 : 0);
+  } else if (uc1 && wbg) { /* the grant-level path pays the cell's wideband-grant resource, not the RNTI's unit */
     nr_sense_wbg_cost(uc1 > uc0 ? uc1 - uc0 : 0);
-  else if (uc1) /* one message of the RNTI's PDSCH_DMRS unit: FEP + estimate + export */
+    *tok = false;
+  } else if (uc1) /* one message of the RNTI's PDSCH_DMRS unit: FEP + estimate + export */
     nr_sense_unit_job(NR_UNIT_PDSCH_DMRS, job->rnti, uc1 > uc0 ? uc1 - uc0 : 0, 0, false, (uint16_t)ca.num_rbs, nr_sense_now_ns());
 }
 
@@ -2479,14 +2496,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                NR_UEV_TRUSTED, NR_UEC_CONVERGED, job.absolute_slot);
         }
       }
+      bool wbg_tok = job.wbg_pre; /* a monitor-admitted token still to be spent or given back */
+      const bool tap_iq_ok = owned || nr_passive_credit_allowed(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame); /* at tap time: the ring may have moved on since the decode */
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.dmrs_tap
           && nr_dmrs_tap_wanted(true, false, false, true, nr_pdsch_solver_layout_state(job.rnti, NULL, NULL)))
-        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, false); /* SOLVED layout: the DM-RS CFR does not need a CRC pass (not for the wbg path: it needs the CRC) */
+        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, false, tap_iq_ok, &wbg_tok); /* SOLVED layout: the DM-RS CFR does not need a CRC pass (not for the wbg path: it needs the CRC) */
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         lock_verify_note_crc_ok(job.absolute_slot);
         if (job.dmrs_tap)
-          consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, true);
+          consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, true, tap_iq_ok, &wbg_tok);
         if (job.want_data) {
           /* Publish THIS job's monotonic slot so the CPI grid indexes it correctly. Without this the
            * submit derives the index from proc->frame_rx, which wraps at 1024 -- harmless in order,
@@ -2498,6 +2517,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           nr_isac_abs_slot_override = 0;
         }
       }
+      if (wbg_tok) { nr_sense_wbg_refund(); wbg_tok = false; } /* CRC failed / probe: the monitor-admitted token bought no tap */
     }
     if (cb0_on) { /* decode error / unsupported: the TB path did not feed this grant (no-op when fed above) */
       const nr_td_cb0_tb_t cb0_tb = {.tb_fed = false, .tb_pass = false, .tb_decoder = cb0_tb_decoder, .iq_ok_after = credit_ok,

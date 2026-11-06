@@ -10773,7 +10773,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
        * Mirrors the job built on the normal path below; kept explicit rather than reached by a goto, which
        * cannot legally jump into that nested block. */
       decodes_this_occasion++;
-      const bool wbg_e = wbg_site && !need_chest && nr_sense_wbg_admit((uint16_t)chest_alloc.num_rbs, nr_sense_now_ns()); /* need_chest: the tap path below handles the grant */
+      const bool wbg_e = wbg_site && !need_chest && nr_sense_wbg_admit((uint16_t)chest_alloc.num_rbs, nr_sense_now_ns()); /* need_chest (SNR gate on): the normal defer path below routes it (R5) */
       const nr_pdsch_passive_grant_t grant_q = {.rnti           = out.rnti,
                                                 .mcs            = out.mcs,
                                                 .rv             = out.rv,
@@ -10820,7 +10820,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
                            && !atomic_load_explicit(&g_dl_layout_preferred, memory_order_relaxed)) ? 1 : 0;
       atomic_fetch_add_explicit(&g_enq_class[need_chest ? 1 : 0][out.rnti_class], 1, memory_order_relaxed);
       ragrant_dump(&dlsch_pdu, &out, grant_mcs_table, css0_occasion, need_chest ? "normal" : "deferred");
-      nr_pdsch_passive_queue_enqueue(&job);
+      if (!nr_pdsch_passive_queue_enqueue(&job) && wbg_e) nr_sense_wbg_refund(); /* refused: the token goes back */
       if (!need_chest)
         continue;
       NR_BLIND_CTR_INC(g_enq_before_tap);
@@ -11015,6 +11015,10 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
               job.rnti_class    = out.rnti_class;
               job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
               job.want_data     = want_data;
+              /* R5: a grant that needed the chest (SNR gate on) reaches the wideband-grant path here, after the gate passed; the chest above ran for the gate, the tap itself runs on the consumer */
+              const bool wbg_n = wbg_site && nr_sense_wbg_admit((uint16_t)chest_alloc.num_rbs, nr_sense_now_ns());
+              job.dmrs_tap      = wbg_n;
+              job.wbg_pre       = wbg_n;
               job.fo_hz         = isnan(nr_slot_fep_fo_override_hz)
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample */
@@ -11025,7 +11029,7 @@ NR_CELL_STATIC(s_last_cnt_cell_t, s_last_cnt);
               job.data_id_advance = dl_data_advance;
               atomic_fetch_add_explicit(&g_enq_class[1][out.rnti_class], 1, memory_order_relaxed);
               ragrant_dump(&dlsch_pdu, &out, grant_mcs_table, css0_occasion, "normal");
-              nr_pdsch_passive_queue_enqueue(&job);
+              if (!nr_pdsch_passive_queue_enqueue(&job) && wbg_n) nr_sense_wbg_refund();
               /* The per-candidate channel-estimate allocation is freed at the BOTTOM of this loop,
                * which `continue` skips -- ~917 kB per job at 273 PRB x 4 antennas, and mlockall()
                * makes every byte of it count against RLIMIT_MEMLOCK. Free it here. */

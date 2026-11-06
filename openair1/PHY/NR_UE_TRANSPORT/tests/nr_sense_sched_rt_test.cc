@@ -315,7 +315,7 @@ TEST_F(Sched, WbgCellResetClearsTheMeasurement)
   double off = 0, cost = 0;
   nr_sense_sched_wbg_info(0, &off, &cost);
   ASSERT_GT(cost, 0.0);
-  nr_sense_sched_cell_reset(0);
+  nr_sense_unit_reset(0); /* what a cell resync does: counters back to 0 and the scheduler told */
   nr_sense_sched_step(tb(3 * DEC));
   nr_sense_sched_wbg_info(0, &off, &cost);
   EXPECT_EQ(cost, 0.0); /* the stale cost per tap is gone */
@@ -336,4 +336,22 @@ TEST_F(Sched, WbgCounterDecreaseIsNotAHugeCost)
   nr_sense_wbg_stats_t s;
   nr_sense_wbg_stats(0, &s);
   EXPECT_GT(s.rate_hz, 0.1f); /* and the rate did not collapse */
+}
+
+TEST_F(Sched, WbgMeasuredCostIsUsedFromTheFirstTapWithNoUnitModel)
+{
+  /* no pdsch_dmrs unit exists in this cell: the first decision after the first taps must already publish a measured rate, not stay at 0.25 Hz */
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_NEAR(s.rate_hz, 0.25f, 1e-3);
+  int ok = 0;
+  for (int i = 0; i < 40; i++) ok += nr_sense_wbg_admit(217, tb(0) + 1) ? 1 : 0; /* 40 offered, 4 admitted */
+  for (int i = 0; i < ok; i++) nr_sense_wbg_cost(50000);
+  nr_sense_sched_step(tb(DEC)); /* the first decision */
+  double off = 0, cost = 0;
+  nr_sense_sched_wbg_info(0, &off, &cost);
+  EXPECT_NEAR(off, 10.0, 0.5);       /* 40 offered over the first period */
+  EXPECT_NEAR(cost, 50000.0, 1.0);   /* one window of 4 taps is enough */
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_NEAR(s.rate_hz, 12.5f, 0.6f); /* 1.25 x 10 Hz: measured, not the startup rate */
 }

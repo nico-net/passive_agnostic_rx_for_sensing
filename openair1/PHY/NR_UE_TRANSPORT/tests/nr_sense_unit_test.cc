@@ -535,12 +535,53 @@ TEST_F(Unit, WbgNoDoubleExportWhenTheUnitIsOpen)
   EXPECT_EQ(s.offered, 1u);
 }
 
-TEST_F(Unit, WbgCellsBeyondTheSchedulerAreNeverUnlimited)
+TEST_F(Unit, WbgCellsBeyondTheSchedulerAreNeverUnlimitedAndCounted)
 {
   if (NR_CELL_MAX <= NR_SENSE_CELLS) GTEST_SKIP();
   nr_cell_bind(NR_SENSE_CELLS); /* a cell the scheduler does not decide for */
   EXPECT_FALSE(nr_sense_wbg_admit(217, tb(1)));
+  EXPECT_FALSE(nr_sense_wbg_admit(217, tb(1)));
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(NR_SENSE_CELLS, &s);
+  EXPECT_EQ(s.overcap, 2u); /* not silent: counted (offered_wbg_overcap) */
+  EXPECT_EQ(s.admitted, 0u);
   nr_cell_bind(0);
+}
+
+TEST_F(Unit, WbgTapNeedsTheCrcAndTheRingStillHoldingTheSlot)
+{
+  EXPECT_TRUE(nr_sense_wbg_tap_ok(true, true));
+  EXPECT_FALSE(nr_sense_wbg_tap_ok(true, false)); /* credit expired after the CRC pass: the IQ is another slot's */
+  EXPECT_FALSE(nr_sense_wbg_tap_ok(false, true));
+}
+
+TEST_F(Unit, WbgRefundsBalanceTheTaps)
+{
+  nr_sense_wbg_set_rate(0, 0.f);
+  int adm = 0;
+  for (int i = 0; i < 6; i++) adm += nr_sense_wbg_admit(217, tb(1)) ? 1 : 0; /* 4 tokens */
+  ASSERT_EQ(adm, 4);
+  nr_sense_wbg_refund(); /* enqueue refused */
+  nr_sense_wbg_refund(); /* ring credit expired */
+  nr_sense_wbg_cost(100000); nr_sense_wbg_cost(100000); /* two taps ran */
+  nr_sense_wbg_wasted(50000); /* CPU of a tap that exported nothing */
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.admitted - s.refunded, s.taps);
+  EXPECT_EQ(s.cost_ns, 250000u);
+  int more = 0; /* the two refunded tokens are back */
+  for (int i = 0; i < 6; i++) more += nr_sense_wbg_admit(150, tb(1)) ? 1 : 0;
+  EXPECT_EQ(more, 2);
+}
+
+TEST_F(Unit, WbgRefundIsCappedAtTheBucketDepth)
+{
+  nr_sense_wbg_set_rate(0, 0.f);
+  EXPECT_TRUE(nr_sense_wbg_admit(217, tb(1)));
+  for (int i = 0; i < 20; i++) nr_sense_wbg_refund();
+  int ok = 0;
+  for (int i = 0; i < 20; i++) ok += nr_sense_wbg_admit(150, tb(1)) ? 1 : 0;
+  EXPECT_EQ(ok, 4); /* never above the depth */
 }
 
 TEST_F(Unit, WbgConcurrentAdmitsStayWithinTheTokens)

@@ -62,13 +62,20 @@ bool nr_sense_wbg_admit(uint16_t prbs, uint64_t t_ns);
 void nr_sense_wbg_cost(uint64_t cpu_ns);
 void nr_sense_wbg_ring_cost(uint64_t ns);
 void nr_sense_wbg_cfr(uint16_t valid_prbs, uint64_t t_ns);
+/* A token that bought no tap goes back (atomic add on the bucket, capped at its depth): the enqueue was refused, the job was dropped / evicted / went stale, the CRC failed, the ring no longer held the slot,
+ * the DM-RS symbol was invalid or nothing was exported. admitted - refunded == taps. nr_sense_wbg_wasted books the CPU of such a tap (no tap counted). */
+void nr_sense_wbg_refund(void);
+void nr_sense_wbg_wasted(uint64_t cpu_ns);
+/* offered_wbg_overcap: wide grants offered by a cell at or beyond NR_SENSE_CELLS (no scheduler decision, hence no rate, hence no tap), per cell, in stats.overcap. NR_SENSE_CELLS is not raised. */
 void nr_sense_wbg_set_rate(int cell, float rate_hz); /* scheduler: grants/s allowed (>= 0); a negative value is the startup rate */
-typedef struct { uint64_t offered, admitted, taps, cost_ns, records, ring_ns; float rate_hz; } nr_sense_wbg_stats_t; /* counters cumulative; rate_hz = the rate in force */
+typedef struct { uint64_t offered, admitted, taps, cost_ns, records, ring_ns, refunded, overcap; float rate_hz; } nr_sense_wbg_stats_t; /* counters cumulative; rate_hz = the rate in force */
 void nr_sense_wbg_stats(int cell, nr_sense_wbg_stats_t *out);
 /* Site conditions (pure). Consumer site (solver-path job): the TB CRC must have passed (a CRC-failed grant's DCI was never verified: a chance DCI gives a random allocation) and the RNTI is a C-RNTI.
  * Monitor site: C-RNTI, proven fields (DCI 1_0 or a non-dl_auto 1_1) and no unsettled sweep hypothesis. Export: a record needs nvar > 0, a channel power > 0 and at least one RE. */
 static inline bool nr_sense_wbg_consumer_ok(bool crc_ok, bool c_rnti) { return crc_ok && c_rnti; }
 static inline bool nr_sense_wbg_monitor_ok(bool c_rnti, bool proven_fields, bool sweep_generation, bool sweep_settled) { return c_rnti && proven_fields && (!sweep_generation || sweep_settled); }
+/* The tap itself (at tap time, not decode time): the TB CRC passed and the ring still holds the slot (credit), else the FEP would read another slot's IQ. */
+static inline bool nr_sense_wbg_tap_ok(bool crc_ok, bool iq_ok) { return crc_ok && iq_ok; }
 static inline bool nr_sense_wbg_export_ok(float nvar, double pw, uint32_t n_re) { return nvar > 0.f && pw > 0.0 && n_re > 0; }
 /* After the unit gate of a tap site: unit_open (the gate returned true) -> 0, the unit's own tap runs and wbg takes nothing (no double export); else 1 = wbg admitted, -1 = none. */
 int nr_sense_wbg_after_gate(bool unit_open, bool site_ok, uint16_t prbs, uint64_t t_ns);

@@ -229,8 +229,10 @@ void nr_sense_sched_step(uint64_t now_ns)
     nr_sense_wbg_stats_t ws;
     nr_sense_wbg_stats(c, &ws);
     const bool mono = ws.offered >= g_wbgp[c].offered && ws.taps >= g_wbgp[c].taps && ws.cost_ns >= g_wbgp[c].cost_ns && ws.records >= g_wbgp[c].records && ws.ring_ns >= g_wbgp[c].ring_ns;
-    if (g_wbgp[c].t_ns && now_ns > g_wbgp[c].t_ns && mono) {
-      g_wbgp[c].offered_hz = (float)((double)(ws.offered - g_wbgp[c].offered) * 1e9 / (double)(now_ns - g_wbgp[c].t_ns));
+    const bool first = !g_wbgp[c].t_ns; /* the first decision of the cell: the counters since start are one period's worth, so a cost measured from even one tap is used at once */
+    if ((first || now_ns > g_wbgp[c].t_ns) && mono) {
+      const double dt = first ? (double)SENSE_DECIDE_NS : (double)(now_ns - g_wbgp[c].t_ns);
+      g_wbgp[c].offered_hz = (float)((double)(ws.offered - g_wbgp[c].offered) * 1e9 / dt);
       if (ws.taps > g_wbgp[c].taps) {
         const float m = (float)((double)(ws.cost_ns - g_wbgp[c].cost_ns) / (double)(ws.taps - g_wbgp[c].taps));
         g_wbgp[c].cost_per_tap = g_wbgp[c].cost_per_tap > 0.f ? 0.5f * g_wbgp[c].cost_per_tap + 0.5f * m : m;
@@ -246,6 +248,14 @@ void nr_sense_sched_step(uint64_t now_ns)
     in.wbg_cost_ns[c] = g_wbgp[c].cost_per_tap;
     in.wbg_ring_ns[c] = g_wbgp[c].ring_per_rec;
     g_wbgp[c].t_ns = now_ns; g_wbgp[c].offered = ws.offered; g_wbgp[c].taps = ws.taps; g_wbgp[c].cost_ns = ws.cost_ns; g_wbgp[c].records = ws.records; g_wbgp[c].ring_ns = ws.ring_ns;
+  }
+  if (!smp) { /* R3: cells the scheduler does not decide for (>= NR_SENSE_CELLS) get no wideband-grant tap; say so once per cell */
+    static bool warned[NR_CELL_MAX]; /* scheduler thread only */
+    for (int c = NR_SENSE_CELLS; c < NR_CELL_MAX; c++) {
+      nr_sense_wbg_stats_t ws;
+      nr_sense_wbg_stats(c, &ws);
+      if (ws.overcap && !warned[c]) { warned[c] = true; LOG_W(PHY, "SENSING: SENSE_WBG cell %d is beyond NR_SENSE_CELLS=%d: no scheduler decision, no wideband-grant CFR for it (offered_wbg_overcap counts its wide grants)\n", c, NR_SENSE_CELLS); }
+    }
   }
   static nr_sense_sched_out_t out;
   nr_sense_sched_decide(&in, &g_st, &out);

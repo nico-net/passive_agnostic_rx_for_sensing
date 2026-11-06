@@ -42,7 +42,7 @@ typedef struct {
   _Atomic uint64_t viol_total, skip_total, wb_valid, wb_valid_prbs, last_wb_ns, gap_max_ns; /* cell totals for the metrics (S7) */
   _Atomic uint64_t ev[CFR_EV_N];       /* S9: the cell's latest DCI arrivals, (t_ns / 1000) << 16 | grant PRBs; 0 = empty */
   _Atomic uint64_t ev_head;            /* records written so far (the next slot is ev_head % CFR_EV_N) */
-  _Atomic uint64_t wbg_offered, wbg_admitted, wbg_taps, wbg_cost_ns, wbg_rec, wbg_ring_ns; /* grant-level wideband path (nr_sense_wbg_*) */
+  _Atomic uint64_t wbg_offered, wbg_admitted, wbg_taps, wbg_cost_ns, wbg_rec, wbg_ring_ns, wbg_refunded, wbg_overcap; /* grant-level wideband path (nr_sense_wbg_*) */
   _Atomic uint64_t wbg_tok;            /* token bucket: t_us(32, wrapping) << 32 | milli-tokens (signed 32); 0 = never used (full) */
   _Atomic uint32_t wbg_rate_m1;        /* allowed grants/s in milli-Hz + 1; 0 = the startup rate (no decision yet / cell reset) */
   _Atomic uint32_t wbg_widest;         /* widest allocation admitted since the last decision */
@@ -317,8 +317,9 @@ bool nr_sense_wbg_admit(uint16_t prbs, uint64_t t_ns)
   if (nr_isac_mode() != NR_ISAC_MODE_SENSING) return false;
   const int cell = nr_cell_idx();
   if (prbs < (unsigned)nr_isac_sense_min_prb()) return false; /* the wideband target, not the continuity floor T_cell */
-  if ((unsigned)cell >= NR_SENSE_CELLS) return false; /* the scheduler decides for no such cell: no rate, so no tap */
+  if ((unsigned)cell >= NR_CELL_MAX) return false;
   unit_tab_t *T = tab_of(cell);
+  if ((unsigned)cell >= NR_SENSE_CELLS) { atomic_fetch_add_explicit(&T->wbg_overcap, 1, memory_order_relaxed); return false; } /* the scheduler decides for no such cell: no rate, so no tap; counted, the rt thread logs it once */
   atomic_fetch_add_explicit(&T->wbg_offered, 1, memory_order_relaxed);
   const uint32_t rm = atomic_load_explicit(&T->wbg_rate_m1, memory_order_relaxed);
   bool ok = false;
@@ -352,6 +353,26 @@ void nr_sense_wbg_cost(uint64_t cpu_ns)
   unit_tab_t *T = tab_of(nr_cell_idx());
   atomic_fetch_add_explicit(&T->wbg_taps, 1, memory_order_relaxed);
   atomic_fetch_add_explicit(&T->wbg_cost_ns, cpu_ns, memory_order_relaxed);
+}
+void nr_sense_wbg_refund(void)
+{
+  if (nr_isac_mode() != NR_ISAC_MODE_SENSING) return;
+  const int cell = nr_cell_idx();
+  if ((unsigned)cell >= NR_SENSE_CELLS) return;
+  unit_tab_t *T = tab_of(cell);
+  atomic_fetch_add_explicit(&T->wbg_refunded, 1, memory_order_relaxed);
+  uint64_t o = atomic_load_explicit(&T->wbg_tok, memory_order_relaxed), n;
+  do {
+    if (!o) return; /* never used: the bucket is full */
+    int64_t tk = (int32_t)(uint32_t)o + 1000;
+    if (tk > WBG_BURST_M) tk = WBG_BURST_M;
+    n = (o & 0xFFFFFFFF00000000ull) | (uint32_t)(int32_t)tk;
+  } while (!atomic_compare_exchange_weak_explicit(&T->wbg_tok, &o, n, memory_order_relaxed, memory_order_relaxed));
+}
+void nr_sense_wbg_wasted(uint64_t cpu_ns)
+{
+  if (nr_isac_mode() != NR_ISAC_MODE_SENSING) return;
+  atomic_fetch_add_explicit(&tab_of(nr_cell_idx())->wbg_cost_ns, cpu_ns, memory_order_relaxed);
 }
 void nr_sense_wbg_ring_cost(uint64_t ns)
 {
@@ -387,6 +408,8 @@ void nr_sense_wbg_stats(int cell, nr_sense_wbg_stats_t *out)
   out->cost_ns = atomic_load_explicit(&T->wbg_cost_ns, memory_order_relaxed);
   out->records = atomic_load_explicit(&T->wbg_rec, memory_order_relaxed);
   out->ring_ns = atomic_load_explicit(&T->wbg_ring_ns, memory_order_relaxed);
+  out->refunded = atomic_load_explicit(&T->wbg_refunded, memory_order_relaxed);
+  out->overcap = atomic_load_explicit(&T->wbg_overcap, memory_order_relaxed);
   const uint32_t rm = atomic_load_explicit(&T->wbg_rate_m1, memory_order_relaxed);
   out->rate_hz = (rm ? (float)(rm - 1) : (float)WBG_STARTUP_M) * 1e-3f;
 }
@@ -734,7 +757,7 @@ void nr_sense_unit_reset(int cell)
   atomic_store_explicit(&T->gap_max_ns, 0, memory_order_relaxed);
   atomic_store_explicit(&T->ev_head, 0, memory_order_relaxed);
   atomic_store_explicit(&T->wbg_offered, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_admitted, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_taps, 0, memory_order_relaxed);
-  atomic_store_explicit(&T->wbg_cost_ns, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_rec, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_ring_ns, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_tok, 0, memory_order_relaxed);
+  atomic_store_explicit(&T->wbg_cost_ns, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_rec, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_ring_ns, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_refunded, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_overcap, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_tok, 0, memory_order_relaxed);
   atomic_store_explicit(&T->wbg_rate_m1, 0, memory_order_relaxed); atomic_store_explicit(&T->wbg_widest, 0, memory_order_relaxed);
   nr_sense_sched_cell_reset(cell); /* a new unit table = a new cell: its T_cell restarts at sense_min_prb */
 }
