@@ -3353,6 +3353,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	201	sched_log::sn	func_static	c
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	45	g_wbgp	file_static	struct {}[NR_SENSE_CELLS]	PROCESS	CELLFEAT	sensing-mode scheduler (one thread for every cell): per-cell previous counters of the wideband-grant resource, indexed by cell, touched by that thread only
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_sched_rt.c	253	nr_sense_sched_step::warned	func_static	bool[NR_CELL_MAX]	PROCESS	CELLFEAT	one-time warning per cell beyond NR_SENSE_CELLS, scheduler thread only
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	45	unit_tab	file_static	unit_tab_t [converted]	PER_CELL	CELLFEAT	per-cell sensing unit table (64 RNTI rows x 4 sources x 320 buckets of 50 ms): lock-free atomics written by any thread of the cell, rows created under a try-lock, read by the cell's scheduler thread
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	315	g_single	file_static	_Atomic bool	PROCESS	CELLFEAT	sensing scheduler (one thread for every cell) publishes whether exactly one sensing cell is active; read lock-free by the gates of every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	408	tl_pend	tls	struct {}[PEND_N]	TLS	CELLFEAT	per-thread queue of unit-gate skips taken under a long lock, booked by the same thread after the unlock
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_unit.c	409	tl_pend_n	tls	int	TLS	CELLFEAT	per-thread fill of tl_pend
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	54	srs_lock	file_static	pthread_mutex_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)

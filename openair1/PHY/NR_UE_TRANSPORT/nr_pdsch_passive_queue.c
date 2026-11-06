@@ -2499,7 +2499,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       }
       bool wbg_tok = job.wbg_pre; /* a monitor-admitted token still to be spent or given back */
       const bool tap_iq_ok = owned || nr_passive_credit_allowed(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed), job.absolute_slot, slots_per_frame); /* at tap time: the ring may have moved on since the decode */
-      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.dmrs_tap
+      /* Partial-TB proof (operator 2026-11-06): a TB that failed its CRC but has a code block that passed CRC24B (C > 1) is as proven as one that passed the TB CRC: a chance DCI or a wrong layout does not pass a 24-bit CRC. */
+      const bool tb_partial = st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.dmrs_tap && nr_isac_mode() == NR_ISAC_MODE_SENSING
+                              && nr_sense_tb_proven(false, dec.cb_total, dec.cb_ok);
+      if (tb_partial)
+        consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, true, tap_iq_ok, &wbg_tok);
+      else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.dmrs_tap
           && nr_dmrs_tap_wanted(true, false, false, true, nr_pdsch_solver_layout_state(job.rnti, NULL, NULL)))
         consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, false, tap_iq_ok, &wbg_tok); /* SOLVED layout: the DM-RS CFR does not need a CRC pass (not for the wbg path: it needs the CRC) */
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {

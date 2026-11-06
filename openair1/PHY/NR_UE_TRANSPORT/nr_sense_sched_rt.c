@@ -158,6 +158,7 @@ void nr_sense_sched_reset(void)
   memset(&g_st, 0, sizeof g_st);
   memset(&g_prev, 0, sizeof g_prev);
   memset(g_wbgp, 0, sizeof g_wbgp);
+  nr_sense_single_set(false);
   nr_sense_cell_floor_reset();
   for (int c = 0; c < NR_SENSE_CELLS; c++) atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed);
   (void)nr_sense_sched_take_cell_resets();
@@ -260,6 +261,7 @@ void nr_sense_sched_step(uint64_t now_ns)
   static nr_sense_sched_out_t out;
   nr_sense_sched_decide(&in, &g_st, &out);
   apply(&in);
+  nr_sense_single_set(in.n_cells == 1); /* from this decision on: exactly one active cell = no rationing; two or more = the scheduler's admission */
   for (int c = 0; c < in.n_cells; c++) nr_sense_wbg_set_rate(c, out.wbg_rate_hz[c]);
   for (int c = 0; c < in.n_cells; c++) {
     nr_sense_cell_floor_publish(c, out.floor_prb[c]);

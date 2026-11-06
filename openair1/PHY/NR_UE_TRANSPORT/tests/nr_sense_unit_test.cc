@@ -667,3 +667,35 @@ TEST_F(Unit, WbgCostAndCellBookingNeverTouchAnRntiUnit)
   EXPECT_EQ(snap(0, tb(5), vw), 0); /* no row was opened, no unit cost changed */
   EXPECT_EQ(nr_sense_unit_unattributed_ns(0), 0u);
 }
+
+TEST_F(Unit, TbProvenTruthTable)
+{
+  EXPECT_TRUE(nr_sense_tb_proven(true, 1, 0));   /* C = 1: TB CRC only */
+  EXPECT_FALSE(nr_sense_tb_proven(false, 1, 1)); /* C = 1 has no code-block CRC: cb_ok must not prove it */
+  EXPECT_FALSE(nr_sense_tb_proven(false, 5, 0));
+  EXPECT_TRUE(nr_sense_tb_proven(false, 5, 1));
+  EXPECT_TRUE(nr_sense_tb_proven(false, 5, 5));
+  EXPECT_TRUE(nr_sense_tb_proven(false, 90, 1)); /* more than 64 blocks: counts, not the 64-bit map */
+  EXPECT_TRUE(nr_sense_tb_proven(true, 90, 0));
+}
+
+TEST_F(Unit, SingleCellSkipsTheBucketAndTheWidthFloorOnlyInSensing)
+{
+  nr_sense_single_set(true);
+  int ok = 0;
+  for (int i = 0; i < 200; i++) ok += nr_sense_wbg_admit((uint16_t)(20 + i % 200), tb(1) + i) ? 1 : 0;
+  EXPECT_EQ(ok, 200);
+  nr_sense_wbg_stats_t s;
+  nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.offered, 200u); EXPECT_EQ(s.admitted, 200u);
+  for (int i = 0; i < 200; i++) nr_sense_wbg_cost(1000);
+  EXPECT_TRUE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DATA, 0x1234));
+  EXPECT_TRUE(nr_sense_unit_enabled(NR_UNIT_SRS, 0));
+  EXPECT_FALSE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DMRS, 0x1234));
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+  EXPECT_FALSE(nr_sense_single()); /* the flag means nothing outside sensing */
+  EXPECT_FALSE(nr_sense_wbg_admit(217, tb(1)));
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_sense_single_set(false);
+  EXPECT_FALSE(nr_sense_wbg_admit(100, tb(1))); /* multi-cell rule back: below sense_min_prb */
+}

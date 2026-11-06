@@ -14,12 +14,13 @@ static const uint64_t T0 = 200000ull * B;
 static uint64_t tb(uint64_t k) { return (T0 + k) * B + 1000; }
 static const uint64_t DEC = SENSE_DECIDE_NS / B; /* buckets per decision */
 static nr_sense_res_t g_cap[NR_RES_N];
+static int g_ncells = 2; /* the multi-cell scheduler is what the older tests exercise; the single-cell tests set 1 */
 
 static bool stub_sampler(nr_sense_sched_sample_t *o, uint64_t)
 {
   memset(o, 0, sizeof *o);
-  o->n_cells = 1;
-  o->pci[0] = 415;
+  o->n_cells = g_ncells;
+  o->pci[0] = 415; o->pci[1] = 923;
   memcpy(o->res, g_cap, sizeof g_cap);
   return true;
 }
@@ -33,6 +34,7 @@ class Sched : public ::testing::Test {
     nr_cell_bind(0);
     for (int c = 0; c < 2; c++) nr_sense_unit_reset(c);
     nr_sense_sched_reset();
+    g_ncells = 2;
     for (int r = 0; r < NR_RES_N; r++) g_cap[r] = {200e6f, 0.f};
     g_cap[NR_RES_GPU] = {0.f, 0.f}; /* no GPU on this host: absent, not invalid */
     nr_sense_sched_set_sampler(stub_sampler);
@@ -354,4 +356,38 @@ TEST_F(Sched, WbgMeasuredCostIsUsedFromTheFirstTapWithNoUnitModel)
   EXPECT_NEAR(cost, 50000.0, 1.0);   /* one window of 4 taps is enough */
   nr_sense_wbg_stats(0, &s);
   EXPECT_NEAR(s.rate_hz, 12.5f, 0.6f); /* 1.25 x 10 Hz: measured, not the startup rate */
+}
+
+/* Single PCI (operator 2026-11-06): exactly one active cell at the decision = no admission; the switch follows the cell count at the next decision, both ways. */
+TEST_F(Sched, SingleCellBypassFollowsTheCellCountBothWays)
+{
+  auto wbg_ok = [](int n) { int ok = 0; for (int i = 0; i < n; i++) ok += nr_sense_wbg_admit(40, tb(1) + i) ? 1 : 0; return ok; };
+  EXPECT_FALSE(nr_sense_single());
+  EXPECT_FALSE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DATA, 0x4601)); /* no row: disabled */
+  g_ncells = 1;
+  nr_sense_sched_step(tb(DEC)); /* primes */
+  nr_sense_sched_step(tb(2 * DEC));
+  EXPECT_TRUE(nr_sense_single());
+  EXPECT_TRUE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DATA, 0x4601)); /* open without a row, no admission */
+  EXPECT_TRUE(nr_sense_unit_enabled(NR_UNIT_PUSCH_DMRS, 0x4601));
+  EXPECT_TRUE(nr_sense_unit_gate(NR_UNIT_PDSCH_DATA, 0x4602, 217));
+  EXPECT_FALSE(nr_sense_unit_gate(NR_UNIT_PDSCH_DMRS, 0x4602, 217)); /* DM-RS: the grant-level path takes it */
+  EXPECT_EQ(wbg_ok(500), 500); /* any width, no bucket */
+  nr_sense_wbg_stats_t s; nr_sense_wbg_stats(0, &s);
+  EXPECT_EQ(s.offered, 500u); EXPECT_EQ(s.admitted, 500u);
+  g_ncells = 2; /* a second cell appears: next decision restores the scheduler */
+  EXPECT_TRUE(nr_sense_single()); /* not before the decision */
+  nr_sense_sched_step(tb(3 * DEC));
+  EXPECT_FALSE(nr_sense_single());
+  EXPECT_FALSE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DATA, 0x4601));
+  int ok = wbg_ok(500);
+  EXPECT_LE(ok, 6); /* finite bucket again, and sense_min_prb (128) is back: 40 PRBs refused */
+  EXPECT_FALSE(nr_sense_wbg_admit(40, tb(1)));
+  g_ncells = 1; /* and removed again */
+  nr_sense_sched_step(tb(4 * DEC));
+  EXPECT_TRUE(nr_sense_single());
+  nr_isac_mode_set(NR_ISAC_MODE_TRAFFIC);
+  EXPECT_FALSE(nr_sense_single()); /* traffic mode is never affected */
+  EXPECT_TRUE(nr_sense_unit_enabled(NR_UNIT_PDSCH_DMRS, 1)); /* gates open outside sensing as before */
+  EXPECT_FALSE(nr_sense_wbg_admit(217, tb(1)));
 }

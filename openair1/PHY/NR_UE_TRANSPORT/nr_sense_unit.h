@@ -79,6 +79,13 @@ static inline bool nr_sense_wbg_tap_ok(bool crc_ok, bool iq_ok) { return crc_ok 
 static inline bool nr_sense_wbg_export_ok(float nvar, double pw, uint32_t n_re) { return nvar > 0.f && pw > 0.0 && n_re > 0; }
 /* After the unit gate of a tap site: unit_open (the gate returned true) -> 0, the unit's own tap runs and wbg takes nothing (no double export); else 1 = wbg admitted, -1 = none. */
 int nr_sense_wbg_after_gate(bool unit_open, bool site_ok, uint16_t prbs, uint64_t t_ns);
+/* Single sensing cell (operator 2026-11-06: no rationing where there is no contention). The scheduler publishes, at each decision, whether exactly one sensing cell is active (nr_sense_single_set).
+ * While set (SENSING only): the PDSCH_DATA / PUSCH_DMRS / SRS unit gates are open (nr_sense_unit_enabled), the PDSCH_DMRS unit gate is closed so every proven C-RNTI grant of any width takes the grant-level
+ * path, and nr_sense_wbg_admit has no width floor and no token bucket. Real overload still drops (queues, ring, workers) into the existing counters. >= 2 cells: all of this is off, the scheduler as before. */
+void nr_sense_single_set(bool single);
+bool nr_sense_single(void);
+/* A TB is proven (its identity and layout verified) when the TB CRC passed, or, with more than one code block, at least one code block passed its CRC24B (C == 1 has no code-block CRC). */
+static inline bool nr_sense_tb_proven(bool tb_crc_ok, unsigned cb_total, unsigned cb_ok) { return tb_crc_ok || (cb_total > 1 && cb_ok >= 1); }
 /* Per-cell totals for the metrics (cumulative since start; survive row eviction). */
 typedef struct {
   uint64_t violations, skips;                 /* drops inside enabled units / messages gated off */

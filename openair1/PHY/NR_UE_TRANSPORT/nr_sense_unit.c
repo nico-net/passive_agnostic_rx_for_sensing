@@ -312,15 +312,20 @@ void nr_sense_unit_cfr(nr_unit_src_t s, uint16_t rnti, uint16_t valid_prbs, floa
 #define WBG_STARTUP_M (1000ull * 1000000000ull / SENSE_DECIDE_NS) /* milli-tokens/s: one tap per decision interval */
 #define WBG_BURST_M 4000   /* bucket depth, milli-tokens (4 grants) */
 #define WBG_DEBT_M (-2000) /* a grant wider than any admitted since the last decision may borrow down to here */
+static _Atomic bool g_single; /* exactly one active sensing cell at the last scheduler decision */
+void nr_sense_single_set(bool single) { atomic_store_explicit(&g_single, single, memory_order_relaxed); }
+bool nr_sense_single(void) { return atomic_load_explicit(&g_single, memory_order_relaxed) && nr_isac_mode() == NR_ISAC_MODE_SENSING; }
 bool nr_sense_wbg_admit(uint16_t prbs, uint64_t t_ns)
 {
   if (nr_isac_mode() != NR_ISAC_MODE_SENSING) return false;
   const int cell = nr_cell_idx();
-  if (prbs < (unsigned)nr_isac_sense_min_prb()) return false; /* the wideband target, not the continuity floor T_cell */
+  const bool single = nr_sense_single();
+  if (!single && prbs < (unsigned)nr_isac_sense_min_prb()) return false; /* the wideband target, not the continuity floor T_cell */
   if ((unsigned)cell >= NR_CELL_MAX) return false;
   unit_tab_t *T = tab_of(cell);
   if ((unsigned)cell >= NR_SENSE_CELLS) { atomic_fetch_add_explicit(&T->wbg_overcap, 1, memory_order_relaxed); return false; } /* the scheduler decides for no such cell: no rate, so no tap; counted, the rt thread logs it once */
   atomic_fetch_add_explicit(&T->wbg_offered, 1, memory_order_relaxed);
+  if (single) { atomic_fetch_add_explicit(&T->wbg_admitted, 1, memory_order_relaxed); return true; } /* no contention: no bucket (the refund identity admitted - refunded == taps still holds) */
   const uint32_t rm = atomic_load_explicit(&T->wbg_rate_m1, memory_order_relaxed);
   bool ok = false;
   {
@@ -485,6 +490,7 @@ bool nr_sense_unit_enabled(nr_unit_src_t s, uint16_t rnti)
 {
   if ((unsigned)s >= NR_UNIT_SRC_N || nr_isac_mode() != NR_ISAC_MODE_SENSING)
     return true;
+  if (nr_sense_single()) return s != NR_UNIT_PDSCH_DMRS; /* one cell: no admission; DM-RS goes through the grant-level path (proven grants only) */
   unit_tab_t *T = tab_of(nr_cell_idx());
   const uint32_t k = (uint32_t)unit_rnti(s, rnti) + 1u;
   for (int i = 0; i < NR_UNIT_ROWS; i++) /* keys only: the read needs no generation (a row evicted under us is a race of one message) */
