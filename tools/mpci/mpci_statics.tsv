@@ -2795,8 +2795,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2925	nr_a2e_stg	tls	uint32
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2961	nr_pdsch_passive_queue_enqueue::c_	func_static	_Atomic unsigned long	PROCESS	A5	log rate-limit ordinal/budget (text of a diagnostic line only), shared by cells; N=1 output identical
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2978	g_age_hist	file_static	g_age_hist_arr_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	2980	g_dropped_probe	file_static	_Atomic uint64_t [converted]	PER_CELL	A5	converted: NR_CELL_STATIC
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1463	consumer_dmrs_tap::n_dec	func_static	_Atomic uint64_t	PROCESS	CELLFEAT	count of DM-RS taps that used the decoder's estimate (log line DMRS_TAP_EST only)
-openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1463	consumer_dmrs_tap::n_own	func_static	_Atomic uint64_t	PROCESS	CELLFEAT	count of DM-RS taps that ran their own FEP + chest (log line DMRS_TAP_EST only)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c	1473	consumer_dmrs_tap::n_why	func_static	_Atomic uint64_t[NR_DER_N]	PROCESS	CELLFEAT	per-reason counts of the DM-RS tap's estimate source (decoder estimate used / why the tap estimated itself; log line DMRS_TAP_EST only)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.c	27	kPer	file_static	const uint16_t[NR_SLOTPHASE_NPER]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.c	28	kBase	file_static	const uint16_t[NR_SLOTPHASE_NPER]	CONST	A5	auto
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_slotphase.c	32	kLook	file_static	const uint16_t[NR_SLOTPHASE_EST_LOOKS]	CONST	A5	auto
