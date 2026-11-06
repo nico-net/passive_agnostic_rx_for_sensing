@@ -1788,6 +1788,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     if (gi >= 0) { job = more[gi]; enqueue_ns = more_ns[gi]; }
     NR_CFG_EPOCH_WORK(job.config_epoch, &g_dropped_epoch);
     if (!nr_cfg_epoch_work_current()) {
+      if (job.wbg_pre) nr_sense_wbg_refund(); /* config-epoch drop: no tap ran */
       continue;
     }
     /* Only these three proc fields are read downstream -- verified by inspecting every proc->
@@ -2518,6 +2519,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         }
       }
       if (wbg_tok) { nr_sense_wbg_refund(); wbg_tok = false; } /* CRC failed / probe: the monitor-admitted token bought no tap */
+    } else if (job.wbg_pre) {
+      nr_sense_wbg_refund(); /* decode error / unsupported: no tap ran */
     }
     if (cb0_on) { /* decode error / unsupported: the TB path did not feed this grant (no-op when fed above) */
       const nr_td_cb0_tb_t cb0_tb = {.tb_fed = false, .tb_pass = false, .tb_decoder = cb0_tb_decoder, .iq_ok_after = credit_ok,
