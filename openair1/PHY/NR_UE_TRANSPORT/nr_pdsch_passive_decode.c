@@ -4597,7 +4597,9 @@ gpu_llr_ready:;
       }
     } else {
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
-    }
+      if (nr_isac_mode() == NR_ISAC_MODE_SENSING && t_cb_pass.ok > 0)
+        out->tb = g_harq.b; /* a failed TB: only the payload of the blocks flagged in cb_pass is meaningful (the partial-TB data-aided export); every other reader still gates on CRC_OK */
+    } 
   } else {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
   }
