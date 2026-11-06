@@ -38,3 +38,29 @@ Base binary = /home/nicola/NICOLA/wt/rr-twomodes build (twomodes/design f6e91f10
 4. PRACH as a scheduler unit: NOT done (as ruled). Follow-up: add NR_UNIT_PRACH (value = valid PRACH records/s, same F1/F2 rule), so zero-export PRACH is shed and releases its HOUSE lease.
 5. Not tested on OTA or on sens6 captures; the report's check "rare SRS on sens6 captures" is open.
 6. test_ldpc_cuda_pool_cpu SEGFAULT and ctest "Not Run" set were not compared against a base build.
+
+---
+# Fix round 1 (review: CHANGES REQUIRED), commit 734c5b23a3
+
+## Changes
+1. F2 prior now persistent: `pr_sum/pr_w[cell][src]` in nr_sense_sched_state_t. Each decision both decay by exp(-1/SENSE_WIN_DECISIONS) (time constant 4 decisions, no new constant), then every unit with a known ratio adds (ratio, 1), and every F1 zero-yield shed adds (0, 1) once (at the decision quiet reaches SENSE_WIN_DECISIONS). prior = mean, floored at SENSE_ELIG_VALID_MIN; a source never observed in the cell = 1.0. Cleared in nr_sense_sched_step on a cell reset (and by the memset at init). The old "known units now" prior is gone, so rotating RNTIs whose rows go stale or never produce a record no longer reset the prior to 1.0. The mean is not forgotten when there is no new evidence (only recent observations outweigh it).
+2. Held-off units are skipped in admission: no want, no use, no n_elig, no streak. Side effect (intended by the ruling): a unit re-enters one decision later after its hold-off (violation hold-off test now expects D+4; Sched.StaleRatio... waits one more step; the DA test checks that DA was reported at the deciding step).
+3. `top` is always computed (tightest use/budget over cells and resources); NR_RES_N ("none") when every budget is 0.
+4. Tautological assertions replaced by values: F2 PDSCH admitted val 4000 = 10 x 1.0 x 200 PRB x boost 2; F4 top == pool, and top == none with all caps 0.
+5. Known limit, rare sources: with the back-off capped at 64 decisions (256 s) and a probe window of about 6 decisions, a source emitting less than one record per 16 s is observed on ~6 % of the time at the cap (about 24 s of every ~280 s). Its records are exported in those windows and kept; between windows they are lost. Accepted for now.
+
+## Tests [OFFLINE]
+test_nr_sense_sched 52/52 (was 49): new F2RotatingPuschRntiDeadRowsAndSheds (stale dead rows, rotating RNTIs, zero-record row shed by F1; before the shed a new PUSCH is priced at 1.0 (40 x 128 x 2 = 10240), after it at the floor 2048 and PDSCH 3200 is first and enabled), F2RecoveringSourceGetsItsPriorBack (prior floor after sheds, > 0.7 after real records at ratio 0.9), HeldOffColdUnitsDoNotReserveBudgetNorOutrankProductive. The 923 S1 replay now also carries three stale dead PUSCH RNTIs per decision and still admits at decision 3 and enables at 4.
+
+## ctest [SIM VERIFIED, DGX aarch64] rebuilt, `ninja -k 0 ...` rc 0, `flock -s`, no receiver
+397 tests, 16 not passing, rerun-failed does not change them: test_nr_pusch_uci_* x7 (Not Run, nr_pusch_ucisim not in `tests`), test_nr_pusch_ra0_qam64 and qam256, dft_test, test_nr_modulation (known ARM), test_nr_pusch_ul_disc, nr_td_sim_test, test_nr_ssb_rate_match_prod, test_nr_gpu_pass_cells (S9 baseline list), test_ldpc_cuda_pool_cpu (SEGFAULT). test_nr_gpu_pass passed this time.
+test_ldpc_cuda_pool_cpu on the base build (rr-twomodes, twomodes/design): SEGFAULT as well, so it predates this branch.
+
+## rfsim A/B round 1 [SIM VERIFIED, DGX aarch64, 106 PRB, 4 RX, 150 s, s9 bed, both locks held, order base, fix, fix, base]
+| arm | pdsch_dmrs | pdsch_data | csirs | ssb | non-ssb invalid rs | violations | first ON dmrs/data |
+| base_1 | 14074 | 3381 | 800 | 9600 | 0 | 0 | 11 / 13 |
+| fix_2  | 11226 | 2253 | 796 | 9558 | 0 | 0 | 16 / 14 |
+| fix_3  | 12317 | 3382 | 796 | 9549 | 0 | 0 | 14 / 12 |
+| base_4 | 12296 | 3377 | 792 | 9513 | 0 | 0 | 14 / 12 |
+Every source valid, no violations. fix_3 == base_4 (12317 vs 12296, identical enable sequence). base_1 started early (dmrs ON at 11) like earlier base run 1; fix_2 started late (cell admitted two decisions later, identical behaviour afterwards). The differences between arms are the run start offset (2-5 decisions, seen in the base itself); with n=2 per arm and the previous round's 4 runs (fix 12359/12365, base 14036/12338) PDSCH export is not lower in a way beyond that spread. Honest limit: the bed has no SRS/PUSCH, and the dmrs-vs-data tie at prior 1.0 still gives the cold slot to pdsch_data first in both arms of the later runs.
+Output: .superpowers/ab_r1/{base_1,fix_2,fix_3,base_4}.
