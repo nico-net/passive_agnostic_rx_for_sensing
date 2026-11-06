@@ -783,23 +783,22 @@ TEST(SchedGate, F2RotatingPuschRntiDeadRowsAndSheds)
   H h(1, 100);
   for (uint16_t r = 900; r < 903; r++) { auto &u = h.add(0, r, 0, NR_UNIT_PUSCH_DMRS); u.n_cfr = 5; u.valid_ratio = 0; u.last_cfr_ns = 1; u.wb_rate_hz = 0; } /* dead rows gone stale (> 16 s): no ratio evidence */
   h.add(0, 17, 0, NR_UNIT_PDSCH_DMRS).wb_rate_hz = 20; /* productive: ratio 0.8, records keep coming (refreshed at every decision) */
-  zero_yield(h, 1000, NR_UNIT_PUSCH_DMRS, 40, 0);       /* 128 PRB: 40 x prior x 128 x 2 */
+  for (uint16_t r = 1000; r < 1004; r++) zero_yield(h, r, NR_UNIT_PUSCH_DMRS, 40, 5); /* 128 PRB: 40 x prior x 128 x 2; four RNTIs shed together */
   auto tk = [&]() { auto *p = h.find(0, 17); p->last_cfr_ns = p->last_valid_wb_ns = h.in.now_ns + 4 * S - 1; tick(h); };
   tk();
   EXPECT_EQ(h.out.admitted[0].rnti, 1000); /* nothing observed: PUSCH at prior 1.0 */
   EXPECT_NEAR(h.out.admitted[0].val, 40 * 1.0 * 128 * 2, 1e-3);
   int shed_at = -1;
-  for (int i = 2; i < 30 && shed_at < 0; i++) { tk(); if (!h.en(0, 1000, NR_UNIT_PUSCH_DMRS) && i > 3) shed_at = i; }
+  for (int i = 2; i < 30 && shed_at < 0; i++) { tk(); if (!h.en(0, 1000, NR_UNIT_PUSCH_DMRS) && i > 3) shed_at = i; } /* the first prior sample after the shed is the next decision */
   ASSERT_GT(shed_at, 0); /* zero-yield shed (F1) */
   uint16_t rn = 1001;
   for (int k = 0; k < 3; k++, rn++) { /* a fresh PUSCH RNTI at every decision, as in 923 S1 */
     h.v[0].erase(std::remove_if(h.v[0].begin(), h.v[0].end(), [](const nr_sense_unit_view_t &u) { return u.src == NR_UNIT_PUSCH_DMRS && u.rnti >= 1000; }), h.v[0].end());
     zero_yield(h, rn, NR_UNIT_PUSCH_DMRS, 40, 0);
     tk();
-    bool seen = false;
-    for (int i = 0; i < h.out.n_admitted; i++) if (h.out.admitted[i].rnti == rn) { seen = true; EXPECT_NEAR(h.out.admitted[i].val, 40 * 0.2 * 128 * 2, 1e-3) << "new PUSCH RNTI priced at the floor"; }
-    EXPECT_TRUE(seen);
-    EXPECT_EQ(h.out.admitted[0].rnti, 17); /* PDSCH (3200) outranks it (2048) */
+    /* right after the sheds the prior is the floor (it relaxes toward 1.0 with tau 4 decisions afterwards); the new RNTI may be deferred by the cold slot, which PDSCH holds */
+    for (int i = 0; i < h.out.n_admitted; i++) if (k == 0 && h.out.admitted[i].rnti == rn) EXPECT_NEAR(h.out.admitted[i].val, 40 * 0.2 * 128 * 2, 1e-3) << "new PUSCH RNTI priced at the floor right after the sheds";
+    if (k == 0) EXPECT_EQ(h.out.admitted[0].rnti, 17); /* PDSCH (3200) outranks it */
   }
   EXPECT_TRUE(h.en(0, 17));
 }
@@ -807,10 +806,10 @@ TEST(SchedGate, F2RotatingPuschRntiDeadRowsAndSheds)
 TEST(SchedGate, F2RecoveringSourceGetsItsPriorBack)
 {
   H h(1, 100);
-  zero_yield(h, 1000, NR_UNIT_PUSCH_DMRS, 40, 5);
-  for (int i = 0; i < 12; i++) tick(h);              /* enabled, no records: shed, observation ratio 0 */
+  for (uint16_t r = 1000; r < 1004; r++) zero_yield(h, r, NR_UNIT_PUSCH_DMRS, 40, 5);
+  for (int i = 0; i < 40 && !(i > 3 && !h.en(0, 1000, NR_UNIT_PUSCH_DMRS)); i++) tick(h); /* enabled, no records: shed together, observation ratio 0 x4 */
   h.v[0].clear();
-  EXPECT_NEAR(probe_prior(h, 1100, NR_UNIT_PUSCH_DMRS), SENSE_ELIG_VALID_MIN, 1e-6);
+  EXPECT_LT(probe_prior(h, 1100, NR_UNIT_PUSCH_DMRS), 0.3); /* the floor, one decision of relaxation later */
   h.v[0].clear();
   for (int i = 0; i < 8; i++) { /* real records now: a known ratio 0.9 */
     h.v[0].clear();
@@ -834,4 +833,21 @@ TEST(SchedGate, HeldOffColdUnitsDoNotReserveBudgetNorOutrankProductive)
   EXPECT_EQ(h.out.n_elig, 1);
   h.steps(2);
   EXPECT_TRUE(h.en(0, 9));
+}
+
+/* fix round 2: a prior stuck at the floor relaxes toward 1.0, so a real source that appears later is admitted and enabled */
+TEST(SchedGate, F2FloorPriorRelaxesAndALateRealSrsGetsEnabled)
+{
+  H h(1, 100); /* the pool holds one unit */
+  h.st.pr_sum[0][NR_UNIT_SRS] = 0.0; h.st.pr_w[0][NR_UNIT_SRS] = 1.0; /* every SRS of the cell was shed: mean 0 -> the floor */
+  auto &p = h.add(0, 17, 40, NR_UNIT_PDSCH_DMRS); p.wb_rate_hz = 20; p.enabled = true; /* productive incumbent, ratio 0.8: val 3200 */
+  auto &s = h.add(0, 0, 40, NR_UNIT_SRS); s.n_cfr = 0; s.last_cfr_ns = 0; s.valid_ratio = 0; s.wb_rate_hz = 20; s.last_valid_wb_ns = 0; s.est_usable_prbs = 128; /* a real SRS appears: priced at the prior */
+  int en_at = -1;
+  for (int i = 1; i <= 20 && en_at < 0; i++) {
+    auto *q = h.find(0, 17); q->last_cfr_ns = q->last_valid_wb_ns = h.in.now_ns + 4 * S - 1;
+    tick(h);
+    if (h.en(0, 0, NR_UNIT_SRS)) en_at = i;
+  }
+  ASSERT_GT(en_at, 0);
+  RecordProperty("en_at", en_at); EXPECT_LE(en_at, 12); /* measured: enabled at decision 8 (prior 1 - e^(-k/4) passes the incumbent margin at k=6, then SENSE_CONFIRM) */
 }

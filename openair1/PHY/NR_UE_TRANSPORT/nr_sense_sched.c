@@ -206,18 +206,18 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
     const uint64_t pref = st->last_pci_valid_wb_ns[c] > st->pci_elig_since[c] ? st->last_pci_valid_wb_ns[c] : st->pci_elig_since[c];
     const double pci_boost = nr_sense_age_boost(pci_elig, pref, in->now_ns);
     /* F2: prior of a unit whose ratio is unknown = decayed mean of the evidence of its source in this cell: every known ratio, and a ratio 0 for every zero-yield shed (F1).
-     * Decay: time constant SENSE_WIN_DECISIONS decisions. Floored at SENSE_ELIG_VALID_MIN; a source never observed in the cell is 1.0 (probe it once). */
+     * Decay: time constant SENSE_WIN_DECISIONS decisions. Floored at SENSE_ELIG_VALID_MIN; a source never observed (or long unobserved) tends to 1.0 (probe it). */
     double prior[NR_UNIT_SRC_N];
     {
       const double dec = exp(-1.0 / SENSE_WIN_DECISIONS);
-      for (int s2 = 0; s2 < NR_UNIT_SRC_N; s2++) { st->pr_sum[c][s2] *= dec; st->pr_w[c][s2] *= dec; }
+      for (int s2 = 0; s2 < NR_UNIT_SRC_N; s2++) { st->pr_sum[c][s2] = st->pr_sum[c][s2] * dec + (1.0 - dec); st->pr_w[c][s2] = st->pr_w[c][s2] * dec + (1.0 - dec); } /* decay, and relax toward the optimistic 1.0 with the same time constant (an old floor must not freeze) */
       for (int i = 0; i < in->n_units[c]; i++) {
         const nr_sense_unit_view_t *v = &in->units[c][i];
         if (nr_sense_unit_ratio_known(v, in->now_ns)) { st->pr_sum[c][v->src] += v->valid_ratio; st->pr_w[c][v->src] += 1.0; }
       }
       for (int s2 = 0; s2 < NR_UNIT_SRC_N; s2++) {
-        const double m = st->pr_w[c][s2] > 0 ? st->pr_sum[c][s2] / st->pr_w[c][s2] : 1.0;
-        prior[s2] = st->pr_w[c][s2] > 0 && m < SENSE_ELIG_VALID_MIN ? SENSE_ELIG_VALID_MIN : m;
+        const double m = st->pr_sum[c][s2] / st->pr_w[c][s2]; /* pr_w > 0 always (relaxation) */
+        prior[s2] = m < SENSE_ELIG_VALID_MIN ? SENSE_ELIG_VALID_MIN : m;
       }
     }
 
