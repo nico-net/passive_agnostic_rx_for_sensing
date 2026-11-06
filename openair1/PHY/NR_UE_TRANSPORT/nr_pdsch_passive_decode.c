@@ -1225,7 +1225,7 @@ static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last
  * every body; a layout probe leaves them 0. */
 static __thread uint16_t t_cb_ok = 0, t_cb_tried = 0, t_cb_total = 0;
 static __thread struct nr_pdsch_dec_est t_dec_est; /* h points into t_dec_est_buf; nant == 0: none kept */
-static inline bool chest_chest_ok(int chest_hit, int chest_only, const freq_alloc_bitmap_t *fa) { return !chest_hit && chest_only < 0 && fa->n_prb_list == 0; }
+static inline bool chest_estimate_usable(int chest_hit, int chest_only, const freq_alloc_bitmap_t *fa) { return !chest_hit && chest_only < 0 && fa->n_prb_list == 0; }
 static __thread c16_t *t_dec_est_buf;
 static __thread size_t t_dec_est_cap;
 static __thread nr_da_cb_pass_t t_cb_pass; /* every block's CRC24B result (sensing mode), same lifetime as t_cb_map */
@@ -2232,6 +2232,8 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
       if (nr_isac_mode() == NR_ISAC_MODE_SENSING && TB_parameters.C > 1 && TB_parameters.C <= NR_DA_CB_MAX) {
         t_cb_pass.C = (uint16_t)TB_parameters.C; t_cb_pass.ok = (uint16_t)seg_ok;
         for (uint32_t r = 0; r < C_dec; r++) nr_da_cb_set(&t_cb_pass, r, TB_parameters.decodeSuccess[r] != 0);
+        /* never-guess: an all-zero block passes its CRC24B by construction; the sensing view (cb_pass) drops it, the EVMGRANT counters (cb_ok, cb_map) are unchanged */
+        nr_da_cb_clear_zero(&t_cb_pass, h->c, TB_parameters.K >> 3, (TB_parameters.K >> 3) - (TB_parameters.F >> 3) - 3, (size_t)TB_parameters.C * (TB_parameters.K >> 3));
       }
     }
     /* T26b: a probe of a ONE-code-block TB decodes that block with the TB CRC (CRC16/24A), but its outcome was never
@@ -2699,6 +2701,7 @@ static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_
     if (nr_isac_mode() == NR_ISAC_MODE_SENSING && g->C > 1 && g->C <= NR_DA_CB_MAX) {
       t_cb_pass.C = (uint16_t)g->C; t_cb_pass.ok = (uint16_t)seg_ok;
       for (int r = 0; r < C_dec; r++) nr_da_cb_set(&t_cb_pass, (uint32_t)r, g->r.seg_ok[r] != 0);
+      nr_da_cb_clear_zero(&t_cb_pass, g_harq.b, (g->K >> 3) - (g->F >> 3) - 3, (g->K >> 3) - (g->F >> 3) - 3, (size_t)g->C * ((g->K >> 3) - (g->F >> 3) - 3)); /* the pass put the payloads at these offsets */
     }
   }
   if (!t_probe_first_seg) {
@@ -3810,7 +3813,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   }
   /* Sensing mode: keep the DM-RS estimate for the CFR export (nr_pdsch_dec_est), raw, before the time-domain average / IRC touch it. Only an estimate the export can use as is: every branch estimated (not
    * the single-branch mode), a contiguous grant (no segments / PRB list), made here (not restored from the slot cache: its noise figure belongs to another grant), at the grant's own subcarriers. */
-  if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_blind_dmrs_source() >= 0 && !seg_path && chest_chest_ok(chest_hit, chest_only, freq_alloc) && dmrs_first >= 0) {
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_blind_dmrs_source() >= 0 && !seg_path && chest_estimate_usable(chest_hit, chest_only, freq_alloc) && dmrs_first >= 0) {
     const int nant_e = fp->nb_antennas_rx, nl_e = cw->Nl < NR_MAX_NB_LAYERS ? cw->Nl : NR_MAX_NB_LAYERS;
     const int nsc_e = freq_alloc->num_rbs * NR_NB_SC_PER_RB, off_e = ((int)freq_alloc->first_rb - (int)chest_alloc.first_rb) * NR_NB_SC_PER_RB;
     const size_t need_e = (size_t)nl_e * nant_e * nsc_e;
@@ -4599,7 +4602,7 @@ gpu_llr_ready:;
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
       if (nr_isac_mode() == NR_ISAC_MODE_SENSING && t_cb_pass.ok > 0)
         out->tb = g_harq.b; /* a failed TB: only the payload of the blocks flagged in cb_pass is meaningful (the partial-TB data-aided export); every other reader still gates on CRC_OK */
-    } 
+    }
   } else {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
   }

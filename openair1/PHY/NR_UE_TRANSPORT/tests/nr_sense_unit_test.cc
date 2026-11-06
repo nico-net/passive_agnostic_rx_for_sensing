@@ -1,4 +1,5 @@
 #include "nr_sense_unit.h"
+#include "nr_pdsch_da_blocks.h"
 #include "nr_sense_sched.h"
 #include "nr_sense_api.h"
 #include "common/utils/nr_cell.h"
@@ -698,4 +699,48 @@ TEST_F(Unit, SingleCellSkipsTheBucketAndTheWidthFloorOnlyInSensing)
   nr_isac_mode_set(NR_ISAC_MODE_SENSING);
   nr_sense_single_set(false);
   EXPECT_FALSE(nr_sense_wbg_admit(100, tb(1))); /* multi-cell rule back: below sense_min_prb */
+}
+
+TEST(DaBlocksZero, AllZeroBlockWithCrcPassDoesNotProve)
+{
+  /* 3 blocks of 5 payload bytes in a buffer; block 1 is all zero but "passed" its CRC24B */
+  uint8_t pay[15] = {1,2,3,4,5, 0,0,0,0,0, 9,8,7,6,5};
+  nr_da_cb_pass_t p{}; p.C = 3; p.ok = 1;
+  nr_da_cb_set(&p, 1, true);
+  nr_da_cb_clear_zero(&p, pay, 5, 5, sizeof pay);
+  EXPECT_EQ(p.ok, 0u);
+  EXPECT_FALSE(nr_sense_tb_proven(false, p.C, p.ok)); /* the zero block alone proves nothing */
+  nr_da_cb_set(&p, 2, true); p.ok = 1;
+  nr_da_cb_clear_zero(&p, pay, 5, 5, sizeof pay);
+  EXPECT_EQ(p.ok, 1u); /* a real block still proves, the zero one stays out */
+  EXPECT_TRUE(nr_sense_tb_proven(false, p.C, p.ok));
+  EXPECT_FALSE(nr_da_cb_get(&p, 1));
+  const uint8_t shortbuf[6] = {0,0,0,0,0,7}; /* limit stops the read: block 1 starts at 5, only 1 byte (7) is inside */
+  nr_da_cb_pass_t q{}; q.C = 2; nr_da_cb_set(&q, 1, true);
+  nr_da_cb_clear_zero(&q, shortbuf, 5, 5, sizeof shortbuf);
+  EXPECT_EQ(q.ok, 1u);
+}
+
+TEST(DaBlocksZero, TakeKeepsValidSymbolsInOrderForEveryNl)
+{
+  for (uint32_t nl = 1; nl <= 4; nl++) {
+    const uint32_t n_re = 40;
+    std::vector<uint8_t> valid(n_re);
+    for (uint32_t i = 0; i < n_re; i++) valid[i] = (i / 7) % 2 == 0 ? 1 : 0; /* runs of valid / invalid REs */
+    std::vector<int16_t> orig(2 * n_re * nl), work;
+    for (size_t i = 0; i < orig.size(); i++) orig[i] = (int16_t)(1000 + i);
+    work = orig;
+    uint32_t kept = 0;
+    std::vector<uint32_t> src;
+    for (uint32_t i = 0; i < n_re; i++)
+      if (nr_da_re_take(valid.data(), true, i * nl, nl, kept, work.data())) { src.push_back(i); kept++; }
+    for (uint32_t j = 0; j < kept; j++)
+      for (uint32_t l = 0; l < nl && nl > 1; l++) {
+        EXPECT_EQ(work[2 * (j * nl + l)], orig[2 * (src[j] * nl + l)]) << "nl " << nl;
+        EXPECT_EQ(work[2 * (j * nl + l) + 1], orig[2 * (src[j] * nl + l) + 1]);
+      }
+    uint32_t want = 0; for (auto v : valid) want += v;
+    EXPECT_EQ(kept, want);
+    EXPECT_TRUE(nr_da_re_take(valid.data(), false, 0, nl, 0, work.data())); /* whole TB: everything taken, nothing moved */
+  }
 }

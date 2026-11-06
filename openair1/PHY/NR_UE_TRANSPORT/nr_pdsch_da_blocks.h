@@ -31,6 +31,34 @@ static inline void nr_da_cb_set(nr_da_cb_pass_t *p, uint32_t r, bool v)
   if (v) p->bits[r >> 3] |= (uint8_t)(1u << (r & 7)); else p->bits[r >> 3] &= (uint8_t)~(1u << (r & 7));
 }
 
+/* Never-guess: a code block whose payload is all zero has a zero CRC24B, so the LDPC hard decision of erased / wrong-layout LLRs passes it. Clear such blocks from the bitmap and recount
+ * p->ok. pay + r*stride is block r's payload (nbytes long); bytes at or beyond `limit` (the buffer end) are not read. */
+static inline void nr_da_cb_clear_zero(nr_da_cb_pass_t *p, const uint8_t *pay, size_t stride, size_t nbytes, size_t limit)
+{
+  uint16_t ok = 0;
+  for (uint32_t r = 0; r < p->C && r < NR_DA_CB_MAX; r++) {
+    if (nr_da_cb_get(p, r)) {
+      bool z = true;
+      for (size_t i = 0; z && i < nbytes && (size_t)r * stride + i < limit; i++) z = pay[(size_t)r * stride + i] == 0;
+      if (z) nr_da_cb_set(p, r, false);
+    }
+    ok += nr_da_cb_get(p, r);
+  }
+  p->ok = ok;
+}
+
+/* The per-RE decision of the data-aided walk. s0 = index of the RE's first modulation symbol d(s0..s0+nl-1) (TS 38.211 7.3.1.3: x_l(i) = d(nl*i + l)), nof_re = REs kept so far. Returns false when the RE is
+ * carried by a failed or untried block (not exported). For nl > 1 a kept RE's nl symbols are moved down to mod_syms[nof_re*nl ..] (the windowed LS reads them by position in the exported list; the
+ * write index never passes the read index). mod_syms holds int16 pairs (re, im). nl == 1 reads mod_syms[s0] in place (no compaction: the recon needs mod_idx == nof_re anyway). */
+static inline bool nr_da_re_take(const uint8_t *re_valid, bool part_on, uint32_t s0, uint32_t nl, uint32_t nof_re, int16_t *mod_syms)
+{
+  if (!part_on) return true;
+  if (!re_valid[s0 / nl]) return false;
+  if (nl > 1 && nof_re * nl != s0)
+    for (uint32_t l = 0; l < nl; l++) { mod_syms[2 * (nof_re * nl + l)] = mod_syms[2 * (s0 + l)]; mod_syms[2 * (nof_re * nl + l) + 1] = mod_syms[2 * (s0 + l) + 1]; }
+  return true;
+}
+
 /* E_r of TS 38.212 5.4.2.1 (G = codeword bits, a multiple of Nl*Qm). */
 static inline uint32_t nr_da_block_E(uint32_t G, uint32_t C, uint32_t Qm, uint32_t Nl, uint32_t r)
 {

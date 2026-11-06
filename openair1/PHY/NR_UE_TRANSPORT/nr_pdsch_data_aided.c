@@ -296,26 +296,18 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
    * an all-zero code block has a zero CRC24B, the same false pass the whole-TB path guards against. */
   nr_da_cb_pass_t part = {0};
   const bool part_on = nr_isac_da_cb_pass != NULL && nr_isac_mode() == NR_ISAC_MODE_SENSING;
-  uint32_t part_re = 0;
   if (part_on) {
     part = *nr_isac_da_cb_pass;
     const uint32_t seg_bytes = (TB_parameters.K >> 3) - (TB_parameters.F >> 3) - 3;
     if (TB_parameters.C < 2 || part.C != TB_parameters.C)
       return; /* a one-block TB has no block CRC; a mismatched block count means the result is not this TB's */
-    uint16_t ok = 0;
-    for (uint32_t r = 0; r < TB_parameters.C; r++) {
-      bool z = true;
-      for (uint32_t i = 0; z && i < seg_bytes && (size_t)r * seg_bytes + i < tb_n; i++)
-        z = tb_bytes[(size_t)r * seg_bytes + i] == 0;
-      if (nr_da_cb_get(&part, r) && z) nr_da_cb_set(&part, r, false);
-      ok += nr_da_cb_get(&part, r);
-    }
-    part.ok = ok;
+    nr_da_cb_clear_zero(&part, tb_bytes, seg_bytes, seg_bytes, tb_n);
+    const uint16_t ok = part.ok;
+
     if (!ok) return;
     uint32_t E[MAX_NUM_NR_DLSCH_SEGMENTS];
     for (uint32_t r = 0; r < TB_parameters.C; r++) E[r] = (uint32_t)segments[r].E;
-    part_re = nr_da_re_valid(E, &part, cw->qamModOrder, nl, TB_parameters.G / (cw->qamModOrder * nl), re_valid);
-    (void)part_re;
+    (void)nr_da_re_valid(E, &part, cw->qamModOrder, nl, TB_parameters.G / (cw->qamModOrder * nl), re_valid);
   }
 
   nrLDPC_slot_encoding_parameters_t slot_parameters = {.frame = proc->frame_rx,
@@ -435,11 +427,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
          * the LS window judges the conditioning of the whole X. */
         const uint32_t s0 = mod_idx;
         mod_idx += nl;
-        if (part_on) {
-          if (!re_valid[s0 / nl]) continue; /* a failed or untried block carries this RE: invalid, not exported */
-          if (nof_re * nl != s0) /* keep mod_syms[nof_re*nl + l] aligned with the exported RE list (the LS reads it by list position); writes never pass the read index */
-            for (uint32_t ll = 0; ll < nl; ll++) mod_syms[nof_re * nl + ll] = mod_syms[s0 + ll];
-        }
+        if (!nr_da_re_take(re_valid, part_on, s0, nl, nof_re, (int16_t *)mod_syms)) continue; /* a failed or untried block carries this RE: invalid, not exported */
         for (uint32_t a = 0; a < isac_nof_ant; a++) {
           const c16_t y = rxdataF[a][l * fp->ofdm_symbol_size + re];
           ygath[(size_t)a * isac_max_re + nof_re] = y;
@@ -453,7 +441,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       }
       const uint32_t s0 = mod_idx;
       const c16_t x = mod_syms[mod_idx++];
-      if (part_on && !re_valid[s0]) continue; /* a failed or untried block carries this RE */
+      if (!nr_da_re_take(re_valid, part_on, s0, 1, nof_re, (int16_t *)mod_syms)) continue; /* a failed or untried block carries this RE */
       const float xr = (float)x.r, xi = (float)x.i;
       const float xmag2 = xr * xr + xi * xi;
       if (xmag2 < 1e-6f)

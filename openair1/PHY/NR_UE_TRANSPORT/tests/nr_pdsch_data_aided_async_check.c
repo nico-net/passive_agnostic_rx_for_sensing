@@ -64,6 +64,8 @@ void exit_function(const char *file, const char *function, const int line, const
 #include "PHY/NR_REFSIG/dmrs_nr.h"
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/MODULATION/nr_modulation.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_da_blocks.h"
+#include "PHY/NR_UE_TRANSPORT/nr_sense_unit.h"
 
 static int failures;
 #define CHECK(c, ...)                                                      \
@@ -77,6 +79,10 @@ static int failures;
   } while (0)
 
 static pthread_mutex_t cap_mu = PTHREAD_MUTEX_INITIALIZER;
+#define CAP_ROWS 400000
+typedef struct { int layer; uint32_t k, l; float hr, hi; } cap_row_t; /* antenna 0 of every exported row */
+static cap_row_t cap_rows[CAP_ROWS];
+static int cap_nrows;
 static uint64_t cap_hash[4096];
 static int cap_n;
 static uint32_t cap_subslot_target; /* nr_isac_subslot_config answer */
@@ -140,6 +146,11 @@ void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac, int sourc
   for (uint32_t a = 0; a < nof_ant; a++)
     x = fnv(x, &h[2 * (size_t)a * ant_stride_re], sizeof(float) * 2 * nof_re);
   pthread_mutex_lock(&cap_mu);
+  for (uint32_t i = 0; i < nof_re && cap_nrows < CAP_ROWS; i++) {
+    cap_rows[cap_nrows].layer = meta->layer_idx1; cap_rows[cap_nrows].k = k_abs[i]; cap_rows[cap_nrows].l = l_sym[i];
+    cap_rows[cap_nrows].hr = h[2 * (size_t)i]; cap_rows[cap_nrows].hi = h[2 * (size_t)i + 1];
+    cap_nrows++;
+  }
   if (cap_n < (int)(sizeof(cap_hash) / sizeof(cap_hash[0])))
     cap_hash[cap_n++] = x;
   if (pthread_equal(pthread_self(), cap_main))
@@ -271,6 +282,138 @@ static void run_case(PHY_VARS_NR_UE *ue, const gcase_t *g, uint32_t subslot, c16
   printf("Nl=%d nrb=%3d npl=%d sub=%u: %d frames identical\n", g->nl, g->nrb, g->n_prb_list, subslot, n_inline);
 }
 
+
+/* Partial-TB data-aided export through the production path (real segmentation, RE walk, mod_syms compaction, LS windows; the LDPC encoder is the stand-in, which is enough because the
+ * validity of an RE depends on the block bit spans only): block 1 of a C = 3 TB failed -> exactly its REs (and an untried block's) are missing, the rest are the full-TB rows. */
+static cap_row_t *snapshot_rows(int *n)
+{
+  pthread_mutex_lock(&cap_mu);
+  cap_row_t *c = malloc(sizeof(cap_row_t) * (cap_nrows ? cap_nrows : 1));
+  memcpy(c, cap_rows, sizeof(cap_row_t) * cap_nrows);
+  *n = cap_nrows;
+  pthread_mutex_unlock(&cap_mu);
+  return c;
+}
+static void run_da(PHY_VARS_NR_UE *ue, int nl, int qm, const uint8_t *tb, const nr_da_cb_pass_t *part, int async, c16_t (*rx)[14 * FFT], uint64_t *hash_out, int *nh)
+{
+  fapi_nr_dl_cw_info_t cw = {0};
+  cw.Nl = nl; cw.qamModOrder = qm; cw.mcs = 10; cw.rv = 0; cw.ldpcBaseGraph = 1; cw.TBS = 20000;
+  fapi_nr_dl_config_dlsch_pdu_rel15_t d = {0};
+  d.start_symbol = 2; d.number_symbols = 12; d.dlDmrsSymbPos = 0x4; d.dmrsConfigType = NFAPI_NR_DMRS_TYPE1; d.n_dmrs_cdm_groups = 2;
+  d.dmrs_ports = (1u << nl) - 1; d.dlDataScramblingId = 415; d.tbslbrm = 100000;
+  freq_alloc_bitmap_t fa = {.first_rb = 5, .num_rbs = 24, .last_rb = 28};
+  const uint32_t G = nr_get_G(fa.num_rbs, d.number_symbols, get_num_dmrs_re_per_rb(d.dmrsConfigType, d.n_dmrs_cdm_groups), get_num_dmrs(d.dlDmrsSymbPos), 0, qm, nl);
+  const UE_nr_rxtx_proc_t proc = {.frame_rx = 77, .nr_slot_rx = 5};
+  cap_subslot_target = 0;
+  pthread_mutex_lock(&cap_mu); cap_n = 0; cap_nrows = 0; pthread_mutex_unlock(&cap_mu);
+  nr_isac_abs_slot_override = 123456;
+  nr_isac_da_cb_pass = part;
+  if (!async) nr_isac_pdsch_data_aided_submit(ue, &proc, &cw, &d, &fa, 0x4601, tb, 9, (const c16_t(*)[14 * FFT])rx, 7.5, G, 12.25f);
+  else {
+    CHECK(nr_isac_pdsch_data_aided_submit_async(ue, &proc, &cw, &d, &fa, 0x4601, tb, 9, (const c16_t(*)[14 * FFT])rx, 7.5, G, 12.25f) == 1, "partial job not queued");
+    nr_isac_da_cb_pass = NULL; /* the worker must use the job's own copy */
+    for (int w = 0; w < 20000; w++) { uint64_t qd, dr, dn, sv; nr_isac_pdsch_data_aided_async_counts(&qd, &dr, &dn, &sv); if (dn >= qd) break; usleep(1000); }
+    usleep(20000);
+  }
+  nr_isac_da_cb_pass = NULL;
+  nr_isac_abs_slot_override = 0;
+  pthread_mutex_lock(&cap_mu); *nh = cap_n; memcpy(hash_out, cap_hash, sizeof(uint64_t) * cap_n); pthread_mutex_unlock(&cap_mu);
+}
+static int row_find(const cap_row_t *r, int n, int layer, uint32_t k, uint32_t l)
+{
+  for (int i = 0; i < n; i++) if (r[i].layer == layer && r[i].k == k && r[i].l == l) return i;
+  return -1;
+}
+static void partial_da_tests(PHY_VARS_NR_UE *ue, c16_t (*rx)[14 * FFT])
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  nr_sense_single_set(true); /* the data-aided unit gate is open */
+  for (int a = 0; a < NANT; a++)
+    for (size_t i = 0; i < 14 * FFT; i++) rx[a][i] = (c16_t){(int16_t)((int)(rnd() % 2001) - 1000), (int16_t)((int)(rnd() % 2001) - 1000)};
+  const int qms[2] = {2, 6};
+  for (int nl = 1; nl <= 2; nl++)
+    for (int qi = 0; qi < 2; qi++) {
+      const int qm = qms[qi];
+      uint8_t tb[(20000 + 24 + 7) / 8 + 8];
+      for (size_t i = 0; i < sizeof(tb); i++) tb[i] = (uint8_t)(rnd() | 1);
+      uint32_t C, K, Z, F;
+      nr_segmentation(NULL, NULL, 20000 + 24, &C, &K, &Z, &F, 1);
+      CHECK(C >= 3, "test TB has C=%u (< 3)", C);
+      const uint32_t nre_g = nr_get_G(24, 12, get_num_dmrs_re_per_rb(NFAPI_NR_DMRS_TYPE1, 2), get_num_dmrs(0x4), 0, qm, nl) / (qm * nl);
+      const uint32_t G = nre_g * qm * nl;
+      uint32_t E[64], Es = 0;
+      for (uint32_t r = 0; r < C; r++) { E[r] = (uint32_t)nr_get_E(G, C, qm, nl, r); CHECK(E[r] == nr_da_block_E(G, C, qm, nl, r), "E_r mismatch r=%u", r); Es += E[r]; }
+      CHECK(Es == G, "sum E != G");
+      uint64_t hf[64], hp[64], ha[64]; int nhf, nhp, nha;
+      /* RE positions of the grant (transmit order) from an Nl=1 whole-TB run of the same geometry */
+      run_da(ue, 1, qm, tb, NULL, 0, rx, hf, &nhf);
+      int npos; cap_row_t *pos = snapshot_rows(&npos);
+      CHECK(npos == (int)nre_g, "positions %d vs REs %u", npos, nre_g);
+      run_da(ue, nl, qm, tb, NULL, 0, rx, hf, &nhf);
+      int nfull; cap_row_t *full = snapshot_rows(&nfull);
+      CHECK(nfull > 0, "full run exported nothing");
+      nr_da_cb_pass_t part; memset(&part, 0, sizeof part); part.C = (uint16_t)C; part.ok = (uint16_t)(C - 1);
+      for (uint32_t r = 0; r < C; r++) nr_da_cb_set(&part, r, r != 1);
+      run_da(ue, nl, qm, tb, &part, 0, rx, hp, &nhp);
+      int np; cap_row_t *pr = snapshot_rows(&np);
+      run_da(ue, nl, qm, tb, &part, 1, rx, ha, &nha); /* async: the job's copy of cb_pass */
+      CHECK(nha == nhp && memcmp(ha, hp, sizeof(uint64_t) * nhp) == 0, "Nl=%d Qm=%d: async partial export differs from inline (%d vs %d frames)", nl, qm, nha, nhp);
+      const uint32_t lo = E[0] / (qm * nl), hi = (E[0] + E[1]) / (qm * nl);
+      int bad_in_gap = 0, missing = 0, differ = 0, far_checked = 0;
+      for (int i = 0; i < np; i++)
+        for (uint32_t o = lo; o < hi; o++) if (pr[i].k == pos[o].k && pr[i].l == pos[o].l) bad_in_gap++;
+      CHECK(bad_in_gap == 0, "Nl=%d Qm=%d: %d exported rows sit on the failed block's REs", nl, qm, bad_in_gap);
+      if (nl == 1) { /* Nl=1: the list is exactly the full list without the failed block's REs, values equal */
+        CHECK(np == nfull - (int)(hi - lo), "Nl=1 Qm=%d: %d rows, want %d", qm, np, nfull - (int)(hi - lo));
+        int j = 0;
+        for (int i = 0; i < nfull; i++) {
+          if ((uint32_t)i >= lo && (uint32_t)i < hi) continue;
+          if (j >= np || pr[j].k != full[i].k || pr[j].l != full[i].l || pr[j].hr != full[i].hr || pr[j].hi != full[i].hi) missing++;
+          j++;
+        }
+        CHECK(missing == 0, "Nl=1 Qm=%d: %d rows differ from the full-TB rows", qm, missing);
+      } else { /* Nl=2: rows far from the gap are the full-TB rows (LS windows span <= 256 REs), none inside it */
+        CHECK(np > 0 && np < nfull, "Nl=2 Qm=%d: %d partial rows vs %d full", qm, np, nfull);
+        for (int i = 0; i < np; i++) {
+          uint32_t ord = 0; while (ord < (uint32_t)npos && !(pos[ord].k == pr[i].k && pos[ord].l == pr[i].l)) ord++;
+          const bool far = ord + 300 < lo || ord > hi + 300;
+          if (!far) continue;
+          far_checked++;
+          const int f = row_find(full, nfull, pr[i].layer, pr[i].k, pr[i].l);
+          if (f < 0 || full[f].hr != pr[i].hr || full[f].hi != pr[i].hi) differ++;
+        }
+        CHECK(differ == 0, "Nl=2 Qm=%d: %d of %d far rows differ from the full-TB result", qm, differ, far_checked);
+      }
+      /* untried block (not set) + failed block: only block 0's REs; a zero-payload block 'passed': invalid */
+      nr_da_cb_pass_t only0; memset(&only0, 0, sizeof only0); only0.C = (uint16_t)C; only0.ok = 1; nr_da_cb_set(&only0, 0, true);
+      run_da(ue, nl, qm, tb, &only0, 0, rx, hp, &nhp);
+      int n0; cap_row_t *r0 = snapshot_rows(&n0);
+      const uint32_t hi0 = E[0] / (qm * nl);
+      int outside = 0;
+      for (int i = 0; i < n0; i++) { uint32_t ord = 0; while (ord < (uint32_t)npos && !(pos[ord].k == pos[ord].k && pos[ord].l == r0[i].l && pos[ord].k == r0[i].k)) ord++; if (ord >= hi0 + (nl > 1 ? 1 : 0) && ord < (uint32_t)npos) outside++; }
+      CHECK(n0 > 0 && outside == 0, "Nl=%d Qm=%d: block-0-only export has %d rows beyond block 0", nl, qm, outside);
+      uint8_t tbz[sizeof(tb)]; memcpy(tbz, tb, sizeof tb);
+      const uint32_t seg_bytes = (K >> 3) - (F >> 3) - 3;
+      memset(tbz, 0, seg_bytes); /* block 0's payload is all zero but its CRC "passed" */
+      nr_da_cb_pass_t all; memset(&all, 0, sizeof all); all.C = (uint16_t)C; all.ok = (uint16_t)C;
+      for (uint32_t r = 0; r < C; r++) nr_da_cb_set(&all, r, true);
+      run_da(ue, nl, qm, tbz, &all, 0, rx, hp, &nhp);
+      int nz; cap_row_t *rz = snapshot_rows(&nz);
+      int in0 = 0;
+      for (int i = 0; i < nz; i++) for (uint32_t o = 0; o < hi0; o++) if (rz[i].k == pos[o].k && rz[i].l == pos[o].l) in0++;
+      CHECK(nz > 0 && in0 == 0, "Nl=%d Qm=%d: a zero-payload block still exported %d rows", nl, qm, in0);
+      /* every block passed through the partial path == the whole-TB result */
+      const nr_da_cb_pass_t allp = all;
+      run_da(ue, nl, qm, tb, &allp, 0, rx, hp, &nhp);
+      CHECK(nhp == nhf && memcmp(hp, hf, sizeof(uint64_t) * nhf) == 0 || nl > 1, "Nl=1 Qm=%d: all blocks passed != whole-TB export", qm);
+      if (nl > 1) { int na; cap_row_t *ra = snapshot_rows(&na); CHECK(na == nfull, "Nl=2 all-pass rows %d vs %d", na, nfull); free(ra); }
+      printf("partial DA Nl=%d Qm=%d C=%u: %d full rows, %d without block 1 (%u REs invalid), block-0-only %d rows\n", nl, qm, C, nfull, np, hi - lo, n0);
+      free(pos); free(full); free(pr); free(r0); free(rz);
+    }
+  nr_sense_single_set(false);
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+}
+
 int main(void)
 {
   char arg0[] = "test_nr_pdsch_data_aided_async";
@@ -305,6 +448,7 @@ int main(void)
       for (uint32_t sub = 0; sub <= 2; sub += 2)
         run_case(ue, &cases[c], sub, rx, rx2);
   }
+  partial_da_tests(ue, rx);
   /* saturation: with the worker held up, the tap is shed and counted -- never run on this thread */
   {
     uint64_t q0, d0, n0, s0, q1, d1, n1, s1;
