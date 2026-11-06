@@ -2099,7 +2099,12 @@ extern "C" int nr_gpu_pass_dl_try(const nr_gpu_pass_job_t *j, nr_gpu_pass_result
     const int nbRxE = j->nbRx;
     nr_dec_est_copy((int32_t *)r->est_rows, (const int32_t *)I.est.host, (size_t)NSYM * N, j->nl, nbRxE, j->dmrs_sym[0], N, j->est_off, j->est_nsc);
     const uint32_t *nv = (const uint32_t *)((const char *)I.nvar.host + 3 * NR_GPU_CHEST_MAX_ROWS * sizeof(int)); /* rows (k, layer, segment, RX): DM-RS symbol 0, layer 0 = segment * nbRx + a */
-    const int nsg = j->nseg ? j->nseg : 1;
+    int nsg = j->nseg ? j->nseg : 1; /* a segmented grant: only the segments of the handed-back first run (est_nsc = 12 * their PRBs) */
+    if (j->nseg) {
+      int cum = 0, k = 0;
+      while (k < j->nseg && cum < (int)j->est_nsc / 12) cum += j->seg[k++].n_prb;
+      nsg = k > 0 ? k : 1;
+    }
     uint64_t acc = 0;
     int cnt = 0;
     for (int a = 0; a < nbRxE; a++) {
