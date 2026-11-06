@@ -1,0 +1,38 @@
+14:02:03 fix=1cd75bc4ea merge twomodes/wbgrant into twomodes/design: grant-level wideband DM-RS CFR in sensing mode (CRC-gated, ring-checked, finite token bucket, priced on pool/queue/ring) base=6abc464153 ota: single-PCI daytime campaign 2026-11-06 (fix vs base sensing scheduler, 415/923/508/403), report and tooling DUR=240
+14:02:03 -- wbg415B1 arm=base cells=- tune=3680010000:1171:-4827:217 want=[415] cfg=sensing_ota.dgx.cfg
+wbg415B1 #1 sync=1 syncfail_attempts=1 rfstall=0 confirmed=35 err=[]
+14:06:24 wbg415B1 -> /home/nicola/NICOLA/ota_runs/wbg415B1_1_140203 (RX_EXIT=130) pci=OK cpu=7.679
+14:07:09 -- wbg415N1 arm=fix cells=- tune=3680010000:1171:-4827:217 want=[415] cfg=sensing_ota.dgx.cfg
+wbg415N1 #1 sync=1 syncfail_attempts=1 rfstall=0 confirmed=34 err=[]
+14:11:30 wbg415N1 -> /home/nicola/NICOLA/ota_runs/wbg415N1_1_140709 (RX_EXIT=130) pci=OK cpu=7.423
+14:12:15 -- wbg415N2 arm=fix cells=- tune=3680010000:1171:-4827:217 want=[415] cfg=sensing_ota.dgx.cfg
+wbg415N2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=34 err=[]
+14:16:40 wbg415N2 -> /home/nicola/NICOLA/ota_runs/wbg415N2_1_141215 (RX_EXIT=130) pci=OK cpu=7.183
+14:17:25 -- wbg415B2 arm=base cells=- tune=3680010000:1171:-4827:217 want=[415] cfg=sensing_ota.dgx.cfg
+wbg415B2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=33 err=[]
+14:21:42 wbg415B2 -> /home/nicola/NICOLA/ota_runs/wbg415B2_1_141725 (RX_EXIT=130) pci=OK cpu=7.093
+14:22:27 -- wbg415N3 arm=fix cells=- tune=3680010000:1171:-4827:217 want=[415] cfg=sensing_ota.dgx.cfg
+wbg415N3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=26 err=[]
+14:26:50 wbg415N3 -> /home/nicola/NICOLA/ota_runs/wbg415N3_1_142227 (RX_EXIT=130) pci=OK cpu=7.282
+14:27:35 -- wbg415B3 arm=base cells=- tune=3680010000:1171:-4827:217 want=[415] cfg=sensing_ota.dgx.cfg
+wbg415B3 #1 sync=1 syncfail_attempts=1 rfstall=0 confirmed=36 err=[]
+14:31:51 wbg415B3 -> /home/nicola/NICOLA/ota_runs/wbg415B3_1_142735 (RX_EXIT=130) pci=OK cpu=7.429
+14:32:36 -- wbg923B1 arm=base cells=- tune=3759990000:233:-4832:217 want=[923] cfg=sensing_ota.dgx.cfg
+wbg923B1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=11 err=[]
+14:37:02 wbg923B1 -> /home/nicola/NICOLA/ota_runs/wbg923B1_1_143236 (RX_EXIT=130) pci=OK cpu=7.660
+14:37:47 -- wbg923N1 arm=fix cells=- tune=3759990000:233:-4832:217 want=[923] cfg=sensing_ota.dgx.cfg
+wbg923N1 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=7 err=[]
+14:42:13 wbg923N1 -> /home/nicola/NICOLA/ota_runs/wbg923N1_1_143748 (RX_EXIT=130) pci=OK cpu=7.630
+14:42:58 -- wbg923N2 arm=fix cells=- tune=3759990000:233:-4832:217 want=[923] cfg=sensing_ota.dgx.cfg
+wbg923N2 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=5 err=[]
+14:47:22 wbg923N2 -> /home/nicola/NICOLA/ota_runs/wbg923N2_1_144259 (RX_EXIT=130) pci=OK cpu=7.589
+14:48:07 -- wbg923B2 arm=base cells=- tune=3759990000:233:-4832:217 want=[923] cfg=sensing_ota.dgx.cfg
+wbg923B2 #1 sync=1 syncfail_attempts=1 rfstall=0 confirmed=8 err=[]
+14:52:29 wbg923B2 -> /home/nicola/NICOLA/ota_runs/wbg923B2_1_144807 (RX_EXIT=130) pci=OK cpu=7.562
+14:53:14 -- wbg923N3 arm=fix cells=- tune=3759990000:233:-4832:217 want=[923] cfg=sensing_ota.dgx.cfg
+wbg923N3 #1 sync=1 syncfail_attempts=0 rfstall=0 confirmed=9 err=[]
+14:57:37 wbg923N3 -> /home/nicola/NICOLA/ota_runs/wbg923N3_1_145314 (RX_EXIT=130) pci=OK cpu=7.926
+14:58:22 -- wbg923B3 arm=base cells=- tune=3759990000:233:-4832:217 want=[923] cfg=sensing_ota.dgx.cfg
+wbg923B3 #1 sync=1 syncfail_attempts=2 rfstall=0 confirmed=14 err=[]
+15:02:46 wbg923B3 -> /home/nicola/NICOLA/ota_runs/wbg923B3_1_145822 (RX_EXIT=130) pci=OK cpu=7.632
+15:03:31 done /home/nicola/NICOLA/ota_runs/sp_ota_wbg_20261106_140203
