@@ -6,6 +6,8 @@
 #include "PHY/TOOLS/nr_stage_split.h"
 #include <sched.h>
 #include "nr_pdsch_gpu_exact.h"
+#include "nr_pdsch_dec_est_copy.h"
+#include "nr_sense_gating.h"
 #include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_passive_cfg_epoch.h"
@@ -1222,6 +1224,10 @@ static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last
  * started on (decoding stops after NR_CB_FAIL_LIMIT failed blocks, so tried is biased toward the early blocks of a failing TB), blocks in the TB. Reset at the start of
  * every body; a layout probe leaves them 0. */
 static __thread uint16_t t_cb_ok = 0, t_cb_tried = 0, t_cb_total = 0;
+static __thread struct nr_pdsch_dec_est t_dec_est; /* h points into t_dec_est_buf; nant == 0: none kept */
+static inline bool chest_chest_ok(int chest_hit, int chest_only, const freq_alloc_bitmap_t *fa) { return !chest_hit && chest_only < 0 && fa->n_prb_list == 0; }
+static __thread c16_t *t_dec_est_buf;
+static __thread size_t t_dec_est_cap;
 static __thread nr_da_cb_pass_t t_cb_pass; /* every block's CRC24B result (sensing mode), same lifetime as t_cb_map */
 static __thread uint64_t t_cb_map = 0; /* EVMGRANT cbmap=: bit r = code block r passed its CRC (blocks >= 64 not shown), same lifetime as t_cb_ok */
 /* RANK2-ITER: LDPC iterations of the last body on this thread (EVMGRANT it= itc= its=): max OAI numIter over the code blocks (a block that hit the cap reports the cap;
@@ -2755,6 +2761,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   t_cb_ok = t_cb_tried = t_cb_total = 0;
   t_cb_map = 0;
   memset(&t_cb_pass, 0, sizeof t_cb_pass);
+  t_dec_est.nant = 0;
   nr_irc_grant.valid = 0; /* D4 IRC: this grant's DM-RS whitening is set below, after the channel estimate */
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   t_fep_done_ns = 0;
@@ -3717,6 +3724,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       return out->status;
     }
   }
+  uint32_t est_nv0 = 0; /* noise variance of the first DM-RS symbol, layer 0 (the decoder-estimate export) */
   uint32_t gch_nv[14][4], gch_nva[14][4][NR_DL_CHEST_MAX_ANT]; /* GPU-DEMOD stage 2 (ISAC_PDSCH_GPU_EXACT_CHEST) */
   const int gseg = seg_path ? nr_pdsch_gpu_chest_grant(ue, proc, dlsch_config, freq_alloc, seg, nseg, cw->Nl, dmrs_full, pdsch_est_size,
                                                        pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, 0, gch_nv, gch_nva) : -1;
@@ -3788,6 +3796,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
                                   get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                   pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
       nvar += nvar_tmp;
+      if (nl == 0 && m == dmrs_first) est_nv0 = nvar_tmp;
     }
     n_dmrs_sym++;
   }
@@ -3798,6 +3807,24 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
       if (n_ == 1 || (n_ % 200) == 0)
         LOG_A(PHY, "SENSING: PDSCH UNSUP@1792 n=%lu\n", n_); }
     return out->status; // no DM-RS in the allocation: nothing to equalise against
+  }
+  /* Sensing mode: keep the DM-RS estimate for the CFR export (nr_pdsch_dec_est), raw, before the time-domain average / IRC touch it. Only an estimate the export can use as is: every branch estimated (not
+   * the single-branch mode), a contiguous grant (no segments / PRB list), made here (not restored from the slot cache: its noise figure belongs to another grant), at the grant's own subcarriers. */
+  if (nr_isac_mode() == NR_ISAC_MODE_SENSING && nr_sense_blind_dmrs_source() >= 0 && !seg_path && chest_chest_ok(chest_hit, chest_only, freq_alloc) && dmrs_first >= 0) {
+    const int nant_e = fp->nb_antennas_rx, nl_e = cw->Nl < NR_MAX_NB_LAYERS ? cw->Nl : NR_MAX_NB_LAYERS;
+    const int nsc_e = freq_alloc->num_rbs * NR_NB_SC_PER_RB, off_e = ((int)freq_alloc->first_rb - (int)chest_alloc.first_rb) * NR_NB_SC_PER_RB;
+    const size_t need_e = (size_t)nl_e * nant_e * nsc_e;
+    if (off_e >= 0 && off_e + nsc_e <= (int)chest_alloc.num_rbs * NR_NB_SC_PER_RB && nsc_e > 0 && nant_e <= 8) {
+      if (t_dec_est_cap < need_e) { /* grows to the largest grant once, then reused (not on the steady-state path) */
+        free(t_dec_est_buf);
+        t_dec_est_buf = (c16_t *)malloc(need_e * sizeof(c16_t));
+        t_dec_est_cap = t_dec_est_buf ? need_e : 0;
+      }
+      if (t_dec_est_cap >= need_e) {
+        nr_dec_est_copy((int32_t *)t_dec_est_buf, &pdsch_dl_ch_estimates[0][0], (size_t)pdsch_est_size, nl_e, nant_e, dmrs_first, fp->ofdm_symbol_size, off_e, nsc_e);
+        t_dec_est = (struct nr_pdsch_dec_est){.nant = (uint8_t)nant_e, .nl = (uint8_t)nl_e, .dmrs_sym = (uint8_t)dmrs_first, .nsc = (uint16_t)nsc_e, .nvar = est_nv0, .h = t_dec_est_buf};
+      }
+    }
   }
   if (chest_cacheable && !chest_hit) {
     /* Store the IMMUTABLE copy now, before any post-processing below touches the working buffer. */
@@ -4583,6 +4610,7 @@ gpu_llr_ready:;
   out->cb_total = t_cb_total;
   out->cb_map = t_cb_map;
   out->cb_pass = t_cb_pass;
+  out->est = t_dec_est.nant ? &t_dec_est : NULL;
   out->hq_mode = t_last_hq_retx ? 1 : t_hq_nohist ? 2 : 0;
   /* GrantWork admissibility (fix round 1, I2): what the job's full decode did that CB0 from shared work does not. */
   if (t_gw != NULL && !t_quiet && !t_gw_capture) {

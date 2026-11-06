@@ -204,6 +204,18 @@ TEST(SenseRecords, PartialTbKeysAreAppendedAndOnlyForPartialRecords)
   EXPECT_NE(strstr(part,",\"partial_tb\":1,\"cb_ok\":3,\"cb_total\":90}"),nullptr);
 }
 
+TEST(SenseRecords, DecoderEstimateKeysOnlyWhenTheCfrIsTheDecodersEstimate)
+{
+  nr_sense_rs_meta_t m{};
+  m.rnti=77; m.ports=1; m.port_mask=1; m.dmrs_type=1; m.dmrs_add_pos=-1; m.dmrs_n_scid=0;
+  char a[2048], b[2048];
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,a,sizeof a),0);
+  EXPECT_EQ(strstr(a,"cfr_est"),nullptr);
+  m.est_dec=true; m.est_sym=2; m.est_layers=2;
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DMRS,&m,1,b,sizeof b),0);
+  EXPECT_NE(strstr(b,",\"cfr_est\":\"decoder\",\"est_dmrs_sym\":2,\"est_layers\":2"),nullptr);
+}
+
 TEST(SenseRecords, NullsForUnknown)
 {
   nr_passive_obs_t o{};

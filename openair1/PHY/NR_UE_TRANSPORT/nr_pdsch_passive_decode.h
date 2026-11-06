@@ -68,6 +68,11 @@ extern "C" {
 /// Transport-block parameters a DCI carries that the receive chain cannot infer from the
 /// allocation alone, plus the two deployment constants (MCS table, xOverhead) a blind receiver must
 /// be told rather than read off the air.
+/// The decoder's own DM-RS channel estimate of the last body on this thread (sensing mode, copied before the working buffer is freed): the first DM-RS symbol, every layer and RX branch, the grant's
+/// subcarriers only (a shared-slot estimate band is cut to the grant). h[(l*nant + a)*nsc + j] in the LS units of nr_pdsch_channel_estimation, i.e. what the DM-RS tap exports. nvar = that estimate's noise
+/// variance (first DM-RS symbol, layer 0). Valid until the next decode on the thread; the result's est is NULL when the decoder kept none (GPU pass, single-branch chest, segmented / PRB-list grant, cached estimate).
+struct nr_pdsch_dec_est { uint8_t nant, nl, dmrs_sym; uint16_t nsc; uint32_t nvar; const c16_t *h; };
+
 typedef struct {
   bool check_sample_lifetime; ///< deferred IQ must survive the complete FEP
   long source_absolute_slot; ///< original RF slot, never re-stamped by consumers
@@ -188,6 +193,7 @@ typedef struct {
   float                sdisp_p10_db, sdisp_std_db; ///< XDIAG: p10 and std (dB) of the per-group (48 packed REs) decision-directed SNR of layer 0 on that output, -99 = n/a (EVMGRANT sdisp=)
   uint8_t              hq_mode;      ///< DL HARQ store: 0 first transmission / no store, 1 a retransmission combined into the stored sum, 2 a retransmission decoded alone (no usable history) (EVMGRANT hq=)
   uint64_t             cb_map;       ///< per-code-block CRC result, bit r = block r passed (blocks >= 64 not shown; an untried block reads 0) (EVMGRANT cbmap=)
+  const struct nr_pdsch_dec_est *est; ///< the decoder's own DM-RS channel estimate (nr_pdsch_dec_est), NULL when none was kept
   nr_da_cb_pass_t      cb_pass;      ///< the same for every block (up to NR_DA_CB_MAX), for the partial-TB data-aided export; sensing mode only, C = 0 when no LDPC ran. tb holds the payload of the passing blocks (and only those) when the TB failed
 } nr_pdsch_passive_decode_result_t;
 

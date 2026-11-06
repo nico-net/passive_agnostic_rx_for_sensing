@@ -161,6 +161,7 @@ int nr_sense_rs_to_json(nr_sense_src_t src, const nr_sense_rs_meta_t *m, uint64_
     else put(&j,",\"cfg_ref\":null");
     if (m->prg_valid) integer(&j,"prg_size",m->prg_size); else put(&j,",\"prg_size\":null");
   }
+  if (m->est_dec) { put(&j,",\"cfr_est\":\"decoder\""); integer(&j,"est_dmrs_sym",m->est_sym); integer(&j,"est_layers",m->est_layers); }
   if (m->tb_cb_total>0) { integer(&j,"partial_tb",1); integer(&j,"cb_ok",m->tb_cb_ok); integer(&j,"cb_total",m->tb_cb_total); } /* appended last; valid REs = n_re, valid PRBs = valid_cfr_prbs */
   put(&j,"}");
   return j.bad ? -1 : (int)j.w;

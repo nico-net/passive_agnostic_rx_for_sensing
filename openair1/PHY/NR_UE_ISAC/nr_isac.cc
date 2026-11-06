@@ -448,7 +448,7 @@ extern "C" void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac
     m.recon_valid=detail->recon_valid; m.q.recon_conf=detail->q.recon_conf;
     memcpy(m.recon_prb_ok,detail->recon_prb_ok,sizeof m.recon_prb_ok);
     m.prg_valid=detail->prg_valid; m.prg_size=detail->prg_size; m.cfg_ref_ver=detail->cfg_ref_ver;
-    m.wbg=detail->wbg; m.tb_cb_ok=detail->tb_cb_ok; m.tb_cb_total=detail->tb_cb_total;
+    m.wbg=detail->wbg; m.tb_cb_ok=detail->tb_cb_ok; m.tb_cb_total=detail->tb_cb_total; m.est_dec=detail->est_dec; m.est_sym=detail->est_sym; m.est_layers=detail->est_layers;
   }
   m.truncated=truncated;
   nr_sense_emit_rs(source_map[source],&m,frame_id);

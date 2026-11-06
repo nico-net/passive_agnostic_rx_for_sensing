@@ -68,6 +68,7 @@ typedef struct nr_sense_rs_meta_s {
   uint8_t recon_prb_ok[(NR_SENSE_MAX_PRB + 7) / 8]; /* bit = ABSOLUTE PRB (k/12) passes the reconstruction test */
   bool prg_valid;        /* prg_size is the per-RNTI PRG sweep's latched value (nr_pdsch_prg_latched); false prints null = "not latched", NOT "wideband" */
   int prg_size;          /* 0 = wideband, 2, 4 */
+  bool est_dec; uint8_t est_sym, est_layers; /* the CFR is the decoder's own DM-RS estimate (first DM-RS symbol est_sym, est_layers layers estimated, layer 0 exported), not a tap-side FEP + chest; printed appended only then */
   uint16_t tb_cb_ok, tb_cb_total; /* partial-TB data-aided record: code blocks that passed CRC24B / blocks in the TB; tb_cb_total 0 = a whole-TB (or non-DA) record, nothing printed */
   bool wbg;              /* a grant-level wideband record (nr_sense_wbg_admit): booked to the cell totals, not to an RNTI unit; never printed */
   uint32_t cfg_ref_ver;  /* with identity_gen + dedicated_epoch = cfg_ref; 0 = unknown (prints null) */

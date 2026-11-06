@@ -2513,6 +2513,9 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1223	t_cb_ok	tls	uint16_t
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1223	t_cb_total	tls	uint16_t	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1223	t_cb_tried	tls	uint16_t	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1224	t_cb_map	tls	uint64_t	TLS	A5	per-code-block CRC bitmap of the thread's last body (EVMGRANT cbmap=), same lifetime as t_cb_ok
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1225	t_dec_est	tls	struct nr_pdsch_dec_est	TLS	A5	the decoder's own DM-RS estimate of the thread's last body for the sensing CFR export (nant 0 = none)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1225	t_dec_est_buf	tls	c16_t *	TLS	A5	per-thread buffer behind t_dec_est (grows to the largest grant once)
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1225	t_dec_est_cap	tls	size_t	TLS	A5	capacity of t_dec_est_buf in samples
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1225	t_cb_pass	tls	nr_da_cb_pass_t	TLS	A5	per-code-block CRC24B result of the thread's last body (up to NR_DA_CB_MAX blocks), same lifetime as t_cb_map
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1227	t_ldpc_it_cap	tls	uint8_t	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1227	t_ldpc_it_max	tls	uint8_t	TLS	A5	existing thread-local
