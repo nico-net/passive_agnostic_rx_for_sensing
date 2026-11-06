@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include <vector>
+#include <algorithm>
 
 static const uint64_t S = 1000000000ull;
 static const uint64_t NOW = 1000 * S;
@@ -309,9 +310,10 @@ TEST(Sched, ViolationHoldoffTwoDecisions)
   H h(1, 1000);
   auto &u = h.add(0, 1, 5); u.enabled = true; u.violations = 1;
   h.step(); EXPECT_FALSE(h.en(0, 1)); /* D: removed */
-  h.step(); EXPECT_FALSE(h.en(0, 1)); /* D+1 */
-  h.step(); EXPECT_FALSE(h.en(0, 1)); /* D+2: streak 2 reached but held off */
-  h.step(); EXPECT_TRUE(h.en(0, 1));  /* D+3 */
+  h.step(); EXPECT_FALSE(h.en(0, 1)); /* D+1 held off */
+  h.step(); EXPECT_FALSE(h.en(0, 1)); /* D+2 held off: not admitted, streak does not advance */
+  h.step(); EXPECT_FALSE(h.en(0, 1)); /* D+3 admitted, streak 1 */
+  h.step(); EXPECT_TRUE(h.en(0, 1));  /* D+4 */
 }
 
 TEST(Sched, BadCapIsInvalidExceptGpu)
@@ -335,8 +337,7 @@ TEST(Sched, StaleRatioBecomesUnknownAndUnitIsRetried)
   EXPECT_FALSE(h.en(0, 1)); /* the ratio is 16 s old only after 16 s */
   h.in.now_ns = NOW + 17 * S; /* beyond one cost window without a CFR */
   EXPECT_TRUE(nr_sense_unit_eligible(h.find(0, 1), h.in.now_ns));
-  h.step(); EXPECT_FALSE(h.en(0, 1)); /* streak */
-  h.step(); EXPECT_TRUE(h.en(0, 1));
+  h.steps(4); EXPECT_TRUE(h.en(0, 1)); /* back after the hold-off (admitted, then the streak) */
   /* it produces bad CFRs again: judged again, off after a streak, and not back before another window */
   h.find(0, 1)->last_cfr_ns = h.in.now_ns - 1;
   h.steps(2); EXPECT_FALSE(h.en(0, 1));
@@ -426,9 +427,10 @@ TEST(Sched, DemandGoesToTheResourceTheUnitConsumes)
   g.in.res[NR_RES_DA].cap_ns = 400;
   auto &w = g.add(0, 1, 400, NR_UNIT_PDSCH_DATA);
   w.ring_p99_ns = 1; w.da_p99_ns = 300; w.enabled = true;
-  g.steps(3);
+  bool da = false;
+  for (int i = 0; i < 3; i++) { g.step(); da = da || g.out.binding == NR_RES_DA; }
   EXPECT_FALSE(g.en(0, 1, NR_UNIT_PDSCH_DATA));
-  EXPECT_EQ(g.out.binding, NR_RES_DA);
+  EXPECT_TRUE(da); /* DA rejected it (a held-off unit is no longer offered, so only the deciding step reports it) */
   /* the DA budget is per cell: the same load in two cells fits where one cell would not */
   H k(2, 1e6f);
   k.in.cell_res_set[0] = k.in.cell_res_set[1] = true;
@@ -666,7 +668,7 @@ TEST(SchedGate, F2NewPuschRntiPricedAtSourcePrior)
   h.step();
   ASSERT_GE(h.out.n_admitted, 1);
   EXPECT_EQ(h.out.admitted[0].rnti, 17); EXPECT_EQ(h.out.admitted[0].src, NR_UNIT_PDSCH_DMRS);
-  EXPECT_EQ(h.out.admitted[0].val, h.out.admitted[0].val); /* finite */
+  EXPECT_NEAR(h.out.admitted[0].val, 10 * 1.0 * 200 * 2.0, 1e-3); /* wb x prior 1.0 x 200 PRB x age boost 2 (the dead PUSCH rows are fresh known ratio 0: PUSCH prior = floor) */
 }
 
 TEST(SchedGate, F2SrsUsesTheCellFloorNotTheEstimate)
@@ -706,11 +708,14 @@ TEST(SchedGate, F4Counters)
   EXPECT_EQ(h.out.n_elig, 3);
   EXPECT_EQ(h.out.cold_deferred, 2);
   EXPECT_EQ(h.out.binding, NR_RES_N); /* nothing rejected */
-  EXPECT_LT(h.out.top, NR_RES_N);
+  EXPECT_EQ(h.out.top, NR_RES_POOL); /* all use 0: the first resource */
   H g(1, 100);
   for (uint16_t r = 1; r <= 4; r++) g.add(0, r, 25);
   g.steps(4);
-  EXPECT_EQ(g.out.binding, NR_RES_POOL); EXPECT_EQ(g.out.top, g.out.top);
+  EXPECT_EQ(g.out.binding, NR_RES_POOL); EXPECT_EQ(g.out.top, NR_RES_POOL);
+  H z(1, 0); memset(z.in.res, 0, sizeof z.in.res); z.add(0, 1, 1);
+  z.step();
+  EXPECT_EQ(z.out.top, NR_RES_N); /* every budget 0 */
 }
 
 /* Replay of 923 S1 (sp_ota_20261105_225342, [OTA LOW LOAD, DGX GB10, 4 RX], cell 923 only): the first decisions as logged in SENSE_SCHED / SENSE_UNITS.
@@ -741,6 +746,7 @@ TEST(SchedGate, Replay923S1AdmitsAndConfirmsPdschWithinThreeDecisions)
     std::vector<nr_sense_unit_view_t> keep;
     auto &srs = zero_yield(h, 0, NR_UNIT_SRS, 598, d >= 3 ? 2.7e6f : 0);
     srs.wait_p99_ns = d >= 3 ? 1.2e6f : 0; srs.first_ns = NOW; srs.enabled = d >= 3;
+    for (uint16_t dead = 17000; dead < 17003; dead++) { auto &u = h.add(0, dead, 0, P); u.n_cfr = 5; u.valid_ratio = 0; u.last_cfr_ns = 1; u.wb_rate_hz = 0; u.first_ns = NOW; } /* earlier dead PUSCH RNTIs, records long stale */
     for (auto &r : tab[d - 1]) {
       auto &u = zero_yield(h, r.rnti, r.src, r.wb, 0);
       u.first_ns = NOW; u.enabled = false;
@@ -760,4 +766,72 @@ TEST(SchedGate, Replay923S1AdmitsAndConfirmsPdschWithinThreeDecisions)
   ASSERT_GT(first_adm, 0);
   ASSERT_GT(first_en, 0) << "a PDSCH unit was admitted at decision " << first_adm << " but never confirmed";
   EXPECT_LE(first_en - first_adm + 1, 3);
+}
+
+/* ---- fix round 1: persistent source prior (F2), hold-off skipped in admission ---- */
+static double probe_prior(H &h, uint16_t rnti, nr_unit_src_t src) /* val of a fresh unknown unit (wb 40, 200 PRB, boost 2) / (40 x 200 x 2) = the prior */
+{
+  auto &u = h.add(0, rnti, 0, src); u.n_cfr = 0; u.last_cfr_ns = 0; u.valid_ratio = 0; u.wb_rate_hz = 40; u.last_valid_wb_ns = 0; u.est_usable_prbs = 200;
+  tick(h);
+  double v = -1;
+  for (int i = 0; i < h.out.n_admitted && i < NR_SENSE_ADMIT_LOG; i++) if (h.out.admitted[i].rnti == rnti) v = h.out.admitted[i].val;
+  return v / (40.0 * 200 * 2);
+}
+
+TEST(SchedGate, F2RotatingPuschRntiDeadRowsAndSheds)
+{
+  H h(1, 100);
+  for (uint16_t r = 900; r < 903; r++) { auto &u = h.add(0, r, 0, NR_UNIT_PUSCH_DMRS); u.n_cfr = 5; u.valid_ratio = 0; u.last_cfr_ns = 1; u.wb_rate_hz = 0; } /* dead rows gone stale (> 16 s): no ratio evidence */
+  h.add(0, 17, 0, NR_UNIT_PDSCH_DMRS).wb_rate_hz = 20; /* productive: ratio 0.8, records keep coming (refreshed at every decision) */
+  zero_yield(h, 1000, NR_UNIT_PUSCH_DMRS, 40, 0);       /* 128 PRB: 40 x prior x 128 x 2 */
+  auto tk = [&]() { auto *p = h.find(0, 17); p->last_cfr_ns = p->last_valid_wb_ns = h.in.now_ns + 4 * S - 1; tick(h); };
+  tk();
+  EXPECT_EQ(h.out.admitted[0].rnti, 1000); /* nothing observed: PUSCH at prior 1.0 */
+  EXPECT_NEAR(h.out.admitted[0].val, 40 * 1.0 * 128 * 2, 1e-3);
+  int shed_at = -1;
+  for (int i = 2; i < 30 && shed_at < 0; i++) { tk(); if (!h.en(0, 1000, NR_UNIT_PUSCH_DMRS) && i > 3) shed_at = i; }
+  ASSERT_GT(shed_at, 0); /* zero-yield shed (F1) */
+  uint16_t rn = 1001;
+  for (int k = 0; k < 3; k++, rn++) { /* a fresh PUSCH RNTI at every decision, as in 923 S1 */
+    h.v[0].erase(std::remove_if(h.v[0].begin(), h.v[0].end(), [](const nr_sense_unit_view_t &u) { return u.src == NR_UNIT_PUSCH_DMRS && u.rnti >= 1000; }), h.v[0].end());
+    zero_yield(h, rn, NR_UNIT_PUSCH_DMRS, 40, 0);
+    tk();
+    bool seen = false;
+    for (int i = 0; i < h.out.n_admitted; i++) if (h.out.admitted[i].rnti == rn) { seen = true; EXPECT_NEAR(h.out.admitted[i].val, 40 * 0.2 * 128 * 2, 1e-3) << "new PUSCH RNTI priced at the floor"; }
+    EXPECT_TRUE(seen);
+    EXPECT_EQ(h.out.admitted[0].rnti, 17); /* PDSCH (3200) outranks it (2048) */
+  }
+  EXPECT_TRUE(h.en(0, 17));
+}
+
+TEST(SchedGate, F2RecoveringSourceGetsItsPriorBack)
+{
+  H h(1, 100);
+  zero_yield(h, 1000, NR_UNIT_PUSCH_DMRS, 40, 5);
+  for (int i = 0; i < 12; i++) tick(h);              /* enabled, no records: shed, observation ratio 0 */
+  h.v[0].clear();
+  EXPECT_NEAR(probe_prior(h, 1100, NR_UNIT_PUSCH_DMRS), SENSE_ELIG_VALID_MIN, 1e-6);
+  h.v[0].clear();
+  for (int i = 0; i < 8; i++) { /* real records now: a known ratio 0.9 */
+    h.v[0].clear();
+    auto &k = h.add(0, 1200, 5, NR_UNIT_PUSCH_DMRS); k.valid_ratio = 0.9f; k.n_cfr = 50; k.wb_rate_hz = 1; k.last_cfr_ns = h.in.now_ns; k.last_valid_wb_ns = h.in.now_ns;
+    tick(h);
+  }
+  h.v[0].clear();
+  EXPECT_GT(probe_prior(h, 1101, NR_UNIT_PUSCH_DMRS), 0.7);
+}
+
+TEST(SchedGate, HeldOffColdUnitsDoNotReserveBudgetNorOutrankProductive)
+{
+  H h(1, 100); /* budget 60 */
+  for (uint16_t r = 1; r <= 4; r++) { auto &u = h.add(0, r, 25, NR_UNIT_PUSCH_DMRS); u.wb_rate_hz = 1000; u.valid_ratio = 0.9f; u.n_cfr = 30; u.violations = 0; }
+  auto &g = h.add(0, 9, 25, NR_UNIT_PDSCH_DMRS); g.wb_rate_hz = 10; /* productive, lower value */
+  for (int i = 1; i <= 4; i++) h.st.holdoff[0][i][NR_UNIT_PUSCH_DMRS] = 3; /* the four PUSCH rows sit in slots 1..4 once seen */
+  for (int i = 1; i <= 4; i++) h.st.rnti[0][i] = (uint16_t)i;
+  h.step();
+  EXPECT_EQ(h.out.n_admitted, 1); /* held-off rows are not admitted, not counted */
+  EXPECT_EQ(h.out.admitted[0].rnti, 9);
+  EXPECT_EQ(h.out.n_elig, 1);
+  h.steps(2);
+  EXPECT_TRUE(h.en(0, 9));
 }

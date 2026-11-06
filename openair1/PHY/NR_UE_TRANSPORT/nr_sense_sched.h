@@ -73,6 +73,7 @@ typedef struct {
   float mem[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N][4]; /* cpu, wait, ring, da */ /* last measured p99 demand while enabled, decayed while the unit is off (SENSE_COST_MEM_DECAY per decision) */
   uint8_t shed_n[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], run_n[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* consecutive sheds (re-probe back-off) / decisions enabled and wanted */
   uint8_t quiet[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; uint32_t cfr_seen[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* F1: decisions enabled in a row without CFR record growth / n_cfr at the last growth */
+  double pr_sum[NR_SENSE_CELLS][NR_UNIT_SRC_N], pr_w[NR_SENSE_CELLS][NR_UNIT_SRC_N]; /* F2: decayed evidence of the valid ratio of each source in each cell (sum of ratios, weight) */
   uint8_t holdoff[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N]; /* decisions a violation-removed unit must still wait before it can be enabled */
   bool known[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];     /* below: the violation baseline of the previous decision (re-baselined when the row generation changes) */
   uint32_t gen[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N], viol[NR_SENSE_CELLS][NR_SENSE_SLOTS][NR_UNIT_SRC_N];

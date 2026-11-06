@@ -205,16 +205,20 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
     st->pci_seen[c] = true; st->pci_was_elig[c] = pci_elig;
     const uint64_t pref = st->last_pci_valid_wb_ns[c] > st->pci_elig_since[c] ? st->last_pci_valid_wb_ns[c] : st->pci_elig_since[c];
     const double pci_boost = nr_sense_age_boost(pci_elig, pref, in->now_ns);
-    /* F2: prior of a unit whose ratio is unknown = mean known valid ratio of its source in this cell (floored), 1.0 when no unit of the source has been measured */
+    /* F2: prior of a unit whose ratio is unknown = decayed mean of the evidence of its source in this cell: every known ratio, and a ratio 0 for every zero-yield shed (F1).
+     * Decay: time constant SENSE_WIN_DECISIONS decisions. Floored at SENSE_ELIG_VALID_MIN; a source never observed in the cell is 1.0 (probe it once). */
     double prior[NR_UNIT_SRC_N];
     {
-      double sum[NR_UNIT_SRC_N] = {0};
-      int cnt[NR_UNIT_SRC_N] = {0};
+      const double dec = exp(-1.0 / SENSE_WIN_DECISIONS);
+      for (int s2 = 0; s2 < NR_UNIT_SRC_N; s2++) { st->pr_sum[c][s2] *= dec; st->pr_w[c][s2] *= dec; }
       for (int i = 0; i < in->n_units[c]; i++) {
         const nr_sense_unit_view_t *v = &in->units[c][i];
-        if (nr_sense_unit_ratio_known(v, in->now_ns)) { sum[v->src] += v->valid_ratio; cnt[v->src]++; }
+        if (nr_sense_unit_ratio_known(v, in->now_ns)) { st->pr_sum[c][v->src] += v->valid_ratio; st->pr_w[c][v->src] += 1.0; }
       }
-      for (int s2 = 0; s2 < NR_UNIT_SRC_N; s2++) prior[s2] = cnt[s2] ? (sum[s2] / cnt[s2] > SENSE_ELIG_VALID_MIN ? sum[s2] / cnt[s2] : SENSE_ELIG_VALID_MIN) : 1.0;
+      for (int s2 = 0; s2 < NR_UNIT_SRC_N; s2++) {
+        const double m = st->pr_w[c][s2] > 0 ? st->pr_sum[c][s2] / st->pr_w[c][s2] : 1.0;
+        prior[s2] = st->pr_w[c][s2] > 0 && m < SENSE_ELIG_VALID_MIN ? SENSE_ELIG_VALID_MIN : m;
+      }
     }
 
     for (int i = 0; i < in->n_units[c] && n < MAXC; i++) {
@@ -234,7 +238,10 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
         uint32_t *seen = &st->cfr_seen[c][sl][v->src];
         if (!v->enabled || !st->known[c][sl][v->src] || st->gen[c][sl][v->src] != v->gen || v->n_cfr != *seen) { *q = 0; *seen = v->n_cfr; }
         else if (*q < 255) (*q)++;
-        if (k->elig && *q >= SENSE_WIN_DECISIONS && !nr_sense_unit_ratio_known(v, in->now_ns)) k->elig = false;
+        if (k->elig && *q >= SENSE_WIN_DECISIONS && !nr_sense_unit_ratio_known(v, in->now_ns)) {
+          k->elig = false;
+          if (*q == SENSE_WIN_DECISIONS) st->pr_w[c][v->src] += 1.0; /* once per episode: a zero-yield observation (ratio 0) for the source prior */
+        }
       }
       if (k->elig && st->known[c][sl][v->src] && !st->was_elig[c][sl][v->src]) st->elig_since[c][sl][v->src] = in->now_ns;
       st->was_elig[c][sl][v->src] = k->elig;
@@ -328,8 +335,9 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
   for (int i = 0; i < n; i++) {
     cand_t *k = &C[i];
     if (!k->elig || k->val <= 0 || k->removed) continue;
+    if (k->holdoff) continue; /* backed off: no want, no budget, no streak */
     out->n_elig++;
-    const bool cold_slot = k->cold && !k->pending && !k->holdoff; /* F3: a pending unit already holds its slot; a backed-off one cannot be enabled, so it must not take it */
+    const bool cold_slot = k->cold && !k->pending; /* F3: a pending unit already holds its slot */
     if (cold_slot && cold_taken) { out->cold_deferred++; continue; }
     int over = NR_RES_POOL;
     double eu[NR_RES_N];
@@ -347,8 +355,9 @@ void nr_sense_sched_decide(const nr_sense_sched_in_t *in, nr_sense_sched_state_t
       out->binding = (nr_res_id_t)over;
     }
   }
-  if (!rejected) {
+  { /* top = the tightest resource (use / budget), rejected or not; none when no budget is positive */
     double best = -1;
+    out->top = NR_RES_N;
     for (int c = 0; c < nc; c++) {
       double eu[NR_RES_N];
       eff_use(&use, c, eu);

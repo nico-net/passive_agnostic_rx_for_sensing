@@ -183,7 +183,7 @@ void nr_sense_sched_step(uint64_t now_ns)
 {
   const uint32_t rm = nr_sense_sched_take_cell_resets(); /* a cell that changed starts its T_cell over (a decision already in flight may publish the old level once) */
   for (int c = 0; c < NR_SENSE_CELLS; c++)
-    if (rm & (1u << c)) { g_st.fl_idx[c] = g_st.fl_pend[c] = g_st.fl_cnt[c] = g_st.fl_warm[c] = 0; nr_sense_cell_floor_publish(c, 0); atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed); }
+    if (rm & (1u << c)) { g_st.fl_idx[c] = g_st.fl_pend[c] = g_st.fl_cnt[c] = g_st.fl_warm[c] = 0; memset(g_st.pr_sum[c], 0, sizeof g_st.pr_sum[c]); memset(g_st.pr_w[c], 0, sizeof g_st.pr_w[c]); nr_sense_cell_floor_publish(c, 0); atomic_store_explicit(&g_floor_log[c], 0, memory_order_relaxed); }
   nr_sense_sched_sample_t sm;
   bool (*smp)(nr_sense_sched_sample_t *, uint64_t) = atomic_load(&g_sampler);
   if (!(smp ? smp(&sm, now_ns) : sample_prod(&sm, now_ns))) {
