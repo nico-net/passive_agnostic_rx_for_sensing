@@ -64,3 +64,31 @@ test_ldpc_cuda_pool_cpu on the base build (rr-twomodes, twomodes/design): SEGFAU
 | base_4 | 12296 | 3377 | 792 | 9513 | 0 | 0 | 14 / 12 |
 Every source valid, no violations. fix_3 == base_4 (12317 vs 12296, identical enable sequence). base_1 started early (dmrs ON at 11) like earlier base run 1; fix_2 started late (cell admitted two decisions later, identical behaviour afterwards). The differences between arms are the run start offset (2-5 decisions, seen in the base itself); with n=2 per arm and the previous round's 4 runs (fix 12359/12365, base 14036/12338) PDSCH export is not lower in a way beyond that spread. Honest limit: the bed has no SRS/PUSCH, and the dmrs-vs-data tie at prior 1.0 still gives the cold slot to pdsch_data first in both arms of the later runs.
 Output: .superpowers/ab_r1/{base_1,fix_2,fix_3,base_4}.
+
+---
+# Fix round 2, commit 4e25cb45a6
+
+## 1. Prior stuck at the floor (fixed)
+After the decay each decision: pr_sum = pr_sum*dec + (1-dec)*1.0 and pr_w = pr_w*dec + (1-dec) (dec = exp(-1/SENSE_WIN_DECISIONS)), for every [cell][src]. The prior therefore relaxes toward 1.0 with tau = 4 decisions; pr_w is never 0, so the old "w > 0 else 1.0" branch and the near-denormal jump are gone. A source whose mean is 0 recovers as 1 - e^(-k/4) (0.78 at k=6).
+Test F2FloorPriorRelaxesAndALateRealSrsGetsEnabled [OFFLINE]: prior state at the floor (mean 0), productive PDSCH incumbent (val 3200, pool holds one unit), a real SRS (wb 20) appears: priced 1024 at first, ENABLED AT DECISION 8 (asserted <= 12), PDSCH shed.
+Consequence to know: in steady state with isolated sheds (one zero-yield unit shed every ~8 decisions) the prior sits around 0.5, not at the floor. The floor holds right after several sheds in the same window (rotating test now sheds four RNTIs together, new RNTI priced 2048 = floor at the next decision, PDSCH 3200 ranks first and is enabled within 3). Rotating-RNTI and recovering-source tests were adapted accordingly (the recovering one now probes one decision after the sheds: prior < 0.3, and > 0.7 after real records).
+
+## 2. fix_2 pdsch_data 2253 (investigated)
+Timeline of fix_2 (SENSE_UNITS + SENSE_SCHED, decisions 12-34), no PDSCH row ever carried ratio < 1.00 once ON:
+- pdsch_dmrs: ON from decision 16 to the end, never off, never shed.
+- pdsch_data: ON at 14-15, off 16-23 (shed at decision 15 by the DA budget, `binding=da`, da99 = 71 ms against a budget of 0.6 x 100 = 60 ms; hold-off 4; re-probed), ON again at 24-25, shed again, next probe would be 34-35 = after the end of the 150 s run.
+- F1 never fired: F1 needs enabled >= 4 decisions with an unknown ratio; data was ON at most 2 decisions at a time and its ratio was known (1.00), dmrs ratio 1.00 with n_cfr growing. The sheds/hold-offs of pdsch_data are the pre-existing DA-budget re-probe cycle (period about 10 decisions), identical in the base: base_2 data ON at 15-16, 24, 32-33 (2817 records), base_4 in round 1 at 12-13, 21-22, 32-33 (3377).
+- So the 33 % loss is window quantisation: each probe window exports about 1127 pdsch_data records; fix_2 started its first window 2 decisions later (cell sync offset), which pushed the 3rd window past the end of the run (2 windows = 2253, 3 = 3380). Not a regression, not an F1 or counting bug (n_cfr per row advances; the row/slot is the same in all arms).
+- Consequence for the pass condition: "no PDSCH unit is ever shed or held off on the bed" cannot hold even at base, because pdsch_data (DA 71 ms) does not fit the DA budget (60 ms) on this bed (S7 limitation, noted in the S9 report). What holds: no shed or hold-off caused by F1 or by the prior, pdsch_dmrs never shed in any arm.
+
+## A/B round 2 [SIM VERIFIED, DGX aarch64, 106 PRB, 4 RX, 150 s, s9 bed, both locks, order fix, base, fix, fix; run after fix (1)]
+| arm | pdsch_dmrs | pdsch_data | csirs | non-ssb invalid | violations | dmrs ON from | data ON windows (decision) |
+| fix_1  | 12289 | 3379 | 794 | 0 | 0 | 14 | 12-13, 21-22, 32-33 |
+| base_2 | 12339 | 2817 | 798 | 0 | 1 | 14 | 12-13, 21, 31-32 (one 1-decision window: 2817) |
+| fix_3  | 12327 | 3380 | 797 | 0 | 0 | 14 | 12-13, 21-22, 32-33 |
+| fix_4  | 14017 | 3381 | 797 | 0 | 0 | 11 | 11-12(ish), 21-22, 32-33 |
+Base spread over all 6 base runs so far: pdsch_data 2817-3385, pdsch_dmrs 12296-14074. Fix arms this round: data 3379-3381 (inside), dmrs 12289-14017 (inside). Every fix arm: all sources valid, 0 violations, dmrs never shed.
+Arms in .superpowers/ab_r2/{fix_1,base_2,fix_3,fix_4}.
+
+## Tests / ctest
+test_nr_sense_sched 53/53 [OFFLINE]. ctest -j4 after rebuild (pgrep empty, flock -s): 397 tests, 16 not passing on the first pass (the usual list plus test_iq_chan, which passed on rerun-failed); second list: 15 = 7 uci Not Run, qam256, ul_disc, nr_td_sim_test, ssb_rate_match_prod, gpu_pass_cells, dft_test, ldpc_cuda_pool_cpu (SEGFAULT also at base), modulation. No sched-related failure.
