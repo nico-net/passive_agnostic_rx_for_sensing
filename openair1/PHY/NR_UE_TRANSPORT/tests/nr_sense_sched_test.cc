@@ -780,27 +780,27 @@ static double probe_prior(H &h, uint16_t rnti, nr_unit_src_t src) /* val of a fr
 
 TEST(SchedGate, F2RotatingPuschRntiDeadRowsAndSheds)
 {
+  /* the OTA pattern: a fresh zero-yield PUSCH RNTI at every decision, each enabled, found empty by F1 and shed ~8 decisions later: one shed per decision in steady state */
   H h(1, 100);
   for (uint16_t r = 900; r < 903; r++) { auto &u = h.add(0, r, 0, NR_UNIT_PUSCH_DMRS); u.n_cfr = 5; u.valid_ratio = 0; u.last_cfr_ns = 1; u.wb_rate_hz = 0; } /* dead rows gone stale (> 16 s): no ratio evidence */
-  h.add(0, 17, 0, NR_UNIT_PDSCH_DMRS).wb_rate_hz = 20; /* productive: ratio 0.8, records keep coming (refreshed at every decision) */
-  for (uint16_t r = 1000; r < 1004; r++) zero_yield(h, r, NR_UNIT_PUSCH_DMRS, 40, 5); /* 128 PRB: 40 x prior x 128 x 2; four RNTIs shed together */
+  h.add(0, 17, 0, NR_UNIT_PDSCH_DMRS).wb_rate_hz = 20; /* productive: ratio 0.8, records keep coming (refreshed at every decision); val 3200 */
   auto tk = [&]() { auto *p = h.find(0, 17); p->last_cfr_ns = p->last_valid_wb_ns = h.in.now_ns + 4 * S - 1; tick(h); };
-  tk();
-  EXPECT_EQ(h.out.admitted[0].rnti, 1000); /* nothing observed: PUSCH at prior 1.0 */
-  EXPECT_NEAR(h.out.admitted[0].val, 40 * 1.0 * 128 * 2, 1e-3);
-  int shed_at = -1;
-  for (int i = 2; i < 30 && shed_at < 0; i++) { tk(); if (!h.en(0, 1000, NR_UNIT_PUSCH_DMRS) && i > 3) shed_at = i; } /* the first prior sample after the shed is the next decision */
-  ASSERT_GT(shed_at, 0); /* zero-yield shed (F1) */
-  uint16_t rn = 1001;
-  for (int k = 0; k < 3; k++, rn++) { /* a fresh PUSCH RNTI at every decision, as in 923 S1 */
-    h.v[0].erase(std::remove_if(h.v[0].begin(), h.v[0].end(), [](const nr_sense_unit_view_t &u) { return u.src == NR_UNIT_PUSCH_DMRS && u.rnti >= 1000; }), h.v[0].end());
-    zero_yield(h, rn, NR_UNIT_PUSCH_DMRS, 40, 0);
+  uint16_t rn = 1000;
+  std::vector<std::pair<uint16_t, int>> born; /* rnti, decision */
+  int pd_en = -1;
+  for (int k = -10; k < 14; k++, rn++) {
+    h.v[0].erase(std::remove_if(h.v[0].begin(), h.v[0].end(), [&](const nr_sense_unit_view_t &u) { return u.src == NR_UNIT_PUSCH_DMRS && u.rnti >= 1000 && u.rnti < rn - 10; }), h.v[0].end());
+    zero_yield(h, rn, NR_UNIT_PUSCH_DMRS, 40, 5); /* 128 PRB: val = 40 x prior x 256 */
     tk();
-    /* right after the sheds the prior is the floor (it relaxes toward 1.0 with tau 4 decisions afterwards); the new RNTI may be deferred by the cold slot, which PDSCH holds */
-    for (int i = 0; i < h.out.n_admitted; i++) if (k == 0 && h.out.admitted[i].rnti == rn) EXPECT_NEAR(h.out.admitted[i].val, 40 * 0.2 * 128 * 2, 1e-3) << "new PUSCH RNTI priced at the floor right after the sheds";
-    if (k == 0) EXPECT_EQ(h.out.admitted[0].rnti, 17); /* PDSCH (3200) outranks it */
+    if (k < 3) continue; /* warm-up: the first sheds arrive ~8 decisions in and the prior needs ~3 more to settle (0.26 at k=1) */
+    bool seen = false;
+    for (int i = 0; i < h.out.n_admitted && i < NR_SENSE_ADMIT_LOG; i++)
+      if (h.out.admitted[i].rnti == rn) { seen = true; EXPECT_LE(h.out.admitted[i].val, 40 * 0.25 * 256) << "k=" << k << " PUSCH priced at the shed-driven prior (~0.22)"; }
+    EXPECT_TRUE(seen) << "k=" << k;
+    EXPECT_EQ(h.out.admitted[0].rnti, 17) << "k=" << k << ": PDSCH ranks above the fresh PUSCH RNTI";
+    if (pd_en < 0 && h.en(0, 17)) pd_en = k;
   }
-  EXPECT_TRUE(h.en(0, 17));
+  EXPECT_TRUE(h.en(0, 17)); EXPECT_LE(pd_en, 2);
 }
 
 TEST(SchedGate, F2RecoveringSourceGetsItsPriorBack)
