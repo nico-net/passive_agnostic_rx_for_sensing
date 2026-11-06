@@ -2507,6 +2507,17 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.dmrs_tap
           && nr_dmrs_tap_wanted(true, false, false, true, nr_pdsch_solver_layout_state(job.rnti, NULL, NULL)))
         consumer_dmrs_tap(ue, &proc, &job, rxdataF_sz, rxdataF, false, tap_iq_ok, &wbg_tok); /* SOLVED layout: the DM-RS CFR does not need a CRC pass (not for the wbg path: it needs the CRC) */
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && !job.layout_probe && job.want_data && nr_isac_mode() == NR_ISAC_MODE_SENSING
+          && dec.cb_pass.C > 1 && dec.cb_pass.ok >= 1 && dec.tb != NULL) {
+        /* partial TB: the data-aided export of the code blocks that passed (the REs of the others are marked invalid; the record says partial_tb) */
+        nr_isac_abs_slot_override = (uint64_t)job.absolute_slot;
+        nr_isac_da_cb_pass = &dec.cb_pass;
+        nr_isac_pdsch_data_aided_submit_async(ue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
+                                              dec.tb, job.harq_pid_tag, rxdataF, (double)dec.nvar, dec.G,
+                                              dec.dmrs_snr.comb_db > -90.f ? dec.dmrs_snr.comb_db : NAN);
+        nr_isac_da_cb_pass = NULL;
+        nr_isac_abs_slot_override = 0;
+      }
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         lock_verify_note_crc_ok(job.absolute_slot);

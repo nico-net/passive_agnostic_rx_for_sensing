@@ -189,6 +189,21 @@ TEST(SenseRecords, PdschLayerFrameKeys)
   EXPECT_NE(strstr(layer,"\"source\":\"pdsch_data\""),nullptr);
 }
 
+TEST(SenseRecords, PartialTbKeysAreAppendedAndOnlyForPartialRecords)
+{
+  nr_sense_rs_meta_t m{};
+  m.rnti=77; m.ports=1; m.port_mask=1; m.dmrs_type=1; m.dmrs_add_pos=-1; m.dmrs_n_scid=0;
+  char whole[2048], part[2048];
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DATA,&m,1,whole,sizeof whole),0);
+  EXPECT_EQ(strstr(whole,"partial_tb"),nullptr); // a whole-TB record is byte-identical to before
+  m.tb_cb_ok=3; m.tb_cb_total=90;
+  ASSERT_GT(nr_sense_rs_to_json(NR_SENSE_SRC_PDSCH_DATA,&m,1,part,sizeof part),0);
+  auto strip=[](std::string x){ size_t a=x.find("\"t_mono_ns\":"); size_t b=x.find(',',a+1); return x.erase(a,b-a); }; // the timestamp differs between two calls
+  std::string w=strip(whole), p=strip(part);
+  EXPECT_EQ(p.substr(0,w.size()-1),w.substr(0,w.size()-1)); // every old key unchanged, same order; the new ones sit before the closing brace
+  EXPECT_NE(strstr(part,",\"partial_tb\":1,\"cb_ok\":3,\"cb_total\":90}"),nullptr);
+}
+
 TEST(SenseRecords, NullsForUnknown)
 {
   nr_passive_obs_t o{};

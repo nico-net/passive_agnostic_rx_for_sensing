@@ -50,6 +50,12 @@ extern "C" {
 /// which is what the in-order attached-UE path wants.
 extern __thread uint64_t nr_isac_abs_slot_override;
 
+/// Partial TB (sensing mode): a caller whose TB failed its CRC but has code blocks that passed CRC24B points this at the per-block result around the submit (like the override above) and
+/// passes the decoder's TB buffer, whose payload is valid for the passing blocks only. The submit then re-encodes with the failing/untried blocks' REs marked invalid (TS 38.212 5.4.2.1, 38.211 7.3.1.3:
+/// nr_pdsch_da_blocks.h) and the record says partial_tb / cb_ok / cb_total. NULL (default) = the TB passed whole, behaviour unchanged. The async submit copies it into the job.
+#include "nr_pdsch_da_blocks.h"
+extern __thread const nr_da_cb_pass_t *nr_isac_da_cb_pass;
+
 /**
  * @brief Re-encode a CRC-verified transport block through the real TX chain (LDPC encode + rate
  * match + scramble + modulate), then submit Ĥ = Y/X at every DATA RE of the allocation to the

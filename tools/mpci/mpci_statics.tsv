@@ -2148,12 +2148,14 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c	2993	nr_pdsch_config_sweep_
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c	3414	g_sweep	file_static	nr_pdsch_config_sweep_state_t	PROCESS	A5	mpci audit: legacy single-instance test API (nr_pdsch_config_sweep_*_global), not used by the receive pipeline
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c	3415	g_sweep_on	file_static	bool	PROCESS	A5	mpci audit: legacy single-instance test API (nr_pdsch_config_sweep_*_global), not used by the receive pipeline
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	37	nr_isac_abs_slot_override	tls	uint64_t	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	38	nr_isac_da_cb_pass	tls	const nr_da_cb_pass_t *	TLS	A5	partial-TB input of the calling thread's data-aided submit (NULL = whole TB), set around the call like nr_isac_abs_slot_override
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	64	g_data_aided_g_refused	file_static	_Atomic uint64_t	PROCESS	A5	aggregate counter of refused data-aided submissions (atomic telemetry)
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	67	da_inline_pool	file_static	tpool_t	CONST	A5	read-only threadless pool: pushTpool runs the task on the caller
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	68	da_on_worker	tls	bool	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	81	c_segs	tls	uint8_t *[MAX_NUM_NR_DLSCH_SEGMENTS]	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	82	coded_bits	tls	uint8_t *	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	83	scrambled	tls	uint32_t *	TLS	A5	existing thread-local
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	86	re_valid	tls	uint8_t *	TLS	A5	per-thread scratch: RE validity flags of a partial-TB re-encode
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	84	mod_syms	tls	c16_t *	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	85	isac_h	tls	float *	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	86	isac_h_nant	tls	uint32_t	TLS	A5	existing thread-local
@@ -2511,6 +2513,7 @@ openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1223	t_cb_ok	tls	uint16_t
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1223	t_cb_total	tls	uint16_t	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1223	t_cb_tried	tls	uint16_t	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1224	t_cb_map	tls	uint64_t	TLS	A5	per-code-block CRC bitmap of the thread's last body (EVMGRANT cbmap=), same lifetime as t_cb_ok
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1225	t_cb_pass	tls	nr_da_cb_pass_t	TLS	A5	per-code-block CRC24B result of the thread's last body (up to NR_DA_CB_MAX blocks), same lifetime as t_cb_map
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1227	t_ldpc_it_cap	tls	uint8_t	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1227	t_ldpc_it_max	tls	uint8_t	TLS	A5	existing thread-local
 openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c	1228	t_ldpc_it_sum	tls	uint16_t	TLS	A5	existing thread-local

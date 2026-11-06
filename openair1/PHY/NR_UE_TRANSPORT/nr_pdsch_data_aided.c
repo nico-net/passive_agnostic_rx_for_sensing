@@ -35,6 +35,8 @@
 
 /* Set by a DEFERRED caller to this job's monotonic absolute slot; 0 = derive from proc. */
 __thread uint64_t nr_isac_abs_slot_override = 0;
+__thread const nr_da_cb_pass_t *nr_isac_da_cb_pass = NULL;
+_Static_assert(NR_DA_CB_MAX >= MAX_NUM_NR_DLSCH_SEGMENTS, "the per-block pass bitmap must hold every code block of a TB");
 
 #include <math.h>
 #include <stdatomic.h>
@@ -81,6 +83,7 @@ static __thread uint8_t (*seg_storage)[8448];
 static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS];
 static __thread uint8_t *coded_bits; /* 32-byte aligned: nr_modulation() / the LDPC encoder store through AVX2 intrinsics (see the note at its use) */
 static __thread uint32_t *scrambled;
+static __thread uint8_t *re_valid; /* partial TB: one flag per RE ordinal of the grant (DA_MAX_RE) */
 static __thread c16_t *mod_syms;
 static __thread float *isac_h;
 static __thread uint32_t isac_h_nant;
@@ -96,7 +99,7 @@ static bool da_scratch_ensure(uint32_t nant, bool want_ml, bool warm)
 {
   if (!da_tls_buf((void **)&seg_storage, sizeof(*seg_storage) * MAX_NUM_NR_DLSCH_SEGMENTS) || !da_tls_buf((void **)&coded_bits, DA_CODED_SZ) ||
       !da_tls_buf((void **)&scrambled, sizeof(uint32_t) * ((273 * 12 * 14 * 8 * NR_MIMO_LS_MAX_NL + 31) / 32 + 1)) ||
-      !da_tls_buf((void **)&mod_syms, sizeof(c16_t) * 273 * 12 * 14 * NR_MIMO_LS_MAX_NL))
+      !da_tls_buf((void **)&mod_syms, sizeof(c16_t) * 273 * 12 * 14 * NR_MIMO_LS_MAX_NL) || !da_tls_buf((void **)&re_valid, DA_MAX_RE))
     return false;
   if (nant == 0)
     nant = 1;
@@ -238,6 +241,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // CRC attach is needed here; the decoder already reconstructed it. ---
   const uint32_t A = cw->TBS;
   const unsigned int B = A + (A > NR_MAX_PDSCH_TBS ? 24 : 16);
+  const size_t tb_n = ((size_t)B + 7) / 8;
 
   // --- Segment into code blocks (must run again here to fill actual per-segment bytes: the decode
   // path only sized C/K/Z/F, passing NULL/NULL for input/output). ---
@@ -287,6 +291,31 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     reset_meas(&segments[r].ts_interleave);
     reset_meas(&segments[r].ts_rate_match);
     reset_meas(&segments[r].ts_ldpc_encode);
+  }
+  /* Partial TB: which code blocks passed (the decoder's per-block CRC24B, not the 64-bit EVMGRANT map), and from that which REs they pin down. A block whose payload is all zero is not counted:
+   * an all-zero code block has a zero CRC24B, the same false pass the whole-TB path guards against. */
+  nr_da_cb_pass_t part = {0};
+  const bool part_on = nr_isac_da_cb_pass != NULL && nr_isac_mode() == NR_ISAC_MODE_SENSING;
+  uint32_t part_re = 0;
+  if (part_on) {
+    part = *nr_isac_da_cb_pass;
+    const uint32_t seg_bytes = (TB_parameters.K >> 3) - (TB_parameters.F >> 3) - 3;
+    if (TB_parameters.C < 2 || part.C != TB_parameters.C)
+      return; /* a one-block TB has no block CRC; a mismatched block count means the result is not this TB's */
+    uint16_t ok = 0;
+    for (uint32_t r = 0; r < TB_parameters.C; r++) {
+      bool z = true;
+      for (uint32_t i = 0; z && i < seg_bytes && (size_t)r * seg_bytes + i < tb_n; i++)
+        z = tb_bytes[(size_t)r * seg_bytes + i] == 0;
+      if (nr_da_cb_get(&part, r) && z) nr_da_cb_set(&part, r, false);
+      ok += nr_da_cb_get(&part, r);
+    }
+    part.ok = ok;
+    if (!ok) return;
+    uint32_t E[MAX_NUM_NR_DLSCH_SEGMENTS];
+    for (uint32_t r = 0; r < TB_parameters.C; r++) E[r] = (uint32_t)segments[r].E;
+    part_re = nr_da_re_valid(E, &part, cw->qamModOrder, nl, TB_parameters.G / (cw->qamModOrder * nl), re_valid);
+    (void)part_re;
   }
 
   nrLDPC_slot_encoding_parameters_t slot_parameters = {.frame = proc->frame_rx,
@@ -404,7 +433,13 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       if (nl > 1) {
         /* RE ordinal nof_re carries layer symbols mod_syms[nof_re*nl .. +nl) (TS 38.211 7.3.1.3: x_l(i) = d(nl*i + l)); no |X| guard:
          * the LS window judges the conditioning of the whole X. */
+        const uint32_t s0 = mod_idx;
         mod_idx += nl;
+        if (part_on) {
+          if (!re_valid[s0 / nl]) continue; /* a failed or untried block carries this RE: invalid, not exported */
+          if (nof_re * nl != s0) /* keep mod_syms[nof_re*nl + l] aligned with the exported RE list (the LS reads it by list position); writes never pass the read index */
+            for (uint32_t ll = 0; ll < nl; ll++) mod_syms[nof_re * nl + ll] = mod_syms[s0 + ll];
+        }
         for (uint32_t a = 0; a < isac_nof_ant; a++) {
           const c16_t y = rxdataF[a][l * fp->ofdm_symbol_size + re];
           ygath[(size_t)a * isac_max_re + nof_re] = y;
@@ -416,7 +451,9 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
         nof_re++;
         continue;
       }
+      const uint32_t s0 = mod_idx;
       const c16_t x = mod_syms[mod_idx++];
+      if (part_on && !re_valid[s0]) continue; /* a failed or untried block carries this RE */
       const float xr = (float)x.r, xi = (float)x.i;
       const float xmag2 = xr * xr + xi * xi;
       if (xmag2 < 1e-6f)
@@ -517,7 +554,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     .start_rb=dlsch_config->BWPStart+freq_alloc->first_rb, .nb_rb=freq_alloc->num_rbs,
     .ports=__builtin_popcount((unsigned)dlsch_config->dmrs_ports), .port_mask=(int)dlsch_config->dmrs_ports, .ssb_index=-1, .k_ssb=-1,
     .ta_est_samples=-1, .transform_precoding=-1,
-    .dmrs_type=dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_config->nscid};
+    .dmrs_type=dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_config->nscid,
+    .tb_cb_ok = part_on ? part.ok : 0, .tb_cb_total = part_on ? part.C : 0};
   nr_sense_meta_set_snr(&rs_meta, dmrs_snr_db);
   if (nr_isac_mode() == NR_ISAC_MODE_SENSING) {
     const int prg = nr_pdsch_prg_latched(rnti);
@@ -647,6 +685,8 @@ typedef struct {
   c16_t *rx; /* nant x stride c16, the layout of the consumer's rxdataF; only the grant's region is written */
   uint8_t *tb;
   int idx;
+  bool part_on;          /* partial TB: part is this grant's per-block result */
+  nr_da_cb_pass_t part;
 } da_job_t;
 typedef struct {
   da_job_t *job[DA_POOL];
@@ -826,9 +866,11 @@ static void da_run(void *arg)
   }
   const uint64_t unit_c0 = nr_sense_unit_cpu_ns(); /* sensing mode: re-encode, recon, CFR export are the cost of the RNTI's PDSCH_DATA unit */
   nr_isac_abs_slot_override = j->abs_slot;
+  nr_isac_da_cb_pass = j->part_on ? &j->part : NULL;
   nr_isac_pdsch_data_aided_submit(j->ue, &j->proc, &j->cw, &j->dlsch, &j->fa, j->rnti, j->tb, j->harq_tag, (const c16_t(*)[P->stride])j->rx, j->nvar, j->G,
                                   j->dmrs_snr_db);
   nr_isac_abs_slot_override = 0;
+  nr_isac_da_cb_pass = NULL;
   const uint64_t t1 = da_now_ns();
   if (unit_c0)
   {
@@ -933,6 +975,8 @@ int nr_isac_pdsch_data_aided_submit_async(PHY_VARS_NR_UE *ue,
     j->nvar = nvar;
     j->dmrs_snr_db = dmrs_snr_db;
     j->abs_slot = nr_isac_abs_slot_override;
+    j->part_on = nr_isac_da_cb_pass != NULL;
+    if (j->part_on) j->part = *nr_isac_da_cb_pass;
     memcpy(j->tb, tb_bytes, tb_n);
     j->t_enq_ns = da_now_ns();
     if (nr_bgq_push(&Q->q[qi], da_run, j) == 0) {

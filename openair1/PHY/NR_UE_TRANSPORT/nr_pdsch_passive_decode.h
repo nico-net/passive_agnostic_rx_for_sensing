@@ -51,6 +51,7 @@
 #ifndef NR_PDSCH_PASSIVE_DECODE_H
 #define NR_PDSCH_PASSIVE_DECODE_H
 
+#include "nr_pdsch_da_blocks.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -187,6 +188,7 @@ typedef struct {
   float                sdisp_p10_db, sdisp_std_db; ///< XDIAG: p10 and std (dB) of the per-group (48 packed REs) decision-directed SNR of layer 0 on that output, -99 = n/a (EVMGRANT sdisp=)
   uint8_t              hq_mode;      ///< DL HARQ store: 0 first transmission / no store, 1 a retransmission combined into the stored sum, 2 a retransmission decoded alone (no usable history) (EVMGRANT hq=)
   uint64_t             cb_map;       ///< per-code-block CRC result, bit r = block r passed (blocks >= 64 not shown; an untried block reads 0) (EVMGRANT cbmap=)
+  nr_da_cb_pass_t      cb_pass;      ///< the same for every block (up to NR_DA_CB_MAX), for the partial-TB data-aided export; sensing mode only, C = 0 when no LDPC ran. tb holds the payload of the passing blocks (and only those) when the TB failed
 } nr_pdsch_passive_decode_result_t;
 
 /**

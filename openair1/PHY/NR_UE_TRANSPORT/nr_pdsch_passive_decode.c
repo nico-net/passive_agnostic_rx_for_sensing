@@ -6,6 +6,7 @@
 #include "PHY/TOOLS/nr_stage_split.h"
 #include <sched.h>
 #include "nr_pdsch_gpu_exact.h"
+#include "PHY/NR_UE_ISAC/nr_isac_mode.h"
 #include "nr_pdsch_gpu_demod_host.h"
 #include "nr_passive_cfg_epoch.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h" // nr_pdcch_coreset_bank_note_pdsch (B1/B2 downstream certification)
@@ -1221,6 +1222,7 @@ static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last
  * started on (decoding stops after NR_CB_FAIL_LIMIT failed blocks, so tried is biased toward the early blocks of a failing TB), blocks in the TB. Reset at the start of
  * every body; a layout probe leaves them 0. */
 static __thread uint16_t t_cb_ok = 0, t_cb_tried = 0, t_cb_total = 0;
+static __thread nr_da_cb_pass_t t_cb_pass; /* every block's CRC24B result (sensing mode), same lifetime as t_cb_map */
 static __thread uint64_t t_cb_map = 0; /* EVMGRANT cbmap=: bit r = code block r passed its CRC (blocks >= 64 not shown), same lifetime as t_cb_ok */
 /* RANK2-ITER: LDPC iterations of the last body on this thread (EVMGRANT it= itc= its=): max OAI numIter over the code blocks (a block that hit the cap reports the cap;
  * 0 = no LDPC ran), the cap in force, and the sum over the code blocks that decoded. Reset at the start of every body. */
@@ -2221,6 +2223,10 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
       t_cb_total = (uint16_t)TB_parameters.C;
       for (uint32_t r = 0; r < C_dec && r < 64; r++)
         t_cb_map |= (uint64_t)(TB_parameters.decodeSuccess[r] != 0) << r;
+      if (nr_isac_mode() == NR_ISAC_MODE_SENSING && TB_parameters.C > 1 && TB_parameters.C <= NR_DA_CB_MAX) {
+        t_cb_pass.C = (uint16_t)TB_parameters.C; t_cb_pass.ok = (uint16_t)seg_ok;
+        for (uint32_t r = 0; r < C_dec; r++) nr_da_cb_set(&t_cb_pass, r, TB_parameters.decodeSuccess[r] != 0);
+      }
     }
     /* T26b: a probe of a ONE-code-block TB decodes that block with the TB CRC (CRC16/24A), but its outcome was never
      * recorded (only C > 1 set t_probe_seg_ok), so every single-CB probe read "failed" -- measured on the PCI 415
@@ -2245,6 +2251,12 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
       return false; /* a probe never counts as a decoded TB */
     }
     if (seg_ok != TB_parameters.C) {
+      if (nr_isac_mode() == NR_ISAC_MODE_SENSING && seg_ok > 0 && TB_parameters.C > 1) { /* partial TB: the payload of the blocks that passed, at the offsets a whole TB would have (the data-aided export reads them) */
+        const uint32_t seg_bytes = (TB_parameters.K >> 3) - (TB_parameters.F >> 3) - 3;
+        for (uint32_t r = 0; r < TB_parameters.C; r++)
+          if (TB_parameters.decodeSuccess[r])
+            memcpy(h->b + (size_t)r * seg_bytes, h->c + (size_t)r * (TB_parameters.K >> 3), seg_bytes);
+      }
       /* LDPC did not converge on at least one segment -> the LLRs feeding it are wrong. */
       atomic_fetch_add(&g_ldpc_seg_fail, 1);
       atomic_fetch_add(&g_seg_ok_sum, seg_ok);
@@ -2678,6 +2690,10 @@ static void gp_commit_decode(const nr_gpu_pass_dl_out_t *g, const fapi_nr_dl_cw_
     t_cb_total = (uint16_t)g->C;
     for (int r = 0; r < C_dec && r < 64; r++)
       t_cb_map |= (uint64_t)(g->r.seg_ok[r] != 0) << r;
+    if (nr_isac_mode() == NR_ISAC_MODE_SENSING && g->C > 1 && g->C <= NR_DA_CB_MAX) {
+      t_cb_pass.C = (uint16_t)g->C; t_cb_pass.ok = (uint16_t)seg_ok;
+      for (int r = 0; r < C_dec; r++) nr_da_cb_set(&t_cb_pass, (uint32_t)r, g->r.seg_ok[r] != 0);
+    }
   }
   if (!t_probe_first_seg) {
     bool okv[NR_GPU_PASS_MAX_CB];
@@ -2738,6 +2754,7 @@ static nr_pdsch_passive_decode_status_t passive_decode_body_core(PHY_VARS_NR_UE 
   t_ldpc_it_max = 0; t_ldpc_it_cap = 0; t_ldpc_it_sum = 0;
   t_cb_ok = t_cb_tried = t_cb_total = 0;
   t_cb_map = 0;
+  memset(&t_cb_pass, 0, sizeof t_cb_pass);
   nr_irc_grant.valid = 0; /* D4 IRC: this grant's DM-RS whitening is set below, after the channel estimate */
   NR_CFG_EPOCH_WORK(nr_cfg_epoch_work_stamp(), NULL);
   t_fep_done_ns = 0;
@@ -4565,6 +4582,7 @@ gpu_llr_ready:;
   out->cb_tried = t_cb_tried;
   out->cb_total = t_cb_total;
   out->cb_map = t_cb_map;
+  out->cb_pass = t_cb_pass;
   out->hq_mode = t_last_hq_retx ? 1 : t_hq_nohist ? 2 : 0;
   /* GrantWork admissibility (fix round 1, I2): what the job's full decode did that CB0 from shared work does not. */
   if (t_gw != NULL && !t_quiet && !t_gw_capture) {
