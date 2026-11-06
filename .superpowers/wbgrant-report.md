@@ -100,3 +100,23 @@ base: ssb 9582, csirs 799, pdsch_dmrs 14649, pdsch_data 3381, 0 records with val
 3. The cold-unit-last ordering changes admission order only when a cold unit would have outranked a warm one; existing sched tests pass unchanged except two rewritten Wbg tests.
 4. Hold time under g_phase2_mu is argued by code read (one CAS), not measured: no LOCKHOLD line exists in these logs.
 5. Mean tap cost is still compared with p99 budgets; the unit-model startup estimate is rough (p99 bucket CPU divided by messages per bucket).
+
+## Fix round 2 (R1-R6)
+Commit c7f83e4ed4 (plus this report). Tests first: they failed to compile against the old API (red), then passed.
+
+| item | change |
+|---|---|
+| R1 | `consumer_dmrs_tap(..., crc_ok, iq_ok, tok)`: iq_ok = `owned \|\| nr_passive_credit_allowed(producer slot, job slot)` evaluated at tap time; the wbg tap needs `nr_sense_wbg_tap_ok(crc_ok, iq_ok)`. The false "overwritten IQ gives pw=0" comment is gone. The unit path is unchanged (it does not take iq_ok; that is the pre-existing behaviour). |
+| R2 | `nr_sense_wbg_refund()` (atomic add on wbg_tok, capped at the depth; counter wbg_refunded) on: enqueue refused (both monitor enqueue sites), job dropped/stale/narrow/evicted (`release_solver` refunds a `wbg_pre` job), CRC fail or probe (end of the decode block), ring credit expired, dmrs_sym invalid, nothing exported (CPU booked with `nr_sense_wbg_wasted`, no tap counted). Identity admitted - refunded == taps: unit test, and 25 - 0 = 25 in the replay log. Not covered: a decode ERROR/UNSUPPORTED status that skips the block, and the `slot_gate` timeout path goes through release_solver (covered). The first leaks a token only until the bucket refills. |
+| R3 | A cell >= NR_SENSE_CELLS: admit refuses and counts `overcap`; the scheduler thread logs a one-time LOG_W per cell; metrics (sensing mode only) gain `sense_wbg_offered/admitted/taps/refunded` and `offered_wbg_overcap`. NR_SENSE_CELLS (8) is not raised: documented in nr_sense_unit.h. |
+| R4 | The first wbg decision of a cell takes the counters since start as one period (offered rate = offered / SENSE_DECIDE_NS, cost from even one tap). Test: no pdsch_dmrs unit, 4 taps, first decision publishes 12.5 Hz (measured), not 0.25 Hz. The cell-reset test now uses `nr_sense_unit_reset` (what a resync does). |
+| R5 | Routed: a grant that needed the chest (SNR gate on) now reaches the wbg path at the second defer-enqueue site, after the gate passed, with `wbg_pre`; the tap still runs on the consumer, outside g_phase2_mu. |
+| R6 | `_Static_assert(sizeof(nr_pdsch_passive_job_t) == 1792)` in nr_pdsch_passive_queue.c; 1792 (0x700) measured by compiling the header at base 6abc464153 (rr-twomodes flags) and at this branch: identical, wbg_pre fits in padding. The 12 s capture raw_pci415_12s_b from October loads and replays in the smoke arms below. |
+
+Tests [SIM VERIFIED, DGX]: unit +5, rt +1 (plus the changed cell-reset test); statics audit row for the warning flag. ctest -j4: 397 tests, 17 not passing = the 16 known + test_nr_gpu_pass_geo, which passed on rerun (GPU test, no GPU file touched; flaky under load as test_nr_gpu_pass was).
+
+Smoke replay, raw_pci415_12s_b, 1.0x, one arm per build [MEASURED replay, DGX]: base b1: 458 wide grants, 0 wideband pdsch_dmrs rec/s, 2.4 % of wide grants with a >=128 PRB rs record, CPU 2.43, scanq 0/17481, pdschq 0/3837 (full+stale / queued). New n1: 361 wide grants, 24 wideband records = 2.25 rec/s, 7.2 % with a >=128 PRB record, SNR p10/p50/p90 6.5/8.3/16.6, CPU 2.28, scanq 0/17544, pdschq 0/4230. SENSE_WBG: offered 47, admitted 25, taps 25, records 25, refunded 0, tap 313 us, ring 74 us/record. Metrics line carries sense_wbg_* and offered_wbg_overcap. Zero queue drops in both. The number of wide grants differs between arms (replay variation, as before).
+
+s9 rfsim, sense_min_prb 96, 150 s, 4 RX [SIM VERIFIED, one arm]: pdsch_dmrs 14894, pdsch_data 3382, csirs 797, ssb 9570; 0 records with valid_cfr_prbs=0; violations 0; wbg offered 845, admitted 263, taps 263, 102 us per tap.
+
+Concerns: (1) coverage unchanged by this round, still bounded by the startup and CRC gate; (2) a decode ERROR status leaks one token until the refill; (3) the new iq_ok gate is wbg-only: the existing unit tap still has no ring-lifetime check (pre-existing, not changed to keep sensing-unit behaviour as is); (4) the job-level R1 test is at the helper level (`nr_sense_wbg_tap_ok`), not a full consumer run; (5) test_nr_gpu_pass_geo flaked once.
