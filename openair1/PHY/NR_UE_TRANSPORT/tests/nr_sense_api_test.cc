@@ -361,6 +361,41 @@ TEST_F(QRing, QualityMatchesComputeAndWideU32Path)
   EXPECT_EQ(got.valid_cfr_prbs,want.valid_cfr_prbs);
   EXPECT_EQ(got.snr_db_p50,want.snr_db_p50);
 }
+
+/* Round 2 (I3): the producer's quality hint reaches the writer's quality for a PDSCH_DATA frame (window rows: no few_re, no per-symbol fit), and the frame in the CFR file keeps reserved header bytes
+ * 18-19 at zero (the hint is in-process only). One row per PRB at a strong SNR: with the window hint every PRB is valid; without it every PRB fails few_re. */
+TEST_F(QRing, WindowHintReachesQualityAndHeaderBytesStayZero)
+{
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  open(8);
+  const int nprb=60, nant=2;
+  std::vector<uint16_t> kk; std::vector<uint8_t> ll; std::vector<float> v(2*(size_t)nant*nprb);
+  for (int p=0;p<nprb;p++) { kk.push_back(12*p+5); ll.push_back(4); }
+  for (int a=0;a<nant;a++) for (int p=0;p<nprb;p++) { v[2*(a*nprb+p)]=30.f; v[2*(a*nprb+p)+1]=0.5f*float(p%3); }
+  nr_sense_quality_t qw, qn;
+  nr_sense_quality_hint(uint16_t(2 | (1<<2) | (178u<<8)));   /* window rows, Qm 2, eta 178/255 */
+  const uint64_t a=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DATA,nant,v.data(),nprb,nprb,kk.data(),ll.data(),10,0,1.0f,0,0,nullptr);
+  nr_sense_quality_hint(0);
+  const uint64_t b=nr_sense_push_cfr(NR_SENSE_SRC_PDSCH_DATA,nant,v.data(),nprb,nprb,kk.data(),ll.data(),11,0,1.0f,0,0,nullptr);
+  ASSERT_TRUE(wait_q(a,&qw)); ASSERT_TRUE(wait_q(b,&qn));
+  EXPECT_EQ(qw.valid_cfr_prbs,nprb);
+  EXPECT_TRUE(std::isnan(qw.resid_db)) << "window rows have no per-symbol fit";
+  EXPECT_EQ(qw.inval[NR_SENSE_INV_FEW_RE],0);
+  EXPECT_EQ(qn.valid_cfr_prbs,0);
+  EXPECT_EQ(qn.inval[NR_SENSE_INV_FEW_RE],nprb);
+  nr_sense_test_pause_writer(false);
+  nr_sense_close();
+  std::ifstream f(cfr,std::ios::binary); std::string bytes((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
+  size_t off=0; int frames=0;
+  while (off+48<=bytes.size()) {
+    ASSERT_EQ(bytes.substr(off,4),"NRCF");
+    EXPECT_EQ(uint8_t(bytes[off+18]),0) << "frame " << frames; EXPECT_EQ(uint8_t(bytes[off+19]),0) << "frame " << frames;
+    uint32_t keep; memcpy(&keep,bytes.data()+off+20,4);
+    off+=((48+3*(size_t)keep+3)&~(size_t)3)+8*(size_t)keep*nant; frames++;
+  }
+  EXPECT_EQ(frames,2);
+}
+
 /* S5: the writer reports each formatted RS record of a sensing-mode frame to its unit; legacy and traffic leave the unit table untouched */
 TEST_F(QRing, UnitCfrFromWriter)
 {

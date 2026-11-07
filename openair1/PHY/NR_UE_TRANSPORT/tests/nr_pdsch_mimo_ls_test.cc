@@ -210,3 +210,47 @@ TEST(MimoLsLayout, WindowsStayInsideSymbolAndRun)
   EXPECT_GT(total, G.nre / 2);                                             // most windows are well conditioned
 }
 }  // namespace
+
+// out_nv (nr_pdsch_mimo_ls_cfr_nv): the per-row, per-layer noise variance of the window estimate, sigma_y^2 (G^-1)_ll, checked against the empirical error variance of the estimate on a
+// flat channel (so the window ladder may widen freely) over Monte-Carlo noise, Nl = 2, 3, 4 with 4 RX. The row's own v-hat is a chi-square estimate (dof nant (n - nl)), so the MEAN over many
+// rows is compared (unbiased), and the sample variance of v-hat/v is reported.
+TEST(MimoLsNoiseVar, OutNvMatchesEmpiricalErrorVariance)
+{
+  for (int nl : {2, 3, 4}) {
+    double sum_err = 0, sum_nv = 0, sum_raw = 0; long cnt = 0;
+    for (uint32_t seed = 1; seed <= 60; seed++) {
+      const Grant G = make(nl, 4, 48, 12.0, 0.0, 1000 * nl + seed);
+      const size_t cap = G.nre / 4 + 8;
+      std::vector<float> h(2 * (size_t)G.nl * NANT * cap), nv((size_t)G.nl * cap);
+      std::vector<uint32_t> k(cap), sym(cap);
+      std::vector<uint16_t> raw(cap);
+      nr_pdsch_mimo_ls_info_t info;
+      const int n = nr_pdsch_mimo_ls_cfr_nv(G.nre, G.nl, NANT, G.x.data(), G.k.data(), G.sym.data(), G.y.data(), G.nre, (int)cap, cap, h.data(), k.data(), sym.data(), raw.data(), nv.data(), &info);
+      ASSERT_GT(n, 0);
+      for (int w = 0; w < n; w++) {
+        int i = 0;
+        for (; i < G.nre; i++) if (G.k[i] == k[w] && G.sym[i] == sym[w]) break;
+        for (int l = 0; l < nl; l++) for (int a = 0; a < NANT; a++) {
+          const cd est(h[2 * ((size_t)(l * NANT + a) * cap + w)], h[2 * ((size_t)(l * NANT + a) * cap + w) + 1]);
+          sum_err += std::norm(est - G.htrue[((size_t)l * NANT + a) * G.nre + i]);
+          sum_nv += nv[(size_t)l * cap + w];
+          cnt++;
+        }
+        sum_raw += raw[w];
+      }
+    }
+    const double r = sum_nv / sum_err;
+    printf("MIMO_NV Nl=%d: mean out_nv / empirical error variance = %.3f over %ld estimates (mean window %.1f REs)\n", nl, r, cnt, sum_raw / (cnt / (nl * NANT)));
+    EXPECT_GT(r, 0.9) << nl;
+    EXPECT_LT(r, 1.1) << nl;
+  }
+  // the old entry point is the same function without the noise planes
+  const Grant G = make(2, 4, 48, 12.0, 0.0, 5);
+  const size_t cap = G.nre / 4 + 8;
+  std::vector<float> h1(2 * (size_t)2 * NANT * cap), h2(h1.size()), nv(2 * cap);
+  std::vector<uint32_t> k(cap), s(cap); std::vector<uint16_t> raw(cap);
+  const int n1 = nr_pdsch_mimo_ls_cfr(G.nre, 2, NANT, G.x.data(), G.k.data(), G.sym.data(), G.y.data(), G.nre, (int)cap, cap, h1.data(), k.data(), s.data(), raw.data(), nullptr);
+  const int n2 = nr_pdsch_mimo_ls_cfr_nv(G.nre, 2, NANT, G.x.data(), G.k.data(), G.sym.data(), G.y.data(), G.nre, (int)cap, cap, h2.data(), k.data(), s.data(), raw.data(), nv.data(), nullptr);
+  EXPECT_EQ(n1, n2);
+  EXPECT_EQ(h1, h2);
+}

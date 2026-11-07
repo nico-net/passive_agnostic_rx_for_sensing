@@ -1,13 +1,7 @@
-/* Production-path check of passive PDSCH SSB rate matching (TS 38.214 5.1.4).
- *
- * Drives the functions nr_pdsch_passive_decode() calls -- nr_ssb_rm_candidates/observe/plan/
- * first_data_symbol (nr_ssb_rate_match.c) -- and then the real nr_rx_pdsch()/nr_dlsch_extract_rbs()
- * and nr_get_G(), from a slot whose SSB is actually transmitted (PSS/SSS from an independent
- * TS 38.211 7.4.2 generator) to the LLR stream. An independent transmitter model maps a known QPSK
- * stream onto the REs TS 38.214 leaves to PDSCH; every LLR must carry its symbol's sign in order,
- * and sum(dl_valid_re) * Qm must equal G.
- *
- * PLAIN C, not gtest: nr_rx_pdsch()'s prototype uses C variably-modified array parameters. */
+/* The real OAI DM-RS channel estimator (nr_pdsch_channel_estimation, chest_freq 0 = linear interpolation, CPU path, 1 RX, DM-RS type 1 and 2) fed with noise only, against the noise model of
+ * nr_sense_quality.c (nr_sense_quality_dmrs_model / nr_sense_quality_dmrs_rho): on the exported comb-2 H of interior PRBs it checks the mean and relative variance of the affine-fit residual S, the
+ * relative variance of the PRB power sum T, and the ratio of the chest's own nvar to the H noise variance (rho: the SNR reference of DM-RS records is nvar / rho).
+ * PLAIN C, not gtest: the library prototypes use C variably-modified array parameters. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,9 +55,6 @@ static int failures;
   } while (0)
 
 
-/* The real OAI DM-RS channel estimator (nr_pdsch_channel_estimation, chest_freq 0 = linear interpolation, CPU path) fed with noise only: checks the noise model of nr_sense_quality.c
- * (nr_sense_quality_dmrs_model) against what the production chest produces, per DM-RS type: (1) the exported comb-2 H of an interior PRB has E[S]/v = mR for the affine-fit residual S and a power sum
- * T whose relative variance is 1/kT and S's is 1/kR, (2) the estimator's own nvar is rho x the H noise variance (type 1: 3.29, type 2: 1.75). Single RX antenna (direct path, no tpool). */
 #include "PHY/NR_UE_TRANSPORT/nr_sense_quality.h"
 enum { FFT = 2048, NRB = 106, MAX_RX = 1, CP = FFT / 128 * 9, CP0 = FFT / 128 * 11 };
 
@@ -161,7 +152,7 @@ static void check_type(int type, int nprb)
   const double relT = (sT2 / nT - mT * mT) / (mT * mT), relS = (sS2 / nS - mS * mS) / (mS * mS);
   double m[5];
   nr_sense_quality_dmrs_model(type, m);
-  const double rho_pred = type == 1 ? 3.2857 : 1.75, rho = snv / TR / v;
+  const double rho_pred = nr_sense_quality_dmrs_rho(type), rho = snv / TR / v;
   printf("CHEST type %d (%d PRB, %ld interior samples): E[S]/v %.4f (model %.4f) | relvar T %.4f (1/kT %.4f) | relvar S %.4f (1/kR %.4f) | nvar/v %.3f (model %.3f)\n", type, nprb, nT,
          mS / v, m[4], relT, 1 / m[0], relS, 1 / m[2], rho, rho_pred);
   /* measured 2026-11-07 on the DGX: E[S]/v is +11 % (type 1) / +9 % (type 2) over the model, relvar S +12 %: on noise only the chest's delay estimate is random and its de-rotation adds residual

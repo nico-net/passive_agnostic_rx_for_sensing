@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <cmath>
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
@@ -15,6 +16,7 @@
 extern "C" {
 #include "nr_isac.h"
 #include "nr_sense_api.h"
+#include "nr_sense_quality.h"
 #include "PHY/NR_UE_TRANSPORT/nr_sense_records.h"
 #include "common/config/config_userapi.h"
 #include "common/utils/LOG/log.h"
@@ -408,6 +410,54 @@ TEST_F(Adapter, RsRecordCarriesSnrAndNoiseVar) {
   EXPECT_NE(la.find("\"snr_db\":7.75,"),std::string::npos) << la;
   EXPECT_NE(lb.find("\"noise_var\":3.5,"),std::string::npos) << lb;
   EXPECT_NE(lb.find("\"snr_db\":null"),std::string::npos) << lb;
+#else
+  EXPECT_FALSE(nr_isac_enabled());
+#endif
+}
+
+/* Round 2 (I1): through the production source tokens, the DM-RS type reaches the writer's quality. The decoder / tap export submits as PDSCH_DMRS_BLIND when that token is enabled. With the chest's
+ * nvar as the SNR reference, the reported SNR is (P - nvar/rho)/(nvar/rho) with rho = 3.29 (type 1) or 1.75 (type 2): the record shows which operator the writer used. */
+TEST_F(Adapter, DmrsTypeAndWindowHintsReachTheWriterThroughProductionTokens) {
+  init(cfg(1,"pdsch_dmrs,pdsch_dmrs_blind,pdsch_data"));
+#ifdef SENSE_ADAPTER_ON
+  nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+  float iq[4*24*2]; uint32_t k[24], l[24];
+  for(int p=0;p<4;p++) for(int i=0;i<6;i++) { k[6*p+i]=12*p+2*i; l[6*p+i]=2; }
+  for(int a=0;a<4;a++) for(int i=0;i<24;i++) { iq[2*(a*24+i)]=std::sqrt(1000.f); iq[2*(a*24+i)+1]=0.f; }
+  nr_isac_carrier_t carrier{106,30000,3500000000,42,20};
+  nr_sense_rs_meta_t meta{}; meta.rnti=0x4601; meta.start_rb=0; meta.nb_rb=4; meta.ports=1; meta.ssb_index=-1; meta.k_ssb=-1;
+  meta.ta_est_samples=-1; meta.transform_precoding=-1; meta.dmrs_add_pos=-1; meta.dmrs_n_scid=0;
+  const double rho1=nr_sense_quality_dmrs_rho(1), rho2=nr_sense_quality_dmrs_rho(2);
+  const float nvar=float(100.0*rho1);   /* the chest's figure for an H noise variance of 100 (type 1) */
+  meta.dmrs_type=2; nr_isac_submit_cfr_multi_meta(2000,0,NR_ISAC_SRC_PDSCH_DMRS_BLIND,&carrier,iq,4,24,k,l,24,nvar,&meta);
+  meta.dmrs_type=1; nr_isac_submit_cfr_multi_meta(2001,0,NR_ISAC_SRC_PDSCH_DMRS_BLIND,&carrier,iq,4,24,k,l,24,nvar,&meta);
+  meta.dmrs_type=2; nr_isac_submit_cfr_multi_meta(2002,0,NR_ISAC_SRC_PDSCH_DMRS,&carrier,iq,4,24,k,l,24,nvar,&meta);
+  /* window rows of a 2-layer grant: one row per PRB (k = 12p+5, one symbol), strong SNR, header noise = the layer's mean row variance */
+  float wiq[4*4*2]; uint32_t wk[4], wl[4];
+  for(int p=0;p<4;p++) { wk[p]=12*p+5; wl[p]=4; }
+  for(int a=0;a<4;a++) for(int p=0;p<4;p++) { wiq[2*(a*4+p)]=30.f; wiq[2*(a*4+p)+1]=0.f; }
+  nr_sense_rs_meta_t wm=meta; wm.dmrs_type=1; wm.layer_idx1=1; wm.n_layers=2; wm.qm=4; wm.win_het=0.7f;
+  nr_isac_submit_cfr_multi_meta(2003,0,NR_ISAC_SRC_PDSCH_DATA,&carrier,wiq,4,4,wk,wl,4,1.0f,&wm);
+  nr_isac_stop();
+  nr_isac_mode_set(NR_ISAC_MODE_LEGACY);
+  const auto r=read(records);
+  std::vector<std::string> dm; std::string data;
+  for(size_t p=0;(p=r.find("{\"schema\"",p))!=std::string::npos;) {
+    const size_t e=r.find('\n',p); const std::string line=r.substr(p,e-p); p=e;
+    if(line.find("\"source\":\"pdsch_dmrs\"")!=std::string::npos) dm.push_back(line);
+    if(line.find("\"source\":\"pdsch_data\"")!=std::string::npos) data=line;
+  }
+  ASSERT_EQ(dm.size(),3u);
+  auto snr=[](const std::string &s){ const auto q=s.find("\"snr_db_p50\":"); return q==std::string::npos?NAN:atof(s.c_str()+q+13); };
+  const double e1=10*std::log10((1000-nvar/rho1)/(nvar/rho1)), e2=10*std::log10((1000-nvar/rho2)/(nvar/rho2));
+  EXPECT_NEAR(snr(dm[0]),e2,0.05) << dm[0];   /* type 2 through the BLIND token: rho(2) */
+  EXPECT_NEAR(snr(dm[1]),e1,0.05) << dm[1];   /* type 1 */
+  EXPECT_NEAR(snr(dm[2]),e2,0.05) << dm[2];   /* type 2 through the plain token */
+  EXPECT_GT(std::fabs(e1-e2),2.0);
+  printf("ADAPTER DM-RS snr_db_p50 via BLIND/type2 %.2f (expect %.2f), BLIND/type1 %.2f (%.2f), DMRS/type2 %.2f\n",snr(dm[0]),e2,snr(dm[1]),e1,snr(dm[2]));
+  ASSERT_FALSE(data.empty());
+  EXPECT_NE(data.find("\"valid_cfr_prbs\":4,"),std::string::npos) << data;    /* window rows: one row per PRB is enough */
+  EXPECT_NE(data.find("\"resid_db\":null"),std::string::npos) << data;
 #else
   EXPECT_FALSE(nr_isac_enabled());
 #endif

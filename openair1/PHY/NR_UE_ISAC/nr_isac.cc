@@ -413,10 +413,14 @@ extern "C" void nr_isac_submit_cfr_multi_meta(uint32_t slot_idx, float slot_frac
   (void)nr_sense_take_ring_full(); // a flag left by another push of this thread is not this frame's
   if (detail && nr_isac_mode() == NR_ISAC_MODE_SENSING) { // quality hint for the writer (see nr_sense_quality.h)
     uint16_t hint = 0;
-    if (source == NR_ISAC_SRC_PDSCH_DMRS && detail->dmrs_type == 2) hint |= 1;
+    /* every token the writer maps to the PDSCH DM-RS source (source_map): the decoder / tap export submits with PDSCH_DMRS_BLIND when that token is enabled */
+    if ((source == NR_ISAC_SRC_PDSCH_DMRS || source == NR_ISAC_SRC_PDSCH_DMRS_BLIND) && detail->dmrs_type == 2) hint |= 1;
     if (source == NR_ISAC_SRC_PDSCH_DATA || source == NR_ISAC_SRC_PUSCH_DATA) {
-      hint |= uint16_t((detail->qm / 2) & 15) << 2;
-      if (source == NR_ISAC_SRC_PDSCH_DATA && detail->win_het > 0.f) hint |= 2 | uint16_t(std::lround(std::min(detail->win_het, 1.f) * 255.f)) << 8;
+      /* transform-precoded PUSCH carries a DFT output, not a QAM symbol: the 1/|X|^2 law does not apply, order unknown = the conservative 256QAM */
+      const int qm = source == NR_ISAC_SRC_PUSCH_DATA && detail->transform_precoding == 0 ? 0 : detail->qm; // OAI: transformPrecoder_enabled = 0, disabled = 1; unset (-1) keeps the producer qm
+      hint |= uint16_t((qm / 2) & 15) << 2;
+      if (source == NR_ISAC_SRC_PDSCH_DATA && detail->win_het > 0.f)
+        hint |= 2 | uint16_t(std::max<long>(1, std::lround(std::min(detail->win_het, 1.f) * 255.f))) << 8; /* eta below 1/255 stays 1/255, never "homogeneous" */
     }
     nr_sense_quality_hint(hint);
   }

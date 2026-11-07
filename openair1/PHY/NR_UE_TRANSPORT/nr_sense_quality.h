@@ -68,6 +68,8 @@ typedef struct {
  * bits 2-5 Qm/2, bits 8-15 eta*255. Set per thread just before the push; consumed by it. */
 void nr_sense_quality_hint(uint16_t hint);
 double nr_sense_quality_qam_eta(int qm);
+double nr_sense_quality_window_law_eta(double eta); /* test hook: effective eta of the discrete law behind the window threshold (<= the stated eta) */
+double nr_sense_quality_dmrs_rho(int dmrs_type);    /* E[chest nvar] / H noise variance: 3.29 (type 1), 1.75 (type 2) */
 void nr_sense_quality_gcrit_stats(uint64_t *calls, uint64_t *misses); /* test hook: this thread's threshold-cache lookups and misses */
 #define NR_SENSE_SPARSE_SYM_MIN 0.5f /* general bound (half the coherent amplitude), not tuned on any cell */
 void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,

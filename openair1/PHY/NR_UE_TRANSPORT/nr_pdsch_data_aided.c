@@ -94,7 +94,7 @@ static __thread uint32_t isac_l[273 * 12 * 14];
 static __thread uint32_t *win_k;
 #define DA_MAX_RE (273 * 12 * 14)
 #define DA_WIN_NV_OFF(cap) ((sizeof(uint32_t) * 2 * (cap) + sizeof(uint16_t) * (cap) + 7) / 8 * 8) /* byte offset of the per-window noise planes behind win_k/win_l/win_raw */
-#define DA_WIN_BYTES(cap) (DA_WIN_NV_OFF(cap) + sizeof(float) * NR_MIMO_LS_MAX_NL * (cap))
+#define DA_WIN_BYTES(cap) (DA_WIN_NV_OFF(cap) + (nr_isac_mode() == NR_ISAC_MODE_SENSING ? sizeof(float) * NR_MIMO_LS_MAX_NL * (cap) : 0)) /* the noise planes exist in sensing mode only: traffic keeps its former scratch */
 #define DA_CODED_SZ ((size_t)(273 * 12 * 14 * 8 * NR_MIMO_LS_MAX_NL + 63) / 64 * 64 + 64) /* G = REs * Qm * Nl */
 
 static bool da_scratch_ensure(uint32_t nant, bool want_ml, bool warm)
@@ -524,7 +524,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     uint32_t *win_l = win_k + win_cap;
     uint16_t *win_raw = (uint16_t *)(win_l + win_cap);
     nr_pdsch_mimo_ls_info_t li;
-    float *win_nv = (float *)((uint8_t *)win_k + DA_WIN_NV_OFF(win_cap));
+    float *win_nv = nr_isac_mode() == NR_ISAC_MODE_SENSING ? (float *)((uint8_t *)win_k + DA_WIN_NV_OFF(win_cap)) : NULL; /* traffic: the former call, no noise planes */
     const int nw = nr_pdsch_mimo_ls_cfr_nv((int)nof_re, (int)nl, (int)isac_nof_ant, (const int16_t *)mod_syms, isac_k, isac_l,
                                            (const int16_t *)ygath, isac_max_re, (int)win_cap, win_cap, isac_h, win_k, win_l, win_raw, win_nv, &li);
     e_nv = win_nv;

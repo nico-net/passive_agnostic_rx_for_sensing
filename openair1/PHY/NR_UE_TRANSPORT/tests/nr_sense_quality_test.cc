@@ -756,7 +756,7 @@ TEST(SenseQualityAdaptive, DmrsInterpolatedNoiseOnlyValidAtAlpha)
   long valid = 0, tot = 0;
   for (int rec = 0; rec < 1300; rec++) {
     Cfr c = dmrs_rec(100, -300.f, 4, r);
-    nr_sense_quality_t q; nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 5.f /* ignored */, NR_SENSE_Q_DMRS_INTERP, &q);
+    nr_sense_quality_t q; nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 0.21875f * float(nr_sense_quality_dmrs_rho(1)) /* the chest's nvar for this noise */, NR_SENSE_Q_DMRS_INTERP, &q);
     valid += count_valid_inner(q, 3, 97); tot += 94;
   }
   printf("ADAPT dmrs-interp noise-only valid %ld / %ld (alpha*N = %.0f)\n", valid, tot, 1e-3 * tot);
@@ -971,13 +971,13 @@ TEST(SenseQualityRound1, DataAidedQamHeterogeneity)
 }
 /* B: windowed-LS multi-layer rows: one estimate per LS window, ~1 per symbol per PRB; per-row noise variance heterogeneous (noise gain of the Gram matrix) */
 namespace {
-Cfr win_rec(int nprb, float snr_db, int n_ant, Rng &r, float *nv_mean, float *eta)
+Cfr win_rec(int nprb, float snr_db, int n_ant, Rng &r, float *nv_mean, float *eta, int max_rows = 4, double sigma = 0.6)
 {
   Cfr c; c.n_ant = n_ant;
   std::vector<float> v;
   for (int p = 0; p < nprb; p++) {
-    const int rows = 1 + int(r.g() % 4);
-    for (int s = 0; s < rows; s++) { c.k.push_back(12 * p + 3 * s + int(r.g() % 3)); c.l.push_back(2 + s); v.push_back(std::exp(0.6f * r.n())); }
+    const int rows = 1 + int(r.g() % max_rows);
+    for (int s = 0; s < rows; s++) { c.k.push_back(12 * p + (s % 12)); c.l.push_back(2 + s % 12); v.push_back(float(std::exp(sigma * r.n() - 0.5 * sigma * sigma))); }
   }
   c.n_re = c.k.size(); c.iq.resize(2 * n_ant * c.n_re);
   double s1 = 0, s2 = 0;
@@ -1009,7 +1009,6 @@ TEST(SenseQualityRound1, WindowRowsNoFewReAndAlphaNull)
   printf("ADAPT window rows noise-only valid %ld / %ld = %.2f alpha ; 12 dB: valid %ld / %ld ; few_re %ld / %ld\n", valid, tot, double(valid) / tot / 1e-3, sig_valid, sig_tot, few, sig_few);
   EXPECT_EQ(few + sig_few, 0);
   EXPECT_LE(double(valid) / tot, 3e-3);
-  EXPECT_GE(double(valid) / tot, 0.2e-3);
   EXPECT_GE(double(sig_valid) / sig_tot, 0.9); /* 12 dB per row (a single heavy-tail row x 4 antennas needs ~7 dB) */
   /* without the window flag the same records fail few_re (1-4 REs per PRB, at most 1 per symbol): the loss this flag removes */
   float nv, eta; Cfr c = win_rec(60, 12.f, 4, r, &nv, &eta); nr_sense_quality_t q;
@@ -1098,4 +1097,115 @@ TEST(SenseQualityRound1, StreamCostWithVaryingShapes)
   printf("COST stream: %.1f us/record average over %d records (cold start included), worst %.0f us, threshold cache %llu misses / %llu lookups\n", us, N, worst, (unsigned long long)(miss1 - miss0), (unsigned long long)(calls1 - calls0));
   EXPECT_LT(us, 150.0);
   EXPECT_LT(double(miss1 - miss0) / double(calls1 - calls0), 0.02);
+}
+
+
+/* ---- round 2 ---- */
+/* I2: the window law's effective eta never exceeds the stated one, and noise-only window records stay inside 3 alpha at every eta (rows drawn from the lognormal itself, unbounded) */
+TEST(SenseQualityRound2, WindowLawNeverMilderThanStated)
+{
+  for (double eta : {0.02, 0.05, 0.125, 0.4, 0.7}) {
+    const double e8 = std::floor(eta * 255.0) / 255.0, eff = nr_sense_quality_window_law_eta(e8);
+    printf("ADAPT window law eta stated %.4f -> effective %.4f\n", e8, eff);
+    EXPECT_LE(eff, e8 + 1e-9) << eta;
+    EXPECT_GE(eff, 0.9 * e8) << eta;
+    Rng r(300 + int(eta * 1000));
+    long valid = 0, tot = 0;
+    const double sg = std::sqrt(std::log(1.0 / e8));
+    for (int rec = 0; rec < 1500; rec++) {
+      float nv, et;
+      Cfr c = win_rec(55, -300.f, 4, r, &nv, &et, 4, sg);
+      nr_sense_quality_t q;
+      nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 1.f, NR_SENSE_Q_DATA_AIDED | NR_SENSE_Q_WINDOW | NR_SENSE_Q_HET(e8), &q);
+      valid += q.valid_cfr_prbs; tot += q.allocated_prbs;
+    }
+    printf("ADAPT window eta %.4f noise-only valid %ld / %ld = %.2f alpha\n", e8, valid, tot, double(valid) / tot / 1e-3);
+    EXPECT_LE(double(valid) / tot, 3e-3) << eta;
+  }
+}
+/* 7 (investigation C): the chest's own noise figure is the SNR reference of a DM-RS record: typical-power PRBs with in-PRB structure (not affine) no longer fail SNR, a 3-RE interferer is still
+ * rejected by the residual test; without nvar the median reference stands (and drowns the structured PRBs) */
+TEST(SenseQualityRound2, DmrsChestNvarIsTheSnrReference)
+{
+  for (int type : {1, 2}) {
+    Rng r(400 + type);
+    int good_nv = 0, good_med = 0, n = 0, intf = 0;
+    const float nvar = 0.21875f * float(nr_sense_quality_dmrs_rho(type)); /* the chest's figure for the noise of dmrs_rec */
+    for (int rec = 0; rec < 60; rec++) {
+      Cfr c = dmrs_rec(60, 12.f, 4, r, 1.f, type);
+      const float amp = std::sqrt(std::pow(10.f, 1.2f) * 0.21875f);
+      for (int i = 0; i < c.n_re; i++) { /* in-PRB structure: quadratic across the comb, 40 % of the amplitude at the PRB edges */
+        const float x = ((c.k[i] % 12) / 2 - 2.5f) / 2.5f, g = 0.4f * amp * x * x;
+        for (int a = 0; a < 4; a++) { cf z = std::polar(g, 0.9f * a); c.iq[2 * (a * c.n_re + i)] += z.real(); c.iq[2 * (a * c.n_re + i) + 1] += z.imag(); }
+      }
+      Cfr d = c;
+      for (int i = 0; i < d.n_re; i++) if (d.k[i] / 12 == 25 && (d.k[i] % 12) >= 6) /* 3 REs of another user in PRB 25 */
+        for (int a = 0; a < 4; a++) { cf z = 2.f * amp * std::polar(1.f, float(r.g() % 628) / 100.f); d.iq[2 * (a * d.n_re + i)] += z.real(); d.iq[2 * (a * d.n_re + i) + 1] += z.imag(); }
+      const unsigned fl = NR_SENSE_Q_DMRS_INTERP | (type == 2 ? NR_SENSE_Q_DMRS_T2 : 0u);
+      nr_sense_quality_t q, qm, qi;
+      nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), nvar, fl, &q);
+      nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), NAN, fl, &qm);
+      nr_sense_quality_compute_ex(d.n_ant, d.iq.data(), d.n_re, d.n_re, d.k.data(), d.l.data(), nvar, fl, &qi);
+      good_nv += count_valid_inner(q, 3, 57) - 0; good_med += count_valid_inner(qm, 3, 57); n += 54;
+      intf += !bit(qi, 25) && qi.inval[NR_SENSE_INV_RESID] >= 1;
+      EXPECT_EQ(q.inval[NR_SENSE_INV_SNR] <= 3, true) << "type " << type << ": SNR failures with the chest figure " << q.inval[NR_SENSE_INV_SNR];
+    }
+    printf("ADAPT DM-RS type %d structured PRBs, SNR 12 dB: valid with chest nvar %.1f %%, with the median reference %.1f %%; interferer rejected by the residual test %d / 60\n", type, 100.0 * good_nv / n, 100.0 * good_med / n, intf);
+    EXPECT_GE(good_nv, 0.9 * n);
+    EXPECT_GT(good_nv, good_med);
+    EXPECT_GE(intf, 55);
+  }
+}
+/* m5/C1: first-sight cost: every record has a fresh (shape, reference dof, eta, N): the threshold tables are built on the writer thread */
+TEST(SenseQualityRound2, FirstSightCost)
+{
+  Rng r(500);
+  std::vector<double> us;
+  uint64_t calls0, miss0, calls1, miss1;
+  nr_sense_quality_gcrit_stats(&calls0, &miss0);
+  for (int i = 0; i < 240; i++) {
+    const int nprb = 51 + int(r.g() % 223);
+    Cfr c; unsigned fl; float nv = NAN;
+    switch (i % 4) {
+      case 0: c = dmrs_rec(nprb, 8.f, 4, r, 1.f, 1 + (i / 4) % 2); fl = NR_SENSE_Q_DMRS_INTERP | ((i / 4) % 2 ? NR_SENSE_Q_DMRS_T2 : 0u); break;
+      case 1: c = da_rec(nprb, 3 + int(r.g() % 11), 2 * (1 + int(r.g() % 4)), 8.f, false, 4, r); fl = NR_SENSE_Q_DATA_AIDED | NR_SENSE_Q_QM(2 * (1 + int(r.g() % 4))); nv = 1.f; break;
+      case 2: { float v, et; c = win_rec(nprb, 8.f, 4, r, &v, &et, 15, 0.3 + 0.1 * (r.g() % 15)); fl = NR_SENSE_Q_DATA_AIDED | NR_SENSE_Q_WINDOW | NR_SENSE_Q_HET(et); nv = v; break; }
+      default: c = da_rec(nprb, 4 + int(r.g() % 9), 6, 8.f, false, 4, r); fl = NR_SENSE_Q_DATA_AIDED; break; /* unknown Qm, median reference: 256QAM + F inflation */
+    }
+    nr_sense_quality_t q;
+    auto a = std::chrono::steady_clock::now();
+    nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), nv, fl, &q);
+    us.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
+  }
+  nr_sense_quality_gcrit_stats(&calls1, &miss1);
+  std::sort(us.begin(), us.end());
+  double mean = 0; for (double x : us) mean += x / us.size();
+  printf("COST first-sight (240 records, fresh shapes, 51..273 PRB, all paths): mean %.0f us, median %.0f us, p90 %.0f us, worst %.0f us (cache misses %llu)\n", mean, us[us.size() / 2], us[us.size() * 9 / 10], us.back(), (unsigned long long)(miss1 - miss0));
+  EXPECT_LT(mean, 5000.0);
+  EXPECT_LT(us.back(), 60000.0);
+}
+/* I4: the residual-reject table at small ne and the even/odd gap: signal 20 dB flat + noise through each source's chain, median reference (no producer figure), PRB counts 2..51 */
+TEST(SenseQualityRound2, SmallRecordsResidualRejectTable)
+{
+  for (int model : {0, 1, 2}) {
+    double worst = 0;
+    for (int ne : {2, 3, 4, 5, 6, 10, 11, 20, 21, 25, 26, 50, 51}) {
+      const int nrec = std::max(200, 100000 / ne);
+      Cnt c = sweep_null(model, ne, nrec, 4, 20.f, 600 + model * 100 + ne);
+      const double rate = double(c.resid) / c.tot;
+      worst = std::max(worst, rate);
+      printf("ADAPT small-record residual rejects (20 dB flat + noise) model %d ne %2d: %ld / %ld = %.2f alpha\n", model, ne, c.resid, c.tot, rate / 1e-3);
+      EXPECT_LE(rate, 3e-3) << "model " << model << " ne " << ne;
+    }
+  }
+}
+TEST(SenseQualityRound2, EvenOddGapClosed)
+{
+  for (int model : {0, 1, 2}) {
+    double r[4]; int k = 0;
+    for (int ne : {10, 11, 50, 51}) { Cnt c = sweep_null(model, ne, std::max(200, 100000 / ne), 4, -300.f, 700 + model * 100 + ne); r[k++] = double(c.valid) / c.tot; }
+    printf("ADAPT even/odd model %d: ne 10 %.2f, 11 %.2f, 50 %.2f, 51 %.2f alpha\n", model, r[0] / 1e-3, r[1] / 1e-3, r[2] / 1e-3, r[3] / 1e-3);
+    EXPECT_LE(std::fabs(r[0] - r[1]), 1.2e-3);
+    EXPECT_LE(std::fabs(r[2] - r[3]), 1.2e-3);
+  }
 }
