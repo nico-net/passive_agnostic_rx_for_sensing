@@ -1,0 +1,70 @@
+{
+ "schema": 1,
+ "window": {
+  "centre_hz": 3600000000,
+  "rate_msps": 491.52,
+  "n_rx": 4
+ },
+ "cells": [
+  {
+   "id": "pci415",
+   "centre_hz": 3680010000,
+   "gscn": 7971,
+   "ssb_hz": 3679680000,
+   "ssb_index": 4,
+   "pci": 415,
+   "cfo_hz": -4827,
+   "n_rb_hint": 217,
+   "scs_khz": 30,
+   "sss_gap": 4.47,
+   "dmrs_ratio": 3.74,
+   "first_seen_ns": 2000,
+   "state": "maintain"
+  },
+  {
+   "id": "pci923",
+   "centre_hz": 3759990000,
+   "gscn": 8007,
+   "ssb_hz": 3731520000,
+   "ssb_index": 0,
+   "pci": 923,
+   "cfo_hz": -4832,
+   "n_rb_hint": 217,
+   "scs_khz": 30,
+   "sss_gap": 4.68,
+   "dmrs_ratio": 5.29,
+   "first_seen_ns": 2001,
+   "state": "maintain"
+  },
+  {
+   "id": "pci508",
+   "centre_hz": 3590010000,
+   "gscn": 7895,
+   "ssb_hz": 3570240000,
+   "ssb_index": 1,
+   "pci": 508,
+   "cfo_hz": -4868,
+   "n_rb_hint": 162,
+   "scs_khz": 30,
+   "sss_gap": 3.89,
+   "dmrs_ratio": 4.18,
+   "first_seen_ns": 2002,
+   "state": "maintain"
+  },
+  {
+   "id": "pci403",
+   "centre_hz": 3630000000,
+   "gscn": 7933,
+   "ssb_hz": 3624960000,
+   "ssb_index": 3,
+   "pci": 403,
+   "cfo_hz": 2178,
+   "n_rb_hint": 51,
+   "scs_khz": 30,
+   "sss_gap": 4.07,
+   "dmrs_ratio": 4.91,
+   "first_seen_ns": 2003,
+   "state": "maintain"
+  }
+ ]
+}
