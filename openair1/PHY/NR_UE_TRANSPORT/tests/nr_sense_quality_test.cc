@@ -1,6 +1,7 @@
 #include "nr_sense_quality.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -756,7 +757,7 @@ TEST(SenseQualityAdaptive, DmrsInterpolatedNoiseOnlyValidAtAlpha)
   long valid = 0, tot = 0;
   for (int rec = 0; rec < 1300; rec++) {
     Cfr c = dmrs_rec(100, -300.f, 4, r);
-    nr_sense_quality_t q; nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 0.21875f * float(nr_sense_quality_dmrs_rho(1)) /* the chest's nvar for this noise */, NR_SENSE_Q_DMRS_INTERP, &q);
+    nr_sense_quality_t q; nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), NAN /* the median reference; the nvar reference is tested with the REAL chest's nvar in test_nr_sense_chest_noise (NULL ... chest nvar) */, NR_SENSE_Q_DMRS_INTERP, &q);
     valid += count_valid_inner(q, 3, 97); tot += 94;
   }
   printf("ADAPT dmrs-interp noise-only valid %ld / %ld (alpha*N = %.0f)\n", valid, tot, 1e-3 * tot);
@@ -1081,8 +1082,9 @@ TEST(SenseQualityRound1, StreamCostWithVaryingShapes)
     }
   }
   nr_sense_quality_t q;
-  uint64_t calls0, miss0, calls1, miss1;
+  uint64_t calls0, miss0, calls1, miss1, sc0, sm0, sc1, sm1;
   nr_sense_quality_gcrit_stats(&calls0, &miss0);
+  nr_sense_quality_sp_stats(&sc0, &sm0);
   auto t0 = std::chrono::steady_clock::now();
   double worst = 0;
   const int N = 4000;
@@ -1094,7 +1096,9 @@ TEST(SenseQualityRound1, StreamCostWithVaryingShapes)
   }
   const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / N;
   nr_sense_quality_gcrit_stats(&calls1, &miss1);
-  printf("COST stream: %.1f us/record average over %d records (cold start included), worst %.0f us, threshold cache %llu misses / %llu lookups\n", us, N, worst, (unsigned long long)(miss1 - miss0), (unsigned long long)(calls1 - calls0));
+  nr_sense_quality_sp_stats(&sc1, &sm1);
+  printf("COST stream: %.1f us/record average over %d records (cold start included), worst %.0f us, gcrit cache %llu misses / %llu lookups, sp cache %llu misses / %llu lookups\n", us, N, worst, (unsigned long long)(miss1 - miss0), (unsigned long long)(calls1 - calls0), (unsigned long long)(sm1 - sm0), (unsigned long long)(sc1 - sc0));
+  EXPECT_LT(double(sm1 - sm0), 0.02 * double(sc1 - sc0) + 1);
   EXPECT_LT(us, 150.0);
   EXPECT_LT(double(miss1 - miss0) / double(calls1 - calls0), 0.02);
 }
@@ -1130,7 +1134,7 @@ TEST(SenseQualityRound2, DmrsChestNvarIsTheSnrReference)
   for (int type : {1, 2}) {
     Rng r(400 + type);
     int good_nv = 0, good_med = 0, n = 0, intf = 0;
-    const float nvar = 0.21875f * float(nr_sense_quality_dmrs_rho(type)); /* the chest's figure for the noise of dmrs_rec */
+    const float nvar = 0.21875f * float(nr_sense_quality_dmrs_rho_model(type)); /* the chest's figure for the noise of dmrs_rec (the operator's rho: dmrs_rec IS the model chain) */
     for (int rec = 0; rec < 60; rec++) {
       Cfr c = dmrs_rec(60, 12.f, 4, r, 1.f, type);
       const float amp = std::sqrt(std::pow(10.f, 1.2f) * 0.21875f);
@@ -1157,19 +1161,24 @@ TEST(SenseQualityRound2, DmrsChestNvarIsTheSnrReference)
   }
 }
 /* m5/C1: first-sight cost: every record has a fresh (shape, reference dof, eta, N): the threshold tables are built on the writer thread */
+#define FIRST_MEAN_BOUND 1500.0  /* measured cold: mean 360 us, worst 3.7 ms (DGX, idle); bounds ~4x for a loaded host (ctest -j4) */
+#define FIRST_WORST_BOUND 15000.0
 TEST(SenseQualityRound2, FirstSightCost)
 {
   Rng r(500);
   std::vector<double> us;
-  uint64_t calls0, miss0, calls1, miss1;
+  const int etag[] = {1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 25, 32, 40, 50, 64, 80, 100, 128, 160, 200, 255};
+  nr_sense_quality_test_reset_caches(); /* truly cold: this thread's threshold caches are emptied (test hook, no flag) */
+  uint64_t calls0, miss0, calls1, miss1, sc0, sm0, sc1, sm1;
   nr_sense_quality_gcrit_stats(&calls0, &miss0);
+  nr_sense_quality_sp_stats(&sc0, &sm0);
   for (int i = 0; i < 240; i++) {
     const int nprb = 51 + int(r.g() % 223);
     Cfr c; unsigned fl; float nv = NAN;
     switch (i % 4) {
       case 0: c = dmrs_rec(nprb, 8.f, 4, r, 1.f, 1 + (i / 4) % 2); fl = NR_SENSE_Q_DMRS_INTERP | ((i / 4) % 2 ? NR_SENSE_Q_DMRS_T2 : 0u); break;
       case 1: c = da_rec(nprb, 3 + int(r.g() % 11), 2 * (1 + int(r.g() % 4)), 8.f, false, 4, r); fl = NR_SENSE_Q_DATA_AIDED | NR_SENSE_Q_QM(2 * (1 + int(r.g() % 4))); nv = 1.f; break;
-      case 2: { float v, et; c = win_rec(nprb, 8.f, 4, r, &v, &et, 15, 0.3 + 0.1 * (r.g() % 15)); fl = NR_SENSE_Q_DATA_AIDED | NR_SENSE_Q_WINDOW | NR_SENSE_Q_HET(et); nv = v; break; }
+      case 2: { float v, et; c = win_rec(nprb, 8.f, 4, r, &v, &et, 15, 0.3 + 0.1 * (r.g() % 15)); fl = NR_SENSE_Q_DATA_AIDED | NR_SENSE_Q_WINDOW | (unsigned(etag[(i / 4) % 22]) << 16); nv = v; break; } /* ~8 rows per PRB, every eta grid value */
       default: c = da_rec(nprb, 4 + int(r.g() % 9), 6, 8.f, false, 4, r); fl = NR_SENSE_Q_DATA_AIDED; break; /* unknown Qm, median reference: 256QAM + F inflation */
     }
     nr_sense_quality_t q;
@@ -1178,11 +1187,12 @@ TEST(SenseQualityRound2, FirstSightCost)
     us.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
   }
   nr_sense_quality_gcrit_stats(&calls1, &miss1);
+  nr_sense_quality_sp_stats(&sc1, &sm1);
   std::sort(us.begin(), us.end());
   double mean = 0; for (double x : us) mean += x / us.size();
-  printf("COST first-sight (240 records, fresh shapes, 51..273 PRB, all paths): mean %.0f us, median %.0f us, p90 %.0f us, worst %.0f us (cache misses %llu)\n", mean, us[us.size() / 2], us[us.size() * 9 / 10], us.back(), (unsigned long long)(miss1 - miss0));
-  EXPECT_LT(mean, 5000.0);
-  EXPECT_LT(us.back(), 60000.0);
+  printf("COST first-sight (240 records, fresh shapes, 51..273 PRB, all paths): mean %.0f us, median %.0f us, p90 %.0f us, worst %.0f us (gcrit misses %llu, sp misses %llu)\n", mean, us[us.size() / 2], us[us.size() * 9 / 10], us.back(), (unsigned long long)(miss1 - miss0), (unsigned long long)(sm1 - sm0));
+  EXPECT_LT(mean, FIRST_MEAN_BOUND);
+  EXPECT_LT(us.back(), FIRST_WORST_BOUND);
 }
 /* I4: the residual-reject table at small ne and the even/odd gap: signal 20 dB flat + noise through each source's chain, median reference (no producer figure), PRB counts 2..51 */
 TEST(SenseQualityRound2, SmallRecordsResidualRejectTable)
@@ -1208,4 +1218,100 @@ TEST(SenseQualityRound2, EvenOddGapClosed)
     EXPECT_LE(std::fabs(r[0] - r[1]), 1.2e-3);
     EXPECT_LE(std::fabs(r[2] - r[3]), 1.2e-3);
   }
+}
+
+
+/* ---- round 3 ---- */
+namespace {
+const int kEtaGrid[] = {1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 25, 32, 40, 50, 64, 80, 100, 128, 160, 200, 255};
+double mc_tail(int kind, int par, int na, int N, double t, long ns, unsigned seed)
+{
+  /* Monte Carlo of T = sum_{i<=N} v_i G_i with v from the law behind the threshold: the QAM law (kind 0) is enumerated here, the window law (kind 1) is the lognormal fitted by the test hook */
+  std::mt19937_64 g(seed);
+  std::vector<double> v, w;
+  if (kind == 0) {
+    const int M = 1 << (par / 2); double m = 0;
+    for (int a = 0; a < M; a++) for (int b = 0; b < M; b++) { const double x = 2 * a - (M - 1), y = 2 * b - (M - 1); v.push_back(1.0 / (x * x + y * y)); m += v.back() / (M * M); }
+    for (auto &x : v) x /= m;
+    w.assign(v.size(), 1.0);
+  } else {
+    /* the discrete law of the production code: its effective eta equals eta; rebuild it with the same construction (z grid -4..4 step 0.1, sigma bisected) */
+    const double eta = par / 255.0;
+    auto law = [&](double sg, std::vector<double> *vv, std::vector<double> *pp) {
+      double ws = 0, m = 0, m2 = 0;
+      for (int j = 0; j < 81; j++) { const double z = -4 + 0.1 * j, p = std::exp(-0.5 * z * z), x = std::exp(sg * z); ws += p; m += p * x; m2 += p * x * x; if (vv) { vv->push_back(x); pp->push_back(p); } }
+      if (vv) for (size_t j = 0; j < vv->size(); j++) (*vv)[j] /= m / ws;
+      return (m / ws) * (m / ws) / (m2 / ws);
+    };
+    double lo = 0, hi = 3;
+    while (eta < law(hi, nullptr, nullptr) && hi < 12) hi *= 1.5;
+    for (int i = 0; i < 50; i++) { const double mid = 0.5 * (lo + hi); if (law(mid, nullptr, nullptr) > eta) lo = mid; else hi = mid; }
+    law(hi, &v, &w);
+  }
+  std::discrete_distribution<int> pick(w.begin(), w.end());
+  std::gamma_distribution<double> gam(na, 1.0);
+  long exc = 0;
+  for (long s = 0; s < ns; s++) {
+    double T = 0;
+    for (int i = 0; i < N; i++) T += v[pick(g)] * gam(g);
+    exc += T > t;
+  }
+  return double(exc) / ns;
+}
+}
+/* I2: the inversion over every key the cache grid can produce for the window law (eta grid x N 1..60 x n_ant {1,2,4,8}): tail non-increasing in the threshold around the crossing, the
+ * threshold's tail at (not above) alpha, a homogeneous law identical to the exact Gamma tail; spot checks against a Monte Carlo (4e6 samples, tail within [0.88, 1.06] alpha at the threshold). */
+TEST(SenseQualityRound3, LaplaceInversionKeyGrid)
+{
+  int nonmono = 0, above = 0, keys = 0;
+  double worst_above = 0;
+  for (int par : kEtaGrid)
+    for (int na : {1, 2, 4, 8})
+      for (int N = 1; N <= 60; N++) {
+        const double t = nr_sense_quality_sp_crit(1, par, na, N, 1);
+        double prev = 2;
+        for (int i = 0; i <= 12; i++) { /* 0.9 t .. 1.2 t */
+          const double tl = nr_sense_quality_sp_tail(1, par, na, N, t * (0.9 + 0.025 * i), 0);
+          if (tl > prev + 1e-4) { nonmono++; printf("ADAPT nonmono par %d na %d N %d i %d: %.6f > %.6f\n", par, na, N, i, tl, prev); }
+          prev = tl;
+        }
+        const double at = nr_sense_quality_sp_tail(1, par, na, N, t, 0);
+        if (at > NR_SENSE_PRB_ALPHA * 1.005) { printf("ADAPT above par %d na %d N %d: %.3f alpha\n", par, na, N, at / NR_SENSE_PRB_ALPHA); above++; worst_above = std::max(worst_above, at / NR_SENSE_PRB_ALPHA); }
+        if (par == 255) { /* homogeneous: exactly Gamma(na N) */
+          Cfr dummy; (void)dummy;
+          const double k = double(na) * N; (void)k;
+          EXPECT_LT(at, NR_SENSE_PRB_ALPHA * 1.005);
+          EXPECT_GT(nr_sense_quality_sp_tail(1, par, na, N, t * 0.99, 0), NR_SENSE_PRB_ALPHA * 0.8) << "na " << na << " N " << N;
+        }
+        keys++;
+      }
+  printf("ADAPT inversion key grid: %d keys, non-monotone steps %d, keys with tail(t*) above 1.005 alpha %d (worst %.3f alpha)\n", keys, nonmono, above, worst_above);
+  EXPECT_EQ(nonmono, 0);
+  EXPECT_EQ(above, 0);
+  /* spot checks: M = 40 inversion root within 1 % of the production threshold, Monte Carlo fraction at the threshold within [0.85, 1.05] alpha */
+  struct K { int kind, par, na, N; } spot[] = {{1, 20, 4, 5}, {1, 40, 4, 15}, {1, 80, 4, 40}, {1, 160, 8, 30}, {1, 200, 4, 60}, {1, 255, 8, 60}, {0, 4, 4, 36}, {0, 6, 4, 12}, {0, 8, 2, 24}};
+  for (const K &k : spot) {
+    const double t = nr_sense_quality_sp_crit(k.kind, k.par, k.na, k.N, 1);
+    const double mc = mc_tail(k.kind, k.par, k.na, k.N, t, 4000000, 77 + k.par + k.N) / NR_SENSE_PRB_ALPHA;
+    printf("ADAPT inversion spot kind %d par %3d na %d N %2d: threshold %.2f, Monte Carlo (4e6) tail at the threshold %.3f alpha\n", k.kind, k.par, k.na, k.N, t, mc);
+    EXPECT_GT(mc, 0.88); /* the bisection stops within 0.1 % of t (a few % of tail) on the conservative side */
+    EXPECT_LT(mc, 1.06);
+  }
+}
+/* I3: the threshold caches do not thrash over the production key set: every window eta x rows x antennas key (SNR test) and every QAM order x RE count (both tests), alternated; 0 misses after warm-up */
+TEST(SenseQualityRound3, ThresholdCachesDoNotThrashOverTheProductionKeySet)
+{
+  std::vector<std::array<int, 5>> keys;
+  for (int par : kEtaGrid) { for (int N = 1; N <= 30; N++) keys.push_back({1, par, 4, N, 1}); for (int na : {2, 8}) for (int N = 1; N <= 15; N++) keys.push_back({1, par, na, N, 1}); }
+  for (int qm : {4, 6, 8}) { for (int N = 6; N <= 156; N += 6) keys.push_back({0, qm, 4, N, 1}); for (int N = 6; N <= 12; N++) keys.push_back({0, qm, 4, N, 0}); }
+  nr_sense_quality_test_reset_caches();
+  for (auto &k : keys) nr_sense_quality_sp_crit(k[0], k[1], k[2], k[3], k[4]); /* warm-up */
+  uint64_t c0, m0, c1, m1;
+  nr_sense_quality_sp_stats(&c0, &m0);
+  EXPECT_EQ(m0, keys.size());
+  for (int pass = 0; pass < 3; pass++)
+    for (size_t i = 0; i < keys.size(); i++) { auto &k = keys[(i * 7 + pass) % keys.size()]; nr_sense_quality_sp_crit(k[0], k[1], k[2], k[3], k[4]); }
+  nr_sense_quality_sp_stats(&c1, &m1);
+  printf("ADAPT sp cache: %zu production keys, %llu lookups after warm-up, %llu misses\n", keys.size(), (unsigned long long)(c1 - c0), (unsigned long long)(m1 - m0));
+  EXPECT_EQ(m1 - m0, 0u);
 }

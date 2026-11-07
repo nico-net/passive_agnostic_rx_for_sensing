@@ -3368,13 +3368,19 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	310	nr_sense_inv_name::n	func_st
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	40	gcrit::cache	tls	struct {}[64]	TLS	CELLFEAT	per-thread cache of the gamma critical values of the quality tests (pure function of the shape)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	59	g_dm_once	file_static	pthread_once_t	PROCESS	CELLFEAT	pthread_once guard of g_dm
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	202	tl_q_hint	tls	uint16_t	TLS	CELLFEAT	per-thread quality hint set by the producer just before a CFR push and consumed (cleared) by that push
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	75	g_gc	tls	struct {}[512]	TLS	CELLFEAT	per-thread cache of the quality tests' critical values (pure function of shape and reference dof)
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	82	g_gc	tls	gce_t[256][8]	TLS	CELLFEAT	per-thread 8-way cache of the quality tests' Gamma/F critical values (pure function of shape and reference dof)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	76	g_gc_calls	tls	uint64_t	TLS	CELLFEAT	per-thread counter of critical-value lookups (test hook)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	76	g_gc_miss	tls	uint64_t	TLS	CELLFEAT	per-thread counter of critical-value cache misses (test hook)
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	159	g_sp	tls	struct {}[1024]	TLS	CELLFEAT	per-thread cache of the saddlepoint thresholds of heterogeneous-noise records
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	223	g_sp	tls	spe_t[256][16]	TLS	CELLFEAT	per-thread 16-way cache of the Laplace-inversion thresholds of heterogeneous-noise records (4096 entries, 12 bytes)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	241	g_eta	file_static	double[5]	PROCESS	CELLFEAT	QAM noise-heterogeneity factors: computed once by pthread_once from the constellations, read-only afterwards, same for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	242	g_eta_once	file_static	pthread_once_t	PROCESS	CELLFEAT	pthread_once guard of g_eta
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	185	g_dm	file_static	dm_t[2]	PROCESS	CELLFEAT	DM-RS interpolation noise model constants (type 1 and 2): derived once by pthread_once from fixed filters, read-only afterwards, same for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	83	g_gc_rr	tls	uint8_t[256]	TLS	CELLFEAT	per-thread round-robin replacement pointers of the Gamma/F threshold cache
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	224	g_sp_rr	tls	uint8_t[256]	TLS	CELLFEAT	per-thread round-robin replacement pointers of the Laplace-inversion threshold cache
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	225	g_sp_calls	tls	uint64_t	TLS	CELLFEAT	per-thread lookup counter of the Laplace-inversion threshold cache (test hook)
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	225	g_sp_miss	tls	uint64_t	TLS	CELLFEAT	per-thread miss counter of the Laplace-inversion threshold cache (test hook)
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	343	g_rho_used	file_static	const double[2]	CONST	CELLFEAT	the measured rho constants (nvar / rho): compile-time constants
+openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c	98	win_nv_ok	tls	bool	TLS	CELLFEAT	per-thread latch: the window-LS scratch of this thread was allocated with the noise planes (sensing mode at allocation)
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	54	srs_lock	file_static	pthread_mutex_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	83	sr_state	file_static	srs_state_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	210	process_srs::offsets	func_static	const int[]	CONST	CELLFEAT	auto

@@ -4,6 +4,8 @@
 #include <string.h>
 #include <pthread.h>
 #include <complex.h>
+#define RHO_USED_T1 3.05 /* measured (test_nr_sense_chest_noise, 2026-11-07, DGX): rho 3.18-3.29, smallest one-sided 99 % lower bound 3.09 */
+#define RHO_USED_T2 1.62 /* type 2: rho 1.69-1.74, smallest lower bound 1.64 */
 
 /* ---- null distributions (all tests are at the one level NR_SENSE_PRB_ALPHA) ----
  * A PRB's statistics under H0 are Gamma(shape k, scale th) in units of the mean per-RE noise variance s2 of H:
@@ -76,7 +78,9 @@ static double ftail(double a, double nu, double x) { return nu > 0 ? betai(nu, a
  *            rounded DOWN, capped at 4000 (a smaller nu has a larger critical value), the bisection returns the end with tail <= alpha;
  *  upper = 0 (residual test: a smaller threshold rejects more): a rounded UP, nu rounded UP (nu > 4000 = exact), the bisection returns the end with tail > alpha.
  * The returned threshold is rescaled by a / a_grid. The bracket keeps tail(lo) > alpha > tail(hi) by construction. The cache is hashed on both keys and the direction. */
-static __thread struct { float a, nu; double x; char up; } g_gc[512];
+typedef struct { float a, nu; double x; char up, used; } gce_t;
+static __thread gce_t g_gc[256][8]; /* 8-way set associative, 2048 entries (48 KB of thread-local storage) */
+static __thread uint8_t g_gc_rr[256];
 static __thread uint64_t g_gc_calls, g_gc_miss;
 void nr_sense_quality_gcrit_stats(uint64_t *calls, uint64_t *misses) { *calls = g_gc_calls; *misses = g_gc_miss; }
 static double gcrit(double a, double nu, int upper)
@@ -90,9 +94,12 @@ static double gcrit(double a, double nu, int upper)
     else { const double e = log(n) / log(1.25); nq = (float)pow(1.25, upper ? floor(e + 1e-4) : ceil(e - 1e-4)); }
     if (nq < 1.f) nq = 1.f;
   }
-  const uint32_t hs = ((uint32_t)(aq * 16.f) * 2654435761u ^ ((uint32_t)(nq * 8.f) + 1u + (upper ? 7919u : 0u)) * 0x9E3779B1u) >> 23;
+  const uint32_t hs = (((uint32_t)(aq * 16.f) * 2654435761u) ^ (((uint32_t)(nq * 8.f) + 1u + (upper ? 7919u : 0u)) * 0x9E3779B1u)) >> 24;
   g_gc_calls++;
-  if (g_gc[hs].a != aq || g_gc[hs].nu != nq || g_gc[hs].up != (char)upper || g_gc[hs].x == 0) {
+  gce_t *set = g_gc[hs], *e = NULL;
+  for (int w = 0; w < 8; w++)
+    if (set[w].used && set[w].a == aq && set[w].nu == nq && set[w].up == (char)upper) { e = &set[w]; break; }
+  if (!e) {
     g_gc_miss++;
     double lo = 0, hi = aq + 10;
     while (ftail(aq, nq, hi) > NR_SENSE_PRB_ALPHA) { lo = hi; hi *= 2; }
@@ -100,12 +107,16 @@ static double gcrit(double a, double nu, int upper)
       const double mid = 0.5 * (lo + hi);
       if (ftail(aq, nq, mid) > NR_SENSE_PRB_ALPHA) lo = mid; else hi = mid;
     }
-    g_gc[hs].a = aq; g_gc[hs].nu = nq; g_gc[hs].up = (char)upper; g_gc[hs].x = upper ? hi : lo;
+    int w = 0;
+    while (w < 8 && set[w].used) w++;
+    if (w == 8) w = g_gc_rr[hs]++ & 7;
+    e = &set[w];
+    e->a = aq; e->nu = nq; e->up = (char)upper; e->used = 1; e->x = upper ? hi : lo;
   }
-  return g_gc[hs].x * (a / aq);
+  return e->x * (a / aq);
 }
 
-/* ---- heterogeneous per-RE noise (data-aided H = Y/X; LS-window rows): exact tail by Laplace inversion ----
+/* ---- heterogeneous per-RE noise (data-aided H = Y/X; LS-window rows): tail by Laplace inversion ----
  * T/s2 = sum_i v_i G_i, G_i ~ Gamma(n_ant) (the antennas share X, so v_i is common to them), v_i iid from a known discrete law (mean 1): the QAM law w = 1/|X|^2 over the 38.211 5.1
  * constellation of order qm (kind 0), or, for window rows whose law the producer only summarises by eta = (sum v)^2 / (R sum v^2), a lognormal of that variance (kind 1; an assumption: heavy
  * right tail like the inverse of a Gram-matrix diagonal). The tail is computed by numerical Laplace inversion (below); the threshold t with tail alpha is cached per thread by (kind, parameter,
@@ -165,17 +176,21 @@ double nr_sense_quality_window_law_eta(double eta)
   for (int j = 0; j < d.n; j++) m += d.pi[j] * d.v[j], m2 += d.pi[j] * d.v[j] * d.v[j];
   return m * m / m2;
 }
-/* Tail of T = sum_{i=1..N} v_i G_i by numerical inversion of its Laplace transform L(s) = [ sum_j pi_j (1 + s v_j)^-na ]^N (Abate-Whitt "Euler" algorithm, M = 11, 2M+1 complex
- * evaluations of L(s)/s for the CDF): exact to ~1e-8 for any law, unlike a saddlepoint (Lugannani-Rice), which is 3x high at 1e-3 for the heavy window law and non-monotone near the mean there. */
-static double sp_tail(const sdist_t *d, int na, double N, double t, double *shat)
+/* Tail of T = sum_{i=1..N} v_i G_i by numerical inversion of its Laplace transform L(s) = [ sum_j pi_j (1 + s v_j)^-na ]^N: Abate-Whitt "Euler" algorithm, 2M+1 complex evaluations of L(s)/s
+ * for the CDF. The discretisation error is 10^(-2M/3), but the 2M+1-term truncation needs the transform to have decayed within ~M harmonics, i.e. the CDF must not be steeper than ~M^2/4
+ * (a Gamma of shape k has its 1e-3 tail within 2 % for k <= 96 / 144 / 528 / 1000 at M = 11 / 17 / 24 / 30 [measured against scipy]; roundoff is 10^(M/3) x 1e-16, i.e. 5e-8 at M = 24 and 5e-6 at M = 32, so the accuracy is NOT 1e-8 in general). M is therefore chosen from the total shape k = na N:
+ * 11 (k <= 40), 17 (<= 120), 24 (<= 300), 32 (<= 1500); beyond that, or for a homogeneous law (one atom), a Gamma tail (regularised incomplete gamma): exact for a homogeneous law (it IS a Gamma),
+ * the 2-moment Gamma of the sum above k = 1500 (CLT regime). Verified by test SenseQualityRound3.LaplaceInversionKeyGrid
+ * over eta grid x N 1..60 x n_ant 1..8: monotone in t, and at 1e-3 within 1 % of the M = 40 inversion and within 3 % of a 1e7-sample Monte Carlo on a spot-check set. */
+static double sp_tail_m(const sdist_t *d, int na, double N, double t, int M)
 {
-  enum { M = 11 };
-  const double binom[M + 1] = {1, 11, 55, 165, 330, 462, 462, 330, 165, 55, 11, 1};
-  double eta[2 * M + 1];
+  if (d->n == 1) return gq((double)na * N, t * 1.0 / d->v[0]);
+  double binom = 1; /* C(M, k) */
+  double eta[2 * 40 + 1];
   eta[0] = 0.5;
   for (int k = 1; k <= M; k++) eta[k] = 1.0;
   eta[2 * M] = ldexp(1.0, -M);
-  for (int k = 1; k < M; k++) eta[2 * M - k] = eta[2 * M - k + 1] + ldexp(binom[k], -M);
+  for (int k = 1; k < M; k++) { binom = binom * (M - k + 1) / k; eta[2 * M - k] = eta[2 * M - k + 1] + ldexp(binom, -M); }
   double acc = 0;
   for (int k = 0; k <= 2 * M; k++) {
     const double complex s = (M * log(10.0) / 3.0 + I * M_PI * k) / t;
@@ -189,27 +204,69 @@ static double sp_tail(const sdist_t *d, int na, double N, double t, double *shat
     const double complex L = cexp(N * clog(sum));
     acc += ((k & 1) ? -1.0 : 1.0) * eta[k] * creal(L / s);
   }
-  if (shat) *shat = 0;
-  const double cdf = pow(10.0, M / 3.0) / t * acc;
-  return 1.0 - cdf;
+  return 1.0 - pow(10.0, M / 3.0) / t * acc;
 }
-static __thread struct { int kind, par, na, N, up; double x; } g_sp[1024];
+static double sp_tail(const sdist_t *d, int na, double N, double t)
+{
+  const double k = na * N;
+  if (k > 1500) { /* CLT regime: two-moment Gamma of the sum (mean k; var = N (E v^2 na (na + 1) - na^2)) */
+    double e2 = 0;
+    for (int j = 0; j < d->n; j++) e2 += d->pi[j] * d->v[j] * d->v[j];
+    const double var = N * (e2 * na * (na + 1.0) - (double)na * na), shape = k * k / var;
+    return gq(shape, t * shape / k);
+  }
+  return sp_tail_m(d, na, N, t, k <= 40 ? 11 : k <= 120 ? 17 : k <= 300 ? 24 : 32);
+}
+/* 16-way set associative, 4096 entries of 12 bytes (48 KB of thread-local storage): the production key set (window eta grid x rows x antennas, QAM orders x RE counts, both tests) is ~1.5k keys and
+ * must not thrash (the direct-mapped 1024-entry table of round 2 put 26 % of the window keys in a shared slot); misses are counted (nr_sense_quality_sp_stats) and a test alternates the whole production set and asserts none after warm-up. */
+typedef struct { float x; uint16_t N; uint8_t kind, par, na, flags; } spe_t; /* flags: bit0 upper, bit1 used */
+static __thread spe_t g_sp[256][16];
+static __thread uint8_t g_sp_rr[256];
+static __thread uint64_t g_sp_calls, g_sp_miss;
+void nr_sense_quality_sp_stats(uint64_t *calls, uint64_t *misses) { *calls = g_sp_calls; *misses = g_sp_miss; }
+void nr_sense_quality_test_reset_caches(void)
+{
+  memset(g_gc, 0, sizeof g_gc); memset(g_gc_rr, 0, sizeof g_gc_rr); memset(g_sp, 0, sizeof g_sp); memset(g_sp_rr, 0, sizeof g_sp_rr);
+  g_gc_calls = g_gc_miss = g_sp_calls = g_sp_miss = 0;
+}
+static void sp_law(int kind, int par, sdist_t *d)
+{
+  if (kind == 0) sdist_qam(par, d); else sdist_logn((par ? par : 1) / 255.0, d);
+}
 /* Same conservative directions as gcrit: upper = 1 (SNR test) returns the end with tail <= alpha, upper = 0 (residual test) the end with tail > alpha. */
 static double sp_crit(int kind, int par, int na, int N, int upper)
 {
-  const uint32_t hs = ((uint32_t)(kind * 1000003 + par * 7919 + na * 104729 + N * 3 + upper) * 2654435761u) >> 22;
-  if (g_sp[hs].x > 0 && g_sp[hs].kind == kind && g_sp[hs].par == par && g_sp[hs].na == na && g_sp[hs].N == N && g_sp[hs].up == upper) return g_sp[hs].x;
+  const uint32_t hs = (((uint32_t)(kind * 1000003 + par * 7919 + na * 104729 + N * 3 + upper)) * 2654435761u) >> 24;
+  g_sp_calls++;
+  spe_t *set = g_sp[hs], *e = NULL;
+  const uint8_t fl = (uint8_t)(2 | (upper ? 1 : 0));
+  for (int w = 0; w < 16; w++)
+    if (set[w].flags == fl && set[w].kind == kind && set[w].par == par && set[w].na == na && set[w].N == N) { e = &set[w]; break; }
+  if (e) return e->x;
+  g_sp_miss++;
   sdist_t d;
-  if (kind == 0) sdist_qam(par, &d); else sdist_logn((par ? par : 1) / 255.0, &d);
+  sp_law(kind, par, &d);
   const double mean = (double)na * N;
   double lo = mean, hi = mean * 2 + 10; /* tail(mean) is far above alpha */
-  while (sp_tail(&d, na, N, hi, NULL) > NR_SENSE_PRB_ALPHA) { lo = hi; hi *= 1.6; }
+  while (sp_tail(&d, na, N, hi) > NR_SENSE_PRB_ALPHA) { lo = hi; hi *= 1.6; }
   for (int i = 0; i < 40 && hi - lo > 1e-3 * hi; i++) {
     const double mid = 0.5 * (lo + hi);
-    if (sp_tail(&d, na, N, mid, NULL) > NR_SENSE_PRB_ALPHA) lo = mid; else hi = mid;
+    if (sp_tail(&d, na, N, mid) > NR_SENSE_PRB_ALPHA) lo = mid; else hi = mid;
   }
-  g_sp[hs].kind = kind; g_sp[hs].par = par; g_sp[hs].na = na; g_sp[hs].N = N; g_sp[hs].up = upper; g_sp[hs].x = upper ? hi : lo;
-  return g_sp[hs].x;
+  if (na * N > 300 && d.n > 1) hi *= 1.05, lo *= 0.95; /* M = 32: double-precision roundoff of the inversion (10^(32/3) x 1e-16) leaves +-3e-5 of numerical noise on a 1e-3 tail for the heaviest laws (eta < 0.05) at na N > 300 (outside the production range: ~15 rows x 4 RX = 60); a 5 % margin on the threshold, the conservative way for either test, covers it (a tail slope of 30-100 per unit of ln t = a factor 2 in tail) */
+  int w = 0;
+  while (w < 16 && set[w].flags) w++;
+  if (w == 16) w = g_sp_rr[hs]++ & 15;
+  e = &set[w];
+  e->kind = (uint8_t)kind; e->par = (uint8_t)par; e->na = (uint8_t)na; e->N = (uint16_t)N; e->flags = fl; e->x = upper ? nextafterf((float)hi, INFINITY) : nextafterf((float)lo, 0.f);
+  return e->x;
+}
+double nr_sense_quality_sp_crit(int kind, int par, int na, int N, int upper) { return sp_crit(kind, par, na, N, upper); }
+double nr_sense_quality_sp_tail(int kind, int par, int na, int N, double t, int M)
+{
+  sdist_t d;
+  sp_law(kind, par, &d);
+  return M > 0 ? sp_tail_m(&d, na, N, t, M) : sp_tail(&d, na, N, t);
 }
 
 /* Noise covariance of the DM-RS decoder estimate (nr_dl_channel_estimation.c NFAPI_NR_DMRS_TYPE{1,2}_linear_interp, 38.211 7.4.1.1.2: pilots on every second subcarrier of the port's comb
@@ -279,7 +336,12 @@ static void dm_build(int type, dm_t *o)
 }
 
 static void dm_init(void) { dm_build(1, &g_dm[0]); dm_build(2, &g_dm[1]); }
-double nr_sense_quality_dmrs_rho(int type) { pthread_once(&g_dm_once, dm_init); return g_dm[type == 2].rho; }
+double nr_sense_quality_dmrs_rho_model(int type) { pthread_once(&g_dm_once, dm_init); return g_dm[type == 2].rho; }
+/* The rho the code divides the chest's nvar by (npw_s = nvar / rho): it must never be above the true E[nvar] / H noise variance, or the reference noise would be BELOW the true chest noise and the
+ * SNR test lenient. The operator gives 3.286 / 1.75 (nr_sense_quality_dmrs_rho_model); test_nr_sense_chest_noise measures the real chest (CPU path = GPU exact path, bit-exact; 1 and 4 RX, rank 1
+ * and 2, noise only and with a flat channel + 2-sample delay at 10 dB) and these constants are below the one-sided 99 % lower bound of every measured case (the test asserts it). */
+static const double g_rho_used[2] = {RHO_USED_T1, RHO_USED_T2};
+double nr_sense_quality_dmrs_rho(int type) { return g_rho_used[type == 2]; }
 void nr_sense_quality_dmrs_model(int type, double out[5])
 {
   pthread_once(&g_dm_once, dm_init);
@@ -517,7 +579,7 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
   /* DM-RS chest records: the SNR test's reference is the chest's own noise figure nvar / rho(dmrs_type) in H scale (rho verified on the real chest by test_nr_sense_chest_noise); the residual test keeps
    * the leave-one-out median. Without nvar both use the median reference. */
   const bool dm_nv = dmi && noise_var > 0;
-  const double rho = dmm ? dmm->rho : 1.0;
+  const double rho = dmm ? g_rho_used[(flags & NR_SENSE_Q_DMRS_T2) ? 1 : 0] : 1.0;
   float sref[NR_SENSE_MAX_PRB], nur[NR_SENSE_MAX_PRB];
   bool have_ref[NR_SENSE_MAX_PRB];
   memset(have_ref, 0, sizeof have_ref);

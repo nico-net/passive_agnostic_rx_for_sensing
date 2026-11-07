@@ -130,7 +130,7 @@ static void sweep(int nre, int nl, int nant, const int16_t *x, const uint32_t *k
       float h[2 * NR_MIMO_LS_MAX_NL * NR_MIMO_LS_MAX_ANT];
       double res, gd[NR_MIMO_LS_MAX_NL];
       /* gathered y planes for the window: nr_pdsch_mimo_ls_window takes plane stride, so offset the base */
-      if (window_ex(n, nl, nant, x + 2 * (size_t)s * nl, y + 2 * (size_t)s, ystride, h, &res, gd) != 0) {
+      if (window_ex(n, nl, nant, x + 2 * (size_t)s * nl, y + 2 * (size_t)s, ystride, h, &res, out_nv ? gd : NULL) != 0) {
         p->skipped++;
         continue;
       }

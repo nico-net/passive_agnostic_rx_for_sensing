@@ -69,8 +69,13 @@ typedef struct {
 void nr_sense_quality_hint(uint16_t hint);
 double nr_sense_quality_qam_eta(int qm);
 double nr_sense_quality_window_law_eta(double eta); /* test hook: effective eta of the discrete law behind the window threshold (<= the stated eta) */
-double nr_sense_quality_dmrs_rho(int dmrs_type);    /* E[chest nvar] / H noise variance: 3.29 (type 1), 1.75 (type 2) */
-void nr_sense_quality_gcrit_stats(uint64_t *calls, uint64_t *misses); /* test hook: this thread's threshold-cache lookups and misses */
+double nr_sense_quality_dmrs_rho(int dmrs_type);    /* the rho the SNR reference divides nvar by: below the measured 99 % lower bound of E[chest nvar] / H noise variance */
+double nr_sense_quality_dmrs_rho_model(int dmrs_type); /* the operator's value: 3.29 (type 1), 1.75 (type 2) */
+void nr_sense_quality_gcrit_stats(uint64_t *calls, uint64_t *misses); /* test hook: this thread's Gamma/F threshold-cache lookups and misses */
+void nr_sense_quality_sp_stats(uint64_t *calls, uint64_t *misses);    /* test hook: this thread's heterogeneous-noise (Laplace inversion) threshold-cache lookups and misses */
+void nr_sense_quality_test_reset_caches(void);                        /* test hook (not a flag): empties this thread's threshold caches and counters, so a test can run truly cold */
+double nr_sense_quality_sp_crit(int kind, int par, int na, int N, int upper); /* test hooks: the production threshold of a key (kind 0 QAM order par, kind 1 window eta par/255) ... */
+double nr_sense_quality_sp_tail(int kind, int par, int na, int N, double t, int M); /* ... and the tail at t (M = 0: the production choice of the inversion order) */
 #define NR_SENSE_SPARSE_SYM_MIN 0.5f /* general bound (half the coherent amplitude), not tuned on any cell */
 void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
                                  const uint8_t *l_sym, float noise_var, unsigned flags, nr_sense_quality_t *q);
