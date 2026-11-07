@@ -1064,3 +1064,38 @@ TEST(SenseQualityRound1, CostPerRecord)
     }
   }
 }
+
+/* C1 (stream): records of varying PRB count (so the reference dof varies) through every path; the average must stay far below the writer's budget, cold start included */
+TEST(SenseQualityRound1, StreamCostWithVaryingShapes)
+{
+  Rng r(91);
+  std::vector<Cfr> pool;
+  std::vector<unsigned> fl; std::vector<float> nvs;
+  for (int i = 0; i < 60; i++) {
+    const int nprb = 20 + int(r.g() % 198);
+    switch (i % 5) {
+      case 0: pool.push_back(dmrs_rec(nprb, 8.f, 4, r, 1.f, 1 + (i / 5) % 2)); fl.push_back(NR_SENSE_Q_DMRS_INTERP | ((i / 5) % 2 ? NR_SENSE_Q_DMRS_T2 : 0u)); nvs.push_back(NAN); break;
+      case 1: pool.push_back(white_rec(nprb, 2, true, 8.f, 4, r)); fl.push_back(0); nvs.push_back(NAN); break;
+      case 2: pool.push_back(da_rec(nprb, 4 + int(r.g() % 9), 2 * (1 + int(r.g() % 4)), 8.f, false, 4, r)); fl.push_back(NR_SENSE_Q_DATA_AIDED | NR_SENSE_Q_QM(2 * (1 + int(r.g() % 4)))); nvs.push_back(1.f); break;
+      case 3: { float nv, eta; pool.push_back(win_rec(nprb, 8.f, 4, r, &nv, &eta)); fl.push_back(NR_SENSE_Q_DATA_AIDED | NR_SENSE_Q_WINDOW | NR_SENSE_Q_HET(eta)); nvs.push_back(nv); break; }
+      default: pool.push_back(da_rec(nprb, 6, 6, 8.f, false, 4, r)); fl.push_back(NR_SENSE_Q_DATA_AIDED); nvs.push_back(NAN); break; /* unknown Qm, median reference: 256QAM + F inflation */
+    }
+  }
+  nr_sense_quality_t q;
+  uint64_t calls0, miss0, calls1, miss1;
+  nr_sense_quality_gcrit_stats(&calls0, &miss0);
+  auto t0 = std::chrono::steady_clock::now();
+  double worst = 0;
+  const int N = 4000;
+  for (int i = 0; i < N; i++) {
+    Cfr &c = pool[i % pool.size()];
+    auto a = std::chrono::steady_clock::now();
+    nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), nvs[i % pool.size()], fl[i % pool.size()], &q);
+    worst = std::max(worst, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
+  }
+  const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / N;
+  nr_sense_quality_gcrit_stats(&calls1, &miss1);
+  printf("COST stream: %.1f us/record average over %d records (cold start included), worst %.0f us, threshold cache %llu misses / %llu lookups\n", us, N, worst, (unsigned long long)(miss1 - miss0), (unsigned long long)(calls1 - calls0));
+  EXPECT_LT(us, 150.0);
+  EXPECT_LT(double(miss1 - miss0) / double(calls1 - calls0), 0.02);
+}

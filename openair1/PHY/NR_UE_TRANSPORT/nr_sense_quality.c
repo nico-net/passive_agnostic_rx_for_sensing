@@ -79,15 +79,17 @@ static double gcrit(double a, double nu)
 {
   float aq = floorf((float)a * 16.f + 0.5f) / 16.f;
   if (aq < 0.0625f) aq = 0.0625f;
-  float nq = nu <= 0 || nu > 4000 ? 0.f : nu < 32 ? floorf((float)nu) : floorf((float)nu / 8.f) * 8.f;
+  /* nu on a 1.25x geometric grid above 8 (rounded down: conservative), integer below; > 4000 = exact */
+  float nq = nu <= 0 || nu > 4000 ? 0.f : nu < 8 ? floorf((float)nu) : powf(1.25f, floorf(logf((float)nu) / logf(1.25f) + 1e-4f));
   if (nu > 0 && nq < 1.f) nq = 1.f;
-  const uint32_t hs = ((uint32_t)(aq * 16.f) * 2654435761u ^ ((uint32_t)nq + 1u) * 0x9E3779B1u) >> 23;
+  const uint32_t hs = ((uint32_t)(aq * 16.f) * 2654435761u ^ ((uint32_t)(nq * 8.f) + 1u) * 0x9E3779B1u) >> 23;
   g_gc_calls++;
   if (g_gc[hs].a != aq || g_gc[hs].nu != nq || g_gc[hs].x == 0) {
     g_gc_miss++;
     double lo = 0, hi = aq + 10;
     while (ftail(aq, nq, hi) > NR_SENSE_PRB_ALPHA) hi *= 2;
-    for (int i = 0; i < 60; i++) {
+    lo = hi / 2 > aq ? hi / 2 : 0; /* the doubling bracket */
+    for (int i = 0; i < 36 && hi - lo > 1e-5 * hi; i++) {
       const double mid = 0.5 * (lo + hi);
       if (ftail(aq, nq, mid) > NR_SENSE_PRB_ALPHA) lo = mid; else hi = mid;
     }
@@ -119,54 +121,73 @@ static void sdist_qam(int qm, sdist_t *d)
   d->n = n;
   for (int j = 0; j < n; j++) { d->v[j] = w[j] / m; d->pi[j] = cnt[j] / ((double)M * M); }
 }
+static double g_zt[128];
+static pthread_once_t g_zt_once = PTHREAD_ONCE_INIT;
+static void zt_init(void)
+{
+  for (int j = 0; j < 128; j++) { /* z = Phi^-1((j + 0.5) / 128) by bisection on erfc */
+    const double pr = (j + 0.5) / 128;
+    double lo = -8, hi = 8;
+    for (int i = 0; i < 50; i++) { const double mid = 0.5 * (lo + hi); if (0.5 * erfc(-mid / M_SQRT2) < pr) lo = mid; else hi = mid; }
+    g_zt[j] = 0.5 * (lo + hi);
+  }
+}
 static void sdist_logn(double eta, sdist_t *d)
 {
+  pthread_once(&g_zt_once, zt_init);
   const int n = 128;
   const double s2 = log(1.0 / (eta > 0.02 ? eta : 0.02)), sg = sqrt(s2); /* 1 + CV^2 = 1/eta */
   double m = 0;
   d->n = n;
-  for (int j = 0; j < n; j++) { /* z = Phi^-1((j + 0.5) / n) by bisection on erfc */
-    const double pr = (j + 0.5) / n;
-    double lo = -8, hi = 8;
-    for (int i = 0; i < 50; i++) { const double mid = 0.5 * (lo + hi); if (0.5 * erfc(-mid / M_SQRT2) < pr) lo = mid; else hi = mid; }
-    d->v[j] = exp(sg * 0.5 * (lo + hi)); d->pi[j] = 1.0 / n; m += d->v[j] / n;
-  }
+  for (int j = 0; j < n; j++) { d->v[j] = exp(sg * g_zt[j]); d->pi[j] = 1.0 / n; m += d->v[j] / n; }
   for (int j = 0; j < n; j++) d->v[j] /= m;
+}
+static void sp_moments(const sdist_t *d, int na, double s, double *M0, double *M1, double *M2)
+{
+  double m0 = 0, m1 = 0, m2 = 0;
+  for (int j = 0; j < d->n; j++) {
+    const double g = 1 - s * d->v[j];
+    double gp = g;
+    for (int i = 1; i < na; i++) gp *= g;
+    const double f = 1.0 / gp; /* (1 - s v)^-na */
+    m0 += d->pi[j] * f; m1 += d->pi[j] * na * d->v[j] * f / g; m2 += d->pi[j] * na * (na + 1.0) * d->v[j] * d->v[j] * f / (g * g);
+  }
+  *M0 = m0, *M1 = m1, *M2 = m2;
 }
 static double sp_tail(const sdist_t *d, int na, double N, double t, double *shat)
 {
   double vmax = 0;
   for (int j = 0; j < d->n; j++) if (d->v[j] > vmax) vmax = d->v[j];
-  double lo = 0, hi = (1.0 - 1e-12) / vmax;
-  for (int i = 0; i < 80; i++) { /* K'(s) increasing */
-    const double s = 0.5 * (lo + hi);
-    double M0 = 0, M1 = 0;
-    for (int j = 0; j < d->n; j++) { const double f = pow(1 - s * d->v[j], -na); M0 += d->pi[j] * f; M1 += d->pi[j] * na * d->v[j] * f / (1 - s * d->v[j]); }
-    if (N * M1 / M0 < t) lo = s; else hi = s;
+  double lo = 0, hi = (1.0 - 1e-9) / vmax, s = 0.5 * hi, M0, M1, M2;
+  for (int i = 0; i < 40; i++) { /* safeguarded Newton on K'(s) = t, K' increasing */
+    sp_moments(d, na, s, &M0, &M1, &M2);
+    const double f = N * M1 / M0 - t, fp = N * (M2 / M0 - (M1 / M0) * (M1 / M0));
+    if (f < 0) lo = s; else hi = s;
+    if (fabs(f) < 1e-9 * t) break;
+    double sn = fp > 0 ? s - f / fp : 0.5 * (lo + hi);
+    if (!(sn > lo && sn < hi)) sn = 0.5 * (lo + hi);
+    s = sn;
   }
-  const double s = 0.5 * (lo + hi);
-  double M0 = 0, M1 = 0, M2 = 0;
-  for (int j = 0; j < d->n; j++) {
-    const double f = pow(1 - s * d->v[j], -na), g = 1 - s * d->v[j];
-    M0 += d->pi[j] * f; M1 += d->pi[j] * na * d->v[j] * f / g; M2 += d->pi[j] * na * (na + 1.0) * d->v[j] * d->v[j] * f / (g * g);
-  }
+  sp_moments(d, na, s, &M0, &M1, &M2);
   const double K = N * log(M0), K2 = N * (M2 / M0 - (M1 / M0) * (M1 / M0)), w2 = 2 * (s * t - K);
   if (shat) *shat = s;
   if (!(w2 > 1e-12) || !(K2 > 0)) return 0.5;
   const double w = sqrt(w2), u = s * sqrt(K2), phi = exp(-0.5 * w2) / sqrt(2 * M_PI);
   return 0.5 * erfc(w / M_SQRT2) + phi * (1.0 / u - 1.0 / w);
 }
-static __thread struct { int kind, par, na, N; double x; } g_sp[256];
+static __thread struct { int kind, par, na, N; double x; } g_sp[1024];
 static double sp_crit(int kind, int par, int na, int N)
 {
-  const uint32_t hs = ((uint32_t)(kind * 1000003 + par * 7919 + na * 104729 + N) * 2654435761u) >> 24;
+  if (kind == 1) par = par >= 255 ? 255 : (par / 32) * 32; /* eta on a 1/8 grid, rounded down (heavier tail: conservative) */
+  const uint32_t hs = ((uint32_t)(kind * 1000003 + par * 7919 + na * 104729 + N) * 2654435761u) >> 22;
   if (g_sp[hs].x > 0 && g_sp[hs].kind == kind && g_sp[hs].par == par && g_sp[hs].na == na && g_sp[hs].N == N) return g_sp[hs].x;
   sdist_t d;
-  if (kind == 0) sdist_qam(par, &d); else sdist_logn(par / 255.0, &d);
+  if (kind == 0) sdist_qam(par, &d); else sdist_logn((par ? par : 1) / 255.0, &d);
   const double mean = (double)na * N;
   double lo = mean, hi = mean * 2 + 10;
   while (sp_tail(&d, na, N, hi, NULL) > NR_SENSE_PRB_ALPHA) hi *= 1.6;
-  for (int i = 0; i < 50; i++) {
+  lo = hi / 1.6 > mean ? hi / 1.6 : mean;
+  for (int i = 0; i < 30 && hi - lo > 1e-3 * hi; i++) {
     const double mid = 0.5 * (lo + hi);
     if (sp_tail(&d, na, N, mid, NULL) > NR_SENSE_PRB_ALPHA) lo = mid; else hi = mid;
   }

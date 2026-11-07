@@ -3371,10 +3371,12 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	202	tl_q_hint	tls	uint16_t	TLS	CELLF
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	75	g_gc	tls	struct {}[512]	TLS	CELLFEAT	per-thread cache of the quality tests' critical values (pure function of shape and reference dof)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	76	g_gc_calls	tls	uint64_t	TLS	CELLFEAT	per-thread counter of critical-value lookups (test hook)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	76	g_gc_miss	tls	uint64_t	TLS	CELLFEAT	per-thread counter of critical-value cache misses (test hook)
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	159	g_sp	tls	struct {}[256]	TLS	CELLFEAT	per-thread cache of the saddlepoint thresholds of heterogeneous-noise records
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	159	g_sp	tls	struct {}[1024]	TLS	CELLFEAT	per-thread cache of the saddlepoint thresholds of heterogeneous-noise records
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	241	g_eta	file_static	double[5]	PROCESS	CELLFEAT	QAM noise-heterogeneity factors: computed once by pthread_once from the constellations, read-only afterwards, same for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	242	g_eta_once	file_static	pthread_once_t	PROCESS	CELLFEAT	pthread_once guard of g_eta
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	185	g_dm	file_static	dm_t[2]	PROCESS	CELLFEAT	DM-RS interpolation noise model constants (type 1 and 2): derived once by pthread_once from fixed filters, read-only afterwards, same for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	124	g_zt	file_static	double[128]	PROCESS	CELLFEAT	standard-normal quantile table of the lognormal law: computed once by pthread_once, read-only afterwards, same for every cell
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	125	g_zt_once	file_static	pthread_once_t	PROCESS	CELLFEAT	pthread_once guard of g_zt
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	54	srs_lock	file_static	pthread_mutex_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	83	sr_state	file_static	srs_state_t [converted]	PER_CELL	CELLFEAT	per-cell passive SRS searcher state (CELLFEAT)
 openair1/PHY/NR_UE_TRANSPORT/nr_srs_passive.c	210	process_srs::offsets	func_static	const int[]	CONST	CELLFEAT	auto
