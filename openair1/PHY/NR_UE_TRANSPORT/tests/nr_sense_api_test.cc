@@ -542,14 +542,19 @@ TEST_F(QRing, UlSourcesQualityWithTimingRamp)
       v[2 * ((size_t)a * n + i)] = x.real(); v[2 * ((size_t)a * n + i) + 1] = x.imag();
     }
     nr_sense_quality_t q;
+    if (src == NR_SENSE_SRC_PUSCH_DATA) nr_sense_quality_hint(1 << 2); /* QPSK: the producer's Qm hint (an unknown order is judged as 256QAM, the conservative case) */
     const uint64_t id = nr_sense_push_cfr(src, nant, v.data(), n, n, kk.data(), ll.data(), 7, 0.f, nv, 0, 0, nullptr);
     ASSERT_NE(id, 0u);
     ASSERT_TRUE(wait_q(id, &q));
+    if (getenv("PRBQ_PRINT")) printf("UL %s src %d snr %.0f ta %.0f -> valid %d / %d\n", pt.name, (int)src, snr, ta, (int)q.valid_cfr_prbs, nprb);
     SCOPED_TRACE(testing::Message() << pt.name << " src " << src << " snr " << snr << " ta " << ta);
     EXPECT_EQ(q.first_prb, first);
     if (snr >= 12) { EXPECT_GE(q.valid_cfr_prbs, nprb - 1) << "alpha 1e-3 per PRB over ~3600 PRBs of this sweep: one false reject is expected now and then"; EXPECT_NEAR(q.snr_db_p50, snr, 2.5); }
     else if (snr >= 6) EXPECT_GE(q.valid_cfr_prbs, nprb / 2) << "6 dB is 3 dB above the threshold";
     /* (was: at 0 dB at most nprb/8 valid, from the fixed 3 dB bar; the alpha-level detection test passes PRBs with enough REs well below that, see SenseQualityAdaptive.SnrBarFallsWithNp) */
+    /* the ramp regression (PRBs lost because the TA ramp defeats the affine fit) stays covered below 12 dB at the new bar: measured valid counts out of 24, min over patterns/sources/TAs: 3 dB 23, 0 dB 10 */
+    if (snr >= 3 && snr < 6) EXPECT_GE(q.valid_cfr_prbs, nprb * 3 / 4);
+    else if (snr <= 0) EXPECT_GE(q.valid_cfr_prbs, nprb / 3);
     EXPECT_EQ(q.delay_step, 1) << "ramp estimated";
 
   }

@@ -289,7 +289,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
     .ssb_index=-1, .k_ssb=-1, .ta_est_samples=-1,
     .ta_applied_samples=ta_applied_samples, .ta_applied_valid=true,
     .transform_precoding=g->transform_precoding, .dmrs_type=g->dmrs_config_type+1,
-    .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid};
+    .dmrs_add_pos=-1, .dmrs_n_scid=g->nscid, .qm=(uint8_t)Qm};
   /* measured from H itself (second difference over adjacent REs), not a placeholder */
   const float noise_var = nr_sense_h_noise_var(h_buf, k_buf, l_buf, nof_re, cap, nant);
   nr_sense_meta_set_snr(&rs_meta, dmrs_snr_db);

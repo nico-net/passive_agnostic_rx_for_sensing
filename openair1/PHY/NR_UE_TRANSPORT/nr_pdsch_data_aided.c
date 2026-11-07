@@ -93,6 +93,8 @@ static __thread uint32_t isac_k[273 * 12 * 14];
 static __thread uint32_t isac_l[273 * 12 * 14];
 static __thread uint32_t *win_k;
 #define DA_MAX_RE (273 * 12 * 14)
+#define DA_WIN_NV_OFF(cap) ((sizeof(uint32_t) * 2 * (cap) + sizeof(uint16_t) * (cap) + 7) / 8 * 8) /* byte offset of the per-window noise planes behind win_k/win_l/win_raw */
+#define DA_WIN_BYTES(cap) (DA_WIN_NV_OFF(cap) + sizeof(float) * NR_MIMO_LS_MAX_NL * (cap))
 #define DA_CODED_SZ ((size_t)(273 * 12 * 14 * 8 * NR_MIMO_LS_MAX_NL + 63) / 64 * 64 + 64) /* G = REs * Qm * Nl */
 
 static bool da_scratch_ensure(uint32_t nant, bool want_ml, bool warm)
@@ -115,7 +117,7 @@ static bool da_scratch_ensure(uint32_t nant, bool want_ml, bool warm)
   }
   const uint32_t win_cap = DA_MAX_RE / 4;
   if (want_ml &&
-      (!da_tls_buf((void **)&ygath, sizeof(c16_t) * NR_MIMO_LS_MAX_ANT * DA_MAX_RE) || !da_tls_buf((void **)&win_k, sizeof(uint32_t) * 2 * win_cap + sizeof(uint16_t) * win_cap)))
+      (!da_tls_buf((void **)&ygath, sizeof(c16_t) * NR_MIMO_LS_MAX_ANT * DA_MAX_RE) || !da_tls_buf((void **)&win_k, DA_WIN_BYTES(win_cap))))
     return false;
   if (warm) { /* touch every page now, not on the first grant */
     memset(segments, 0, sizeof(segments));
@@ -128,7 +130,7 @@ static bool da_scratch_ensure(uint32_t nant, bool want_ml, bool warm)
     memset(isac_h, 0, (size_t)isac_h_nant * 2 * DA_MAX_RE * sizeof(float));
     if (want_ml) {
       memset(ygath, 0, sizeof(c16_t) * NR_MIMO_LS_MAX_ANT * DA_MAX_RE);
-      memset(win_k, 0, sizeof(uint32_t) * 2 * win_cap + sizeof(uint16_t) * win_cap);
+      memset(win_k, 0, DA_WIN_BYTES(win_cap));
     }
   }
   return true;
@@ -139,7 +141,7 @@ static bool da_scratch_ensure(uint32_t nant, bool want_ml, bool warm)
  * is transmitted on (the l-th lowest set bit of dmrs_ports, TS 38.212 7.3.1.1/7.3.1.2 order) plus layer/n_layers. */
 static void da_emit(uint32_t slot_idx, float frac, const nr_isac_carrier_t *carrier, const nr_sense_rs_meta_t *rs_meta, uint16_t dmrs_ports,
                     uint32_t nl, const float *h, uint32_t nant, uint32_t stride, const uint32_t *k, const uint32_t *l, uint32_t off,
-                    uint32_t cnt, float nvar)
+                    uint32_t cnt, float nvar, const float *wnv)
 {
   /* The demodulator's nvar is in rxdataF units; H = Y/X is not (|X| is the constellation scale, ~16 at QPSK), so the noise handed to the quality is the
    * one measured on H itself (second difference over consecutive subcarriers, as the PUSCH data tap). NaN/0 = none: the quality uses the record's residual. */
@@ -160,8 +162,20 @@ static void da_emit(uint32_t slot_idx, float frac, const nr_isac_carrier_t *carr
     m.layer_idx1 = (int)lay + 1;
     m.n_layers = (int)nl;
     const float *hl = &h[2 * ((size_t)lay * nant * stride + off)];
+    /* LS-window rows: the layer's noise reference and the heterogeneity of the rows' variances come from the LS solve itself (sigma_y^2 (G^-1)_ll per window), not from H: the quality
+     * tests the rows' power sum against Gamma(n_ant R eta), eta = (sum v)^2 / (R sum v^2) (nr_sense_quality.c) */
+    float nv_layer = NAN;
+    if (wnv && cnt > 0) {
+      const float *v = &wnv[(size_t)lay * stride + off];
+      double s1 = 0, s2 = 0;
+      for (uint32_t i = 0; i < cnt; i++) s1 += v[i], s2 += (double)v[i] * v[i];
+      if (s1 > 0 && s2 > 0) {
+        nv_layer = (float)(s1 / cnt);
+        m.win_het = (float)(s1 * s1 / ((double)cnt * s2));
+      }
+    }
     nr_isac_submit_cfr_multi_meta(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, hl, nant, stride, &k[off], &l[off], cnt,
-                                  nr_isac_mode() == NR_ISAC_MODE_SENSING ? nr_sense_h_noise_var(hl, &k[off], &l[off], cnt, stride, nant) : nvar, &m);
+                                  nr_isac_mode() == NR_ISAC_MODE_SENSING ? (wnv ? nv_layer : nr_sense_h_noise_var(hl, &k[off], &l[off], cnt, stride, nant)) : nvar, &m);
   }
 }
 
@@ -502,6 +516,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   const float    *e_h = isac_h;
   const uint32_t *e_k = isac_k, *e_l = isac_l;
   uint32_t        e_stride = isac_max_re, e_nre = nof_re;
+  const float    *e_nv = NULL; /* Nl > 1: per-window noise variance planes [layer][win_cap] (nr_pdsch_mimo_ls_cfr_nv) */
   uint32_t        sym_raw[NR_SYMBOLS_PER_SLOT];
   for (uint32_t i = 0; i < nof_sym; i++)
     sym_raw[i] = sym_count[i];
@@ -509,8 +524,10 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     uint32_t *win_l = win_k + win_cap;
     uint16_t *win_raw = (uint16_t *)(win_l + win_cap);
     nr_pdsch_mimo_ls_info_t li;
-    const int nw = nr_pdsch_mimo_ls_cfr((int)nof_re, (int)nl, (int)isac_nof_ant, (const int16_t *)mod_syms, isac_k, isac_l,
-                                        (const int16_t *)ygath, isac_max_re, (int)win_cap, win_cap, isac_h, win_k, win_l, win_raw, &li);
+    float *win_nv = (float *)((uint8_t *)win_k + DA_WIN_NV_OFF(win_cap));
+    const int nw = nr_pdsch_mimo_ls_cfr_nv((int)nof_re, (int)nl, (int)isac_nof_ant, (const int16_t *)mod_syms, isac_k, isac_l,
+                                           (const int16_t *)ygath, isac_max_re, (int)win_cap, win_cap, isac_h, win_k, win_l, win_raw, win_nv, &li);
+    e_nv = win_nv;
     if (nw <= 0) {
       static __thread bool warned_ls = false;
       if (!warned_ls) {
@@ -543,7 +560,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     .ports=__builtin_popcount((unsigned)dlsch_config->dmrs_ports), .port_mask=(int)dlsch_config->dmrs_ports, .ssb_index=-1, .k_ssb=-1,
     .ta_est_samples=-1, .transform_precoding=-1,
     .dmrs_type=dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE2 ? 2 : 1, .dmrs_add_pos=-1, .dmrs_n_scid=dlsch_config->nscid,
-    .tb_cb_ok = part_on ? part.ok : 0, .tb_cb_total = part_on ? part.C : 0};
+    .tb_cb_ok = part_on ? part.ok : 0, .tb_cb_total = part_on ? part.C : 0, .qm = (uint8_t)cw->qamModOrder};
   nr_sense_meta_set_snr(&rs_meta, dmrs_snr_db);
   if (nr_isac_mode() == NR_ISAC_MODE_SENSING) {
     const int prg = nr_pdsch_prg_latched(rnti);
@@ -593,7 +610,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
 
   if (sub_target == 0 || nof_sym <= 1) {
     da_emit(slot_idx, 0.0f, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l, 0, e_nre,
-            nvar_f);
+            nvar_f, e_nv);
     return;
   }
 
@@ -622,7 +639,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       // Slice, not copy: ant_stride_re stays the FULL buffer stride so antenna a's slice starts at
       // the same symbol offset within its own plane.
       da_emit(slot_idx, frac, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l,
-              sym_start[g_first], g_out, nvar_f);
+              sym_start[g_first], g_out, nvar_f, e_nv);
       emitted++;
       g_first = i + 1;
     } else if (is_last) {
@@ -630,14 +647,14 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       // as one row if nothing has been emitted yet, otherwise fold it into the whole-slot fallback.
       if (emitted == 0) {
         da_emit(slot_idx, 0.0f, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l, 0, e_nre,
-                nvar_f);
+                nvar_f, e_nv);
         emitted++;
       } else {
         const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
         const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
         if (g_out > 0)
           da_emit(slot_idx, frac, &carrier, &rs_meta, dlsch_config->dmrs_ports, nl, e_h, isac_nof_ant, e_stride, e_k, e_l,
-                  sym_start[g_first], g_out, nvar_f);
+                  sym_start[g_first], g_out, nvar_f, e_nv);
       }
     }
   }

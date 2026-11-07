@@ -55,6 +55,12 @@ int nr_pdsch_mimo_ls_cfr(int nre, int nl, int nant, const int16_t *x, const uint
                          size_t ystride, int out_cap, size_t out_stride, float *out_h, uint32_t *out_k, uint32_t *out_sym,
                          uint16_t *out_raw, nr_pdsch_mimo_ls_info_t *info);
 
+/// As nr_pdsch_mimo_ls_cfr, plus out_nv (NULL ok): planes [l] of out_stride floats, the per-RE noise variance of layer l's window estimate in H scale,
+/// sigma_y^2 (G^-1)_ll with sigma_y^2 = LS residual / (nant (n - nl)); the quality tests use it as the noise reference of the window rows.
+int nr_pdsch_mimo_ls_cfr_nv(int nre, int nl, int nant, const int16_t *x, const uint32_t *k_abs, const uint32_t *sym, const int16_t *y,
+                            size_t ystride, int out_cap, size_t out_stride, float *out_h, uint32_t *out_k, uint32_t *out_sym,
+                            uint16_t *out_raw, float *out_nv, nr_pdsch_mimo_ls_info_t *info);
+
 #ifdef __cplusplus
 }
 #endif

@@ -2,6 +2,7 @@
 #define NR_SENSE_QUALITY_H
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -22,7 +23,7 @@ extern "C" {
 enum { NR_SENSE_INV_TRUNC, NR_SENSE_INV_PARTIAL, NR_SENSE_INV_ABSENT, NR_SENSE_INV_FEW_RE, NR_SENSE_INV_NOSIG, NR_SENSE_INV_SNR, NR_SENSE_INV_RESID, NR_SENSE_INV_SYM, NR_SENSE_INV_RECON, NR_SENSE_INV_N };
 const char *nr_sense_inv_name(int rule);
 /* DM-RS interpolation noise model, per antenna: {kT, thT, kR, thR, E[S]/s2} (Gamma shape and scale of the PRB power sum and of the affine-fit residual, units of the per-RE noise variance). Test hook. */
-void nr_sense_quality_dmrs_model(double out[5]);
+void nr_sense_quality_dmrs_model(int dmrs_type, double out[5]);
 typedef struct {
   uint16_t inval[NR_SENSE_INV_N]; /* PRBs removed per rule (diagnostic only; no rule or threshold depends on it) */
   uint16_t allocated_prbs, estimated_usable_prbs, valid_cfr_prbs;
@@ -38,8 +39,8 @@ typedef struct {
  * PRB's own local-fit residual stands in. Either way the noise is floored at NR_SENSE_RECON_IMPL_LOSS x the PRB's mean power (30 dB SNR ceiling).
  * Per-PRB SNR = (mean|H|^2 over antennas and all REs - noise_var) / noise_var, -100 dB when the signal is <= 0.
  * The caller passes one estimate per (k, l); REs with l >= 16 or PRB >= 275 above the lowest are ignored in the fit.
- * Cost: O(n_re * n_ant), measured ~29 us for DM-RS-only input (128 PRB x 4 ant x 6 RE/PRB x 2 sym); a data-aided
- * full grid (~170k samples) is estimated at ~0.8-1.5 ms per record: S3 must measure it on the real input size.
+ * Cost: O(n_re * n_ant) + O(PRBs). Measured per record on the DGX (SenseQualityRound1.CostPerRecord, 4 ant): DM-RS chest 51/100/273 PRB 12/19/58 us; data-aided Nl=1 full grid (13 symbols)
+ * 75/142/386 us; window rows (Nl>=2, ~15 rows per PRB) 12/19/48 us. A first sight of a new (shape, reference dof) costs one bisection (0.1-1 ms; saddlepoint kinds more), cached per thread.
  * iq antenna-major complex float pairs, ant_stride in complex RE (as nr_sense_push_cfr). Pure, no allocation,
  * O(n_ant * n_re). Every computation is per PRB: nothing fits/smooths/correlates across a PRG boundary. At most 8
  * antennas are used. */
@@ -55,6 +56,19 @@ typedef struct {
  * H scale (3.3x the H noise for type 1, 1.75x for type 2), so the noise comes from the record's median fit residual and the chi-square degrees of freedom from the interpolation operator
  * (nr_sense_quality.c; DM-RS type 1 operator, the type is not carried by the frame). Set by the frame reader for that source only. */
 #define NR_SENSE_Q_DMRS_INTERP 4u
+/* NR_SENSE_Q_DMRS_T2: the DM-RS is type 2 (the type-2 operator; meta dmrs_type). NR_SENSE_Q_WINDOW: the rows are windowed-LS multi-layer data-aided estimates (one per LS window, no per-symbol fit): SNR test only,
+ * noise_var = the producer's mean per-row noise variance of the layer (from the LS solve), eta (flags bits 16-23, /255) = (sum v)^2 / (R sum v^2) over its rows. NR_SENSE_Q_DATA_AIDED: H = Y/X per RE (per-RE noise
+ * variance s2/|X|^2): effective dof N eta with eta from the constellation order in flags bits 8-11 (Qm/2; 0 = unknown -> 256QAM, the most conservative). */
+#define NR_SENSE_Q_DMRS_T2 8u
+#define NR_SENSE_Q_WINDOW 16u
+#define NR_SENSE_Q_DATA_AIDED 32u
+#define NR_SENSE_Q_QM(qm) ((unsigned)((qm) / 2) << 8)
+#define NR_SENSE_Q_HET(eta) ((unsigned)lroundf(fminf(fmaxf((float)(eta), 0.f), 1.f) * 255.f) << 16)
+/* Producer hint for the writer's quality (sensing mode only; carried in the in-memory frame's reserved header bytes 18-19, zeroed before the frame is written): bit0 DMRS type 2, bit1 window rows,
+ * bits 2-5 Qm/2, bits 8-15 eta*255. Set per thread just before the push; consumed by it. */
+void nr_sense_quality_hint(uint16_t hint);
+double nr_sense_quality_qam_eta(int qm);
+void nr_sense_quality_gcrit_stats(uint64_t *calls, uint64_t *misses); /* test hook: this thread's threshold-cache lookups and misses */
 #define NR_SENSE_SPARSE_SYM_MIN 0.5f /* general bound (half the coherent amplitude), not tuned on any cell */
 void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
                                  const uint8_t *l_sym, float noise_var, unsigned flags, nr_sense_quality_t *q);

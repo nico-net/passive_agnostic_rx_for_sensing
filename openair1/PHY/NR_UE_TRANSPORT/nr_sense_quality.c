@@ -5,12 +5,15 @@
 #include <pthread.h>
 
 /* ---- null distributions (all tests are at the one level NR_SENSE_PRB_ALPHA) ----
- * A PRB's statistics under H0 are Gamma(shape k, scale th) in units of the per-RE noise variance s2 (the exported H's, mean diagonal of its noise covariance):
+ * A PRB's statistics under H0 are Gamma(shape k, scale th) in units of the mean per-RE noise variance s2 of H:
  *   SNR test      T = sum |h|^2 over tot RE x n_ant           (noise only)           E[T] = tot n_ant s2
  *   residual test S = sse of the affine fit over the best symbol (affine channel+noise) E[S] = s2 n_ant tr(M C)
- * White noise (C = I): T ~ Gamma(n_ant tot, 1), S ~ Gamma(n_ant (cnt-2), 1) exactly (complex Gaussian: |.|^2 sums). Correlated noise (covariance s2 C, C of the 6 REs
- * with mean diagonal 1): the quadratic forms are sums of lambda_i * Exp(1), matched to a Gamma by mean and variance (Satterthwaite): th = tr(Q^2)/tr(Q), k = n_ant tr(Q)^2/tr(Q^2),
- * Q = C (T) or M C (S), M = I - X(X'X)^-1 X' the affine residual projector over the 6 subcarrier positions. The Gamma tail at 1e-3 is an approximation of the exact one. */
+ * White noise (C = I): T ~ Gamma(n_ant tot, 1), S ~ Gamma(n_ant (cnt-2), 1) exactly (complex Gaussian: |.|^2 sums). Correlated noise (DM-RS chest, covariance s2 C, C of the 6 REs with
+ * mean diagonal 1) and per-RE heterogeneous variances (data-aided H = Y/X: v_i = s2 / |X_i|^2) make the quadratic forms sums of lambda_i * Exp(1): matched to a Gamma by mean and variance
+ * (Satterthwaite). Heterogeneity: k = N eta, th = 1/eta with eta = E[v]^2 / E[v^2] over the REs (N_eff = N eta); the chest operator: th = tr(Q^2)/tr(Q), k = n_ant tr(Q)^2/tr(Q^2), Q = C (T) or
+ * M C (S), M = I - X(X'X)^-1 X' the affine residual projector over the 6 subcarrier positions. The Gamma tail at 1e-3 is an approximation of the exact one.
+ * A noise reference estimated from the record (median of the OTHER PRBs' residuals) has its own dof nu: the ratio statistic is then F-like, R = nu G_a / G_nu, and its tail is the incomplete beta:
+ * P(R > x) = I_{nu/(x+nu)}(nu, a). nu = 0 means an exact reference (producer figure in H scale). */
 static double gq(double a, double x) /* upper regularised incomplete gamma Q(a,x) */
 {
   if (x <= 0) return 1;
@@ -34,32 +37,157 @@ static double gq(double a, double x) /* upper regularised incomplete gamma Q(a,x
   }
   return exp(-x + a * log(x) - lg) * h;
 }
-/* x with Q(a,x) = alpha, cached per thread: the shapes of a record take a handful of values */
-static double gcrit(double a)
+static double betacf(double a, double b, double x)
 {
-  static __thread struct { double a, x; } cache[64];
-  const unsigned hsh = (unsigned)(a * 64.0) % 64u;
-  if (cache[hsh].a == a) return cache[hsh].x;
-  double lo = 0, hi = a + 10;
-  while (gq(a, hi) > NR_SENSE_PRB_ALPHA) hi *= 2;
-  for (int i = 0; i < 80; i++) {
-    const double mid = 0.5 * (lo + hi);
-    if (gq(a, mid) > NR_SENSE_PRB_ALPHA) lo = mid; else hi = mid;
+  const double qab = a + b, qap = a + 1, qam = a - 1;
+  double c = 1, d = 1 - qab * x / qap;
+  if (fabs(d) < 1e-300) d = 1e-300;
+  d = 1 / d;
+  double h = d;
+  for (int m = 1; m <= 300; m++) {
+    const int m2 = 2 * m;
+    double aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+    d = 1 + aa * d; if (fabs(d) < 1e-300) d = 1e-300;
+    c = 1 + aa / c; if (fabs(c) < 1e-300) c = 1e-300;
+    d = 1 / d; h *= d * c;
+    aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+    d = 1 + aa * d; if (fabs(d) < 1e-300) d = 1e-300;
+    c = 1 + aa / c; if (fabs(c) < 1e-300) c = 1e-300;
+    d = 1 / d;
+    const double del = d * c;
+    h *= del;
+    if (fabs(del - 1) < 1e-14) break;
   }
-  cache[hsh].a = a; cache[hsh].x = hi;
+  return h;
+}
+static double betai(double a, double b, double x) /* regularised incomplete beta I_x(a,b) */
+{
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  int s;
+  const double lbt = lgamma_r(a + b, &s) - lgamma_r(a, &s) - lgamma_r(b, &s) + a * log(x) + b * log1p(-x);
+  if (x < (a + 1) / (a + b + 2)) return exp(lbt) * betacf(a, b, x) / a;
+  return 1 - exp(lbt) * betacf(b, a, 1 - x) / b;
+}
+static double ftail(double a, double nu, double x) { return nu > 0 ? betai(nu, a, nu / (x + nu)) : gq(a, x); }
+/* x with tail(a, nu, x) = alpha. Cached per thread, keyed by the shape on a 1/16 grid and nu on an integer (< 32) or multiple-of-8 grid rounded DOWN (a smaller nu is the more
+ * conservative); the threshold is rescaled by a / a_grid. The cache is hashed on both keys, so integer shapes (white noise) do not collide. */
+static __thread struct { float a, nu; double x; } g_gc[512];
+static __thread uint64_t g_gc_calls, g_gc_miss;
+void nr_sense_quality_gcrit_stats(uint64_t *calls, uint64_t *misses) { *calls = g_gc_calls; *misses = g_gc_miss; }
+static double gcrit(double a, double nu)
+{
+  float aq = floorf((float)a * 16.f + 0.5f) / 16.f;
+  if (aq < 0.0625f) aq = 0.0625f;
+  float nq = nu <= 0 || nu > 4000 ? 0.f : nu < 32 ? floorf((float)nu) : floorf((float)nu / 8.f) * 8.f;
+  if (nu > 0 && nq < 1.f) nq = 1.f;
+  const uint32_t hs = ((uint32_t)(aq * 16.f) * 2654435761u ^ ((uint32_t)nq + 1u) * 0x9E3779B1u) >> 23;
+  g_gc_calls++;
+  if (g_gc[hs].a != aq || g_gc[hs].nu != nq || g_gc[hs].x == 0) {
+    g_gc_miss++;
+    double lo = 0, hi = aq + 10;
+    while (ftail(aq, nq, hi) > NR_SENSE_PRB_ALPHA) hi *= 2;
+    for (int i = 0; i < 60; i++) {
+      const double mid = 0.5 * (lo + hi);
+      if (ftail(aq, nq, mid) > NR_SENSE_PRB_ALPHA) lo = mid; else hi = mid;
+    }
+    g_gc[hs].a = aq; g_gc[hs].nu = nq; g_gc[hs].x = hi;
+  }
+  return g_gc[hs].x * (a / aq);
+}
+
+/* ---- heterogeneous per-RE noise (data-aided H = Y/X; LS-window rows): saddlepoint tail ----
+ * T/s2 = sum_i v_i G_i, G_i ~ Gamma(n_ant) (the antennas share X, so v_i is common to them), v_i iid from a known discrete law (mean 1): the QAM law w = 1/|X|^2 over the 38.211 5.1
+ * constellation of order qm (kind 0), or, for window rows whose law the producer only summarises by eta = (sum v)^2 / (R sum v^2), a lognormal of that variance (kind 1; an assumption: heavy
+ * right tail like the inverse of a Gram-matrix diagonal). Cumulant K(s) = N log E[(1 - s v)^-n_ant]; Lugannani-Rice tail with the saddlepoint K'(s) = t; the threshold t with tail alpha is
+ * cached per thread by (kind, parameter, n_ant, N). A two-moment Gamma is far off here (26-45 alpha measured on 16..256QAM). */
+typedef struct { int n; double v[256], pi[256]; } sdist_t;
+static void sdist_qam(int qm, sdist_t *d)
+{
+  const int M = 1 << (qm / 2);
+  double w[256]; int cnt[256], n = 0;
+  for (int a = 0; a < M; a++)
+    for (int b = 0; b < M; b++) {
+      const double x = 2 * a - (M - 1), y = 2 * b - (M - 1), ww = 1.0 / (x * x + y * y);
+      int j = 0;
+      while (j < n && fabs(w[j] - ww) > 1e-12) j++;
+      if (j == n) { w[n] = ww; cnt[n++] = 0; }
+      cnt[j]++;
+    }
+  double m = 0;
+  for (int j = 0; j < n; j++) m += w[j] * cnt[j] / ((double)M * M);
+  d->n = n;
+  for (int j = 0; j < n; j++) { d->v[j] = w[j] / m; d->pi[j] = cnt[j] / ((double)M * M); }
+}
+static void sdist_logn(double eta, sdist_t *d)
+{
+  const int n = 128;
+  const double s2 = log(1.0 / (eta > 0.02 ? eta : 0.02)), sg = sqrt(s2); /* 1 + CV^2 = 1/eta */
+  double m = 0;
+  d->n = n;
+  for (int j = 0; j < n; j++) { /* z = Phi^-1((j + 0.5) / n) by bisection on erfc */
+    const double pr = (j + 0.5) / n;
+    double lo = -8, hi = 8;
+    for (int i = 0; i < 50; i++) { const double mid = 0.5 * (lo + hi); if (0.5 * erfc(-mid / M_SQRT2) < pr) lo = mid; else hi = mid; }
+    d->v[j] = exp(sg * 0.5 * (lo + hi)); d->pi[j] = 1.0 / n; m += d->v[j] / n;
+  }
+  for (int j = 0; j < n; j++) d->v[j] /= m;
+}
+static double sp_tail(const sdist_t *d, int na, double N, double t, double *shat)
+{
+  double vmax = 0;
+  for (int j = 0; j < d->n; j++) if (d->v[j] > vmax) vmax = d->v[j];
+  double lo = 0, hi = (1.0 - 1e-12) / vmax;
+  for (int i = 0; i < 80; i++) { /* K'(s) increasing */
+    const double s = 0.5 * (lo + hi);
+    double M0 = 0, M1 = 0;
+    for (int j = 0; j < d->n; j++) { const double f = pow(1 - s * d->v[j], -na); M0 += d->pi[j] * f; M1 += d->pi[j] * na * d->v[j] * f / (1 - s * d->v[j]); }
+    if (N * M1 / M0 < t) lo = s; else hi = s;
+  }
+  const double s = 0.5 * (lo + hi);
+  double M0 = 0, M1 = 0, M2 = 0;
+  for (int j = 0; j < d->n; j++) {
+    const double f = pow(1 - s * d->v[j], -na), g = 1 - s * d->v[j];
+    M0 += d->pi[j] * f; M1 += d->pi[j] * na * d->v[j] * f / g; M2 += d->pi[j] * na * (na + 1.0) * d->v[j] * d->v[j] * f / (g * g);
+  }
+  const double K = N * log(M0), K2 = N * (M2 / M0 - (M1 / M0) * (M1 / M0)), w2 = 2 * (s * t - K);
+  if (shat) *shat = s;
+  if (!(w2 > 1e-12) || !(K2 > 0)) return 0.5;
+  const double w = sqrt(w2), u = s * sqrt(K2), phi = exp(-0.5 * w2) / sqrt(2 * M_PI);
+  return 0.5 * erfc(w / M_SQRT2) + phi * (1.0 / u - 1.0 / w);
+}
+static __thread struct { int kind, par, na, N; double x; } g_sp[256];
+static double sp_crit(int kind, int par, int na, int N)
+{
+  const uint32_t hs = ((uint32_t)(kind * 1000003 + par * 7919 + na * 104729 + N) * 2654435761u) >> 24;
+  if (g_sp[hs].x > 0 && g_sp[hs].kind == kind && g_sp[hs].par == par && g_sp[hs].na == na && g_sp[hs].N == N) return g_sp[hs].x;
+  sdist_t d;
+  if (kind == 0) sdist_qam(par, &d); else sdist_logn(par / 255.0, &d);
+  const double mean = (double)na * N;
+  double lo = mean, hi = mean * 2 + 10;
+  while (sp_tail(&d, na, N, hi, NULL) > NR_SENSE_PRB_ALPHA) hi *= 1.6;
+  for (int i = 0; i < 50; i++) {
+    const double mid = 0.5 * (lo + hi);
+    if (sp_tail(&d, na, N, mid, NULL) > NR_SENSE_PRB_ALPHA) lo = mid; else hi = mid;
+  }
+  g_sp[hs].kind = kind; g_sp[hs].par = par; g_sp[hs].na = na; g_sp[hs].N = N; g_sp[hs].x = hi;
   return hi;
 }
 
-/* Noise covariance of the DM-RS decoder estimate (nr_dl_channel_estimation.c NFAPI_NR_DMRS_TYPE1_linear_interp, 38.211 7.4.1.1.2 type 1: pilots on every second subcarrier of the port's comb).
- * The LS value of a pilot PAIR (two pilots 2 subcarriers apart, noise s2_p each) is their mean (variance s2_p/2) and stands for 4 subcarriers (a block, 3 per PRB). The chest then runs 16-tap
- * filters over the half-block sequence k = 2c (c = 0..): the middle filter is 0.125 on 16 outputs, written at an offset that advances 4 outputs every second step, so the estimate is a
- * staircase of 4-subcarrier steps (unit DC gain). The exported H is its comb-2 samples (6 per PRB). The delay de-rotation is a diagonal unitary congruence of C: it leaves tr C and tr C^2 unchanged
- * and is ignored in tr(MC) (phase ramp over a PRB << 1 rad for delays < 100 samples of 4096). Edge PRBs of an allocation (first/last filter) use the interior operator. */
-static struct { double kT, thT, kR, thR, mR; } g_dm; /* per antenna: shape and scale of T and S, and E[S]/s2 (mR) */
+/* Noise covariance of the DM-RS decoder estimate (nr_dl_channel_estimation.c NFAPI_NR_DMRS_TYPE{1,2}_linear_interp, 38.211 7.4.1.1.2: pilots on every second subcarrier of the port's comb
+ * (type 1) or on subcarrier pairs (type 2)). The LS value of a pilot PAIR (mean of 2, variance s2_p/2) stands for a block of 4 (type 1) or 6 (type 2) subcarriers (3 / 2 blocks per PRB). The
+ * chest then runs 16-tap filters over the half-block sequence k = 2c (c = 0..): the middle filter is 0.125 on 16 outputs (UL filters, 4096/2048/8192 over 16384), written at an offset that
+ * advances 4 outputs every second step (the same for both types), so the estimate is a unit-gain staircase of 4-subcarrier steps. The exported H is its comb-2 samples (6 per PRB).
+ * The delay de-rotation is a diagonal unitary congruence D C D^H with D = diag(exp(j phi_k)): tr C and tr C^2 are unchanged, and tr(MC) changes by terms in cos(phi_i - phi_j) that are
+ * second order for the phase ramp inside a PRB: phi_i - phi_j = 2 pi delay (i-j) 2 / 4096 over the 6 comb REs, i.e. 0.15 rad per 10 samples of residual delay across the whole PRB;
+ * ignored (< 1 % of tr(MC) below ~20 samples). Edge PRBs of an allocation (first/last filter weights 0.25/0.5) use the interior operator: their noise is larger than modelled. */
+typedef struct { double kT, thT, kR, thR, mR; } dm_t; /* per antenna: shape and scale of T and S, and E[S]/s2 (mR) */
+static dm_t g_dm[2];
 static pthread_once_t g_dm_once = PTHREAD_ONCE_INIT;
-static void dm_init(void)
+static void dm_build(int type, dm_t *o)
 {
   enum { NP = 6, NS = NP * 12, NB = NP * 3 };
+  const int blk = type == 1 ? 4 : 6;
   double A[NS][NB];
   memset(A, 0, sizeof A);
   const double fp0[16] = {.25, .25, .25, .25, .25, .25, .25, .25}, fp12[16] = {.25, .25, .25, .25, .125, .125, .125, .125, .125, .125, .125, .125},
@@ -69,7 +197,7 @@ static void dm_init(void)
   int ptr = 0;
   for (int c = 0; c < cnt; c++) {
     const double *f = c == 0 ? fp0 : (c == 1 || c == 2) ? fp12 : c == cnt - 1 ? flast : fmid;
-    for (int t = 0; t < 16 && ptr + t < NS; t++) A[ptr + t][(2 * c) / 4] += f[t];
+    for (int t = 0; t < 16 && ptr + t < NS; t++) A[ptr + t][(2 * c) / blk] += f[t];
     if (c > 2 && c != cnt - 1 && c % 2 == 0) ptr += 4;
   }
   double C[6][6], M[6][6], MC[6][6];
@@ -84,11 +212,10 @@ static void dm_init(void)
   for (int i = 0; i < 6; i++) trC += C[i][i];
   for (int i = 0; i < 6; i++)
     for (int j = 0; j < 6; j++) C[i][j] *= 6.0 / trC; /* mean diagonal 1: s2 is the per-RE variance of H */
-  double sx = 0, sxx = 0;
-  for (int i = 0; i < 6; i++) { sx += i - 2.5; sxx += (i - 2.5) * (i - 2.5); } /* sx = 0 */
+  double sxx = 0;
+  for (int i = 0; i < 6; i++) sxx += (i - 2.5) * (i - 2.5);
   for (int i = 0; i < 6; i++)
     for (int j = 0; j < 6; j++) M[i][j] = (i == j ? 1.0 : 0.0) - 1.0 / 6 - (i - 2.5) * (j - 2.5) / sxx;
-  (void)sx;
   double t1 = 6, t2 = 0, u1 = 0, u2 = 0;
   for (int i = 0; i < 6; i++)
     for (int j = 0; j < 6; j++) {
@@ -101,12 +228,40 @@ static void dm_init(void)
     u1 += MC[i][i];
     for (int j = 0; j < 6; j++) u2 += MC[i][j] * MC[j][i];
   }
-  g_dm.thT = t2 / t1, g_dm.kT = t1 * t1 / t2, g_dm.thR = u2 / u1, g_dm.kR = u1 * u1 / u2, g_dm.mR = u1;
+  o->thT = t2 / t1, o->kT = t1 * t1 / t2, o->thR = u2 / u1, o->kR = u1 * u1 / u2, o->mR = u1;
 }
-void nr_sense_quality_dmrs_model(double out[5])
+static void dm_init(void) { dm_build(1, &g_dm[0]); dm_build(2, &g_dm[1]); }
+void nr_sense_quality_dmrs_model(int type, double out[5])
 {
   pthread_once(&g_dm_once, dm_init);
-  out[0] = g_dm.kT, out[1] = g_dm.thT, out[2] = g_dm.kR, out[3] = g_dm.thR, out[4] = g_dm.mR;
+  const dm_t *d = &g_dm[type == 2];
+  out[0] = d->kT, out[1] = d->thT, out[2] = d->kR, out[3] = d->thR, out[4] = d->mR;
+}
+/* eta = E[w]^2 / E[w^2], w = 1/|X|^2 over the 38.211 5.1 constellation of order qm (Gray 2^(qm/2)-PAM per axis; the scale cancels) */
+static double g_eta[5];
+static pthread_once_t g_eta_once = PTHREAD_ONCE_INIT;
+static void eta_init(void)
+{
+  double *tab = g_eta;
+  {
+    for (int q = 1; q <= 4; q++) {
+      const int M = 1 << q; /* PAM levels per axis */
+      double s1 = 0, s2 = 0;
+      for (int a = 0; a < M; a++)
+        for (int b = 0; b < M; b++) {
+          const double x = 2 * a - (M - 1), y = 2 * b - (M - 1), w = 1.0 / (x * x + y * y);
+          s1 += w, s2 += w * w;
+        }
+      s1 /= (double)M * M, s2 /= (double)M * M;
+      tab[q] = s1 * s1 / s2;
+    }
+  }
+}
+double nr_sense_quality_qam_eta(int qm)
+{
+  pthread_once(&g_eta_once, eta_init);
+  const int q = qm / 2;
+  return q >= 1 && q <= 4 ? g_eta[q] : g_eta[4]; /* unknown order: the most conservative (256QAM) */
 }
 
 #define QMAXANT 8
@@ -171,8 +326,15 @@ void nr_sense_quality_compute(int n_ant, const float *iq, int ant_stride, int n_
 void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
                                  const uint8_t *l_sym, float noise_var, unsigned flags, nr_sense_quality_t *q)
 {
-  const bool sparse = (flags & NR_SENSE_Q_SPARSE) != 0, dmi = (flags & NR_SENSE_Q_DMRS_INTERP) != 0 && !sparse;
-  if (dmi) pthread_once(&g_dm_once, dm_init);
+  const bool sparse = (flags & NR_SENSE_Q_SPARSE) != 0, dmi = (flags & NR_SENSE_Q_DMRS_INTERP) != 0 && !sparse, window = (flags & NR_SENSE_Q_WINDOW) != 0 && !sparse;
+  const dm_t *dmm = NULL;
+  if (dmi) { pthread_once(&g_dm_once, dm_init); dmm = &g_dm[(flags & NR_SENSE_Q_DMRS_T2) ? 1 : 0]; }
+  /* heterogeneity of the per-RE noise variance (eta): window LS rows carry their own (producer, 8 bit); data-aided H = Y/X from the constellation order (unknown order: 256QAM) */
+  double eta = 1;
+  if (window) { const unsigned h8 = (flags >> 16) & 255u; eta = h8 ? h8 / 255.0 : 1; }
+  else if (flags & NR_SENSE_Q_DATA_AIDED) eta = nr_sense_quality_qam_eta(2 * (int)((flags >> 8) & 15u));
+  const bool het = !dmi && eta < 0.999;
+  const int hkind = window ? 1 : 0, hpar = window ? (int)((flags >> 16) & 255u) : (((flags >> 8) & 15u) ? 2 * (int)((flags >> 8) & 15u) : 8);
   memset(q, 0, sizeof(*q));
   q->snr_db_p50 = q->snr_db_p10 = q->resid_db = q->sym_consist = q->recon_conf = NAN;
   if (n_ant < 1 || n_re < 1 || !iq || !k_abs || !l_sym)
@@ -294,21 +456,50 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
   }
   /* PRBs whose 6 REs of the fit symbol are the DM-RS comb use the interpolation model; any other PRB (edge, partial) the white one */
 #define DMP(p) (dmi && tot[p] == 6 && cnt[p][best[p]] == 6)
-  /* noise reference s2 (per-RE variance of H, independent of the PRB under test): the producer's figure when it is in H scale; otherwise (none, or DM-RS decoder estimate whose nvar is not
-   * in H scale) the MEDIAN over the record's PRBs of the fit residual per unit of its null mean, corrected from median to mean of its Gamma. A PRB with a bad residual cannot set its own
-   * reference; many bad PRBs raise it (fewer valid, never more). A record of < 3 candidate PRBs gets its own residual as reference (the residual test then never rejects). */
-  double sref = 0;
-  if (!sparse && (dmi || !(noise_var > 0))) {
+  /* Noise reference s2 (mean per-RE variance of H) and its own dof nu, per PRB:
+   *  - the producer's figure when it is in H scale (not for the DM-RS chest: its nvar is 3.3x / 1.75x the H noise): exact, nu = 0;
+   *  - otherwise a leave-one-out reference from the record itself: the OTHER candidate PRBs' fit residuals per unit of their null mean (mean of 1-2 others, else their lower median
+   *    corrected from median to mean of the Gamma), with dof nu = 2 n_eff k / pi (median of n_eff Gamma(k): variance (pi/2)/(n_eff k) relative; n_eff halved for the chest, whose
+   *    outputs of adjacent PRBs share pilots). A PRB never sets its own reference; with a single candidate PRB there is none: the PRB is charged to NOSIG (counted, not valid).
+   *    Bad PRBs among the others raise the reference: the SNR test gets stricter (fewer valid), the residual test more lenient (a PRB with an elevated residual is excused by a high reference; bounded by the median's robustness: it takes half the pool to move it). */
+  const bool ext_ref = sparse || ((window || !dmi) && noise_var > 0);
+  float sref[NR_SENSE_MAX_PRB], nur[NR_SENSE_MAX_PRB];
+  bool have_ref[NR_SENSE_MAX_PRB];
+  memset(have_ref, 0, sizeof have_ref);
+  if (!ext_ref && !window) {
     float ev[NR_SENSE_MAX_PRB];
-    int ne = 0;
-    double kfirst = 0;
+    int ix[NR_SENSE_MAX_PRB], rk[NR_SENSE_MAX_PRB], ne = 0;
+    double sum = 0;
     for (int p = 0; p < NR_SENSE_MAX_PRB; p++) {
       if (tot[p] < 3 || cnt[p][best[p]] < 3 || !(sig[p] > 0) || !isfinite(pwr[p]) || !isfinite(sse[p])) continue;
-      const double m = DMP(p) ? g_dm.mR : (double)(cnt[p][best[p]] - 2);
-      if (!ne) kfirst = n_ant * (DMP(p) ? g_dm.kR : m);
-      ev[ne++] = (float)(sse[p] / (m * n_ant));
+      const double m = DMP(p) ? dmm->mR : (double)(cnt[p][best[p]] - 2);
+      ev[ne] = (float)(sse[p] / (m * n_ant));
+      ix[ne++] = p;
+      sum += ev[ne - 1];
     }
-    if (ne) sref = pick(ev, ne, 1, 2) / ((kfirst - 1.0 / 3) / kfirst);
+    if (ne >= 2) {
+      float srt[NR_SENSE_MAX_PRB];
+      int ord[NR_SENSE_MAX_PRB]; /* ord[j] = candidate index of the j-th smallest */
+      for (int i = 0; i < ne; i++) {
+        int j = i - 1;
+        while (j >= 0 && srt[j] > ev[i]) { srt[j + 1] = srt[j]; ord[j + 1] = ord[j]; j--; }
+        srt[j + 1] = ev[i]; ord[j + 1] = i;
+      }
+      for (int j = 0; j < ne; j++) rk[ord[j]] = j;
+      for (int i = 0; i < ne; i++) {
+        const int p = ix[i], no = ne - 1;
+        const double ke = DMP(p) ? n_ant * dmm->kR : n_ant * (cnt[p][best[p]] - 2) * eta;
+        double ref, nu;
+        if (no == 1) { ref = sum - ev[i]; nu = dmi ? ke / 2 : ke; }
+        else if (no == 2) { ref = (sum - ev[i]) / 2; nu = dmi ? ke : 2 * ke; }
+        else {
+          const int mi = (no - 1) / 2;
+          ref = srt[mi + (mi >= rk[i])] / ((ke - 1.0 / 3) / ke);
+          nu = 2.0 * (dmi ? no / 2.0 : (double)no) * ke / M_PI;
+        }
+        sref[p] = (float)ref, nur[p] = (float)nu, have_ref[p] = true;
+      }
+    }
   }
   float snr[NR_SENSE_MAX_PRB], res[NR_SENSE_MAX_PRB];
   int nv = 0;
@@ -318,22 +509,30 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
         if (tot[p]) q->inval[NR_SENSE_INV_NOSIG]++;
         continue;
       }
+    } else if (window) { /* window-LS rows: one estimate per LS window, no per-symbol affine fit (the window ladder already proved flatness within noise), SNR test only */
+      if (tot[p] < 1) continue;
+      if (!isfinite(pwr[p]) || !(pwr[p] > 0) || !(noise_var > 0)) {
+        q->inval[NR_SENSE_INV_NOSIG]++;
+        continue;
+      }
     } else {
       if (tot[p] < 3 || cnt[p][best[p]] < 3) {
         if (tot[p]) q->inval[NR_SENSE_INV_FEW_RE]++;
         continue;
       }
-      if (!(sig[p] > 0) || !isfinite(pwr[p]) || !isfinite(sse[p])) {
+      if (!(sig[p] > 0) || !isfinite(pwr[p]) || !isfinite(sse[p]) || (!ext_ref && !have_ref[p])) { /* no independent reference: counted, never valid */
         q->inval[NR_SENSE_INV_NOSIG]++;
         continue;
       }
     }
     const double mean_pwr = pwr[p] / ((double)tot[p] * n_ant);
-    double npw = (!sparse && (dmi || !(noise_var > 0))) ? sref : noise_var; /* (sparse: noise_var > 0 here) */
+    double npw = ext_ref ? noise_var : sref[p], nu = ext_ref ? 0 : nur[p];
     /* floor: no receiver sees an effective SNR above ~30 dB (NR_SENSE_RECON_IMPL_LOSS: transmitter EVM, phase noise, ADC), so a noise estimate
      * below that fraction of the PRB power (a noiseless simulation gives exactly 0) is raised to it: high SNR, never "invalid" */
-    if (npw < NR_SENSE_RECON_IMPL_LOSS * mean_pwr)
+    if (npw < NR_SENSE_RECON_IMPL_LOSS * mean_pwr) {
       npw = NR_SENSE_RECON_IMPL_LOSS * mean_pwr;
+      nu = 0; /* a floor, not an estimate */
+    }
     if (!(npw > 0)) {
       q->inval[NR_SENSE_INV_NOSIG]++;
       continue;
@@ -341,10 +540,18 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
     /* channel SNR (spec 4.2a): E[mean|H|^2] = S + N, so subtract the noise; no signal left -> -100 dB (invalid). Reported only: validity is the two tail tests below. */
     double sp = mean_pwr - npw;
     float s = sp > 0 ? (float)(10.0 * log10(sp / npw)) : -100.0f;
-    float r = sparse ? 0.f : (float)(sse[p] / sig[p]);
+    float r = sparse || window ? 0.f : (float)(sse[p] / sig[p]);
     const bool dm = DMP(p);
-    const bool snr_ok = pwr[p] / (npw * (dm ? g_dm.thT : 1.0)) > gcrit(dm ? n_ant * g_dm.kT : (double)n_ant * tot[p]);
-    const bool res_ok = sparse || sse[p] / (npw * (dm ? g_dm.thR : 1.0)) <= gcrit(dm ? n_ant * g_dm.kR : (double)n_ant * (cnt[p][best[p]] - 2));
+    const double kT = dm ? n_ant * dmm->kT : (double)n_ant * tot[p] * eta, thT = dm ? dmm->thT : 1.0 / eta;
+    /* heterogeneous per-RE variance: saddlepoint threshold (units of the mean noise), inflated by the F factor of an estimated reference */
+    const double infl = het && nu > 0 ? gcrit(kT, nu) / gcrit(kT, 0) : 1.0;
+    const bool snr_ok = het ? pwr[p] / npw > sp_crit(hkind, hpar, n_ant, tot[p]) * infl : pwr[p] / (npw * thT) > gcrit(kT, nu);
+    bool res_ok = true;
+    if (!sparse && !window) {
+      const int cn = cnt[p][best[p]];
+      const double kR = dm ? n_ant * dmm->kR : (double)n_ant * (cn - 2) * eta, thR = dm ? dmm->thR : 1.0 / eta;
+      res_ok = het ? sse[p] / npw <= sp_crit(hkind, hpar, n_ant, cn) * (cn - 2.0) / cn * infl : sse[p] / (npw * thR) <= gcrit(kR, nu);
+    }
     if (snr_ok && res_ok) {
       q->valid_mask[p >> 3] |= (uint8_t)(1u << (p & 7));
       snr[nv] = s;
@@ -357,7 +564,7 @@ void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int
     q->snr_db_p10 = pick(snr, nv, 1, 10);
     q->snr_db_p50 = pick(snr, nv, 1, 2);
     float m = pick(res, nv, 1, 2);
-    q->resid_db = sparse ? NAN : 10.0f * log10f(m > 1e-12f ? m : 1e-12f);
+    q->resid_db = sparse || window ? NAN : 10.0f * log10f(m > 1e-12f ? m : 1e-12f);
   }
 
   /* symbol consistency: two most populated symbols, over shared k, per-antenna complex correlation */

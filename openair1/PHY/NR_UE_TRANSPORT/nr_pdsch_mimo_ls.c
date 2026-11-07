@@ -46,7 +46,7 @@ static int inv(int nl, const cd g[NR_MIMO_LS_MAX_NL][NR_MIMO_LS_MAX_NL], cd out[
   return 0;
 }
 
-int nr_pdsch_mimo_ls_window(int n, int nl, int nant, const int16_t *x, const int16_t *y, size_t ystride, float *h, double *resid)
+static int window_ex(int n, int nl, int nant, const int16_t *x, const int16_t *y, size_t ystride, float *h, double *resid, double *gdiag)
 {
   if (n < nl || nl < 1 || nl > NR_MIMO_LS_MAX_NL || nant < 1 || nant > NR_MIMO_LS_MAX_ANT) return -1;
   cd g[NR_MIMO_LS_MAX_NL][NR_MIMO_LS_MAX_NL] = {{{0}}}, gi[NR_MIMO_LS_MAX_NL][NR_MIMO_LS_MAX_NL];
@@ -97,7 +97,13 @@ int nr_pdsch_mimo_ls_window(int n, int nl, int nant, const int16_t *x, const int
       h[2 * (l * nant + a) + 1] = (float)hh[l][a].i;
     }
   *resid = res;
+  if (gdiag)
+    for (int l = 0; l < nl; l++) gdiag[l] = gi[l][l].r; /* noise gain of layer l: var(h_l) = sigma_y^2 * (G^-1)_ll */
   return 0;
+}
+int nr_pdsch_mimo_ls_window(int n, int nl, int nant, const int16_t *x, const int16_t *y, size_t ystride, float *h, double *resid)
+{
+  return window_ex(n, nl, nant, x, y, ystride, h, resid, NULL);
 }
 
 typedef struct {
@@ -109,7 +115,7 @@ typedef struct {
 /* One sweep of width W over every run of data REs. `step` > 1 evaluates every step-th window only (the flatness ladder samples;
  * the final pass is complete). Output rows are written when out_h != NULL. */
 static void sweep(int nre, int nl, int nant, const int16_t *x, const uint32_t *k, const uint32_t *sym, const int16_t *y, size_t ystride,
-                  int W, int step, int out_cap, size_t out_stride, float *out_h, uint32_t *out_k, uint32_t *out_sym, uint16_t *out_raw,
+                  int W, int step, int out_cap, size_t out_stride, float *out_h, uint32_t *out_k, uint32_t *out_sym, uint16_t *out_raw, float *out_nv,
                   pass_t *p)
 {
   memset(p, 0, sizeof(*p));
@@ -122,9 +128,9 @@ static void sweep(int nre, int nl, int nant, const int16_t *x, const uint32_t *k
       if (!out_h && (widx % step)) continue;
       const int s = i + w * W, n = (w == nwin - 1) ? len - w * W : W;
       float h[2 * NR_MIMO_LS_MAX_NL * NR_MIMO_LS_MAX_ANT];
-      double res;
+      double res, gd[NR_MIMO_LS_MAX_NL];
       /* gathered y planes for the window: nr_pdsch_mimo_ls_window takes plane stride, so offset the base */
-      if (nr_pdsch_mimo_ls_window(n, nl, nant, x + 2 * (size_t)s * nl, y + 2 * (size_t)s, ystride, h, &res) != 0) {
+      if (window_ex(n, nl, nant, x + 2 * (size_t)s * nl, y + 2 * (size_t)s, ystride, h, &res, gd) != 0) {
         p->skipped++;
         continue;
       }
@@ -146,15 +152,17 @@ static void sweep(int nre, int nl, int nant, const int16_t *x, const uint32_t *k
         out_k[o] = k[s + (n - 1) / 2];
         out_sym[o] = sym[s];
         out_raw[o] = (uint16_t)n;
+        if (out_nv) /* the layer's per-RE noise variance in H scale: LS residual per complex dof (unbiased) x the layer's noise gain */
+          for (int l = 0; l < nl; l++) out_nv[(size_t)l * out_stride + o] = (float)(res / ((double)nant * (n - nl)) * gd[l]);
       }
     }
     i = j;
   }
 }
 
-int nr_pdsch_mimo_ls_cfr(int nre, int nl, int nant, const int16_t *x, const uint32_t *k_abs, const uint32_t *sym, const int16_t *y,
-                         size_t ystride, int out_cap, size_t out_stride, float *out_h, uint32_t *out_k, uint32_t *out_sym,
-                         uint16_t *out_raw, nr_pdsch_mimo_ls_info_t *info)
+int nr_pdsch_mimo_ls_cfr_nv(int nre, int nl, int nant, const int16_t *x, const uint32_t *k_abs, const uint32_t *sym, const int16_t *y,
+                            size_t ystride, int out_cap, size_t out_stride, float *out_h, uint32_t *out_k, uint32_t *out_sym,
+                            uint16_t *out_raw, float *out_nv, nr_pdsch_mimo_ls_info_t *info)
 {
   if (info) memset(info, 0, sizeof(*info));
   if (nre < 2 * nl || nl < 1 || nl > NR_MIMO_LS_MAX_NL || nant < 1 || nant > NR_MIMO_LS_MAX_ANT) return 0;
@@ -163,14 +171,14 @@ int nr_pdsch_mimo_ls_cfr(int nre, int nl, int nant, const int16_t *x, const uint
   const int W0 = 2 * nl;
   const int step0 = (nre / W0 + 63) / 64;
   pass_t p0;
-  sweep(nre, nl, nant, x, k_abs, sym, y, ystride, W0, step0 > 0 ? step0 : 1, 0, 0, NULL, NULL, NULL, NULL, &p0);
+  sweep(nre, nl, nant, x, k_abs, sym, y, ystride, W0, step0 > 0 ? step0 : 1, 0, 0, NULL, NULL, NULL, NULL, NULL, &p0);
   int W = W0;
   if (p0.used > 0 && p0.dof > 0) {
     const double r0 = p0.resid / p0.dof;
     for (int cand = 2 * W0; cand <= NR_MIMO_LS_MAX_WIN; cand *= 2) {
       pass_t pc;
       const int stepc = (nre / cand + 63) / 64;
-      sweep(nre, nl, nant, x, k_abs, sym, y, ystride, cand, stepc > 0 ? stepc : 1, 0, 0, NULL, NULL, NULL, NULL, &pc);
+      sweep(nre, nl, nant, x, k_abs, sym, y, ystride, cand, stepc > 0 ? stepc : 1, 0, 0, NULL, NULL, NULL, NULL, NULL, &pc);
       if (pc.used == 0 || pc.dof <= 0) break;
       const double rc = pc.resid / pc.dof;
       const double tol = 1.0 + 3.0 / sqrt(p0.dof) + 3.0 / sqrt(pc.dof);
@@ -180,11 +188,18 @@ int nr_pdsch_mimo_ls_cfr(int nre, int nl, int nant, const int16_t *x, const uint
     }
   }
   pass_t pf;
-  sweep(nre, nl, nant, x, k_abs, sym, y, ystride, W, 1, out_cap, out_stride, out_h, out_k, out_sym, out_raw, &pf);
+  sweep(nre, nl, nant, x, k_abs, sym, y, ystride, W, 1, out_cap, out_stride, out_h, out_k, out_sym, out_raw, out_nv, &pf);
   if (info) {
     info->win = W;
     info->n_windows = pf.written;
     info->n_skipped = pf.skipped;
   }
   return pf.written;
+}
+
+int nr_pdsch_mimo_ls_cfr(int nre, int nl, int nant, const int16_t *x, const uint32_t *k_abs, const uint32_t *sym, const int16_t *y,
+                         size_t ystride, int out_cap, size_t out_stride, float *out_h, uint32_t *out_k, uint32_t *out_sym,
+                         uint16_t *out_raw, nr_pdsch_mimo_ls_info_t *info)
+{
+  return nr_pdsch_mimo_ls_cfr_nv(nre, nl, nant, x, k_abs, sym, y, ystride, out_cap, out_stride, out_h, out_k, out_sym, out_raw, NULL, info);
 }

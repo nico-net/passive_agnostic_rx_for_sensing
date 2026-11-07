@@ -199,17 +199,29 @@ static bool write_item(int fd, const void *buf, size_t len)
 }
 /* ---- S3 writer-side CFR quality (SENSING mode only) ---- */
 /* Quality of one packed frame, read in place from the ring slot (little-endian layout of push_cfr: header, k u16[keep], l u8[keep], pad to 4, iq). */
+static __thread uint16_t tl_q_hint;
+void nr_sense_quality_hint(uint16_t hint) { tl_q_hint=hint; }
 static void frame_quality(const uint8_t *p, nr_sense_quality_t *q, bool *ok)
 {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
   uint32_t keep; float noise;
   memcpy(&keep,p+20,4); memcpy(&noise,p+36,4);
   const int n_ant=p[17];
+  uint16_t hint; memcpy(&hint,p+18,2);
+  unsigned fl=0;
+  switch (p[16]) {
+    case NR_SENSE_SRC_CSIRS: fl=NR_SENSE_Q_SPARSE; break;
+    case NR_SENSE_SRC_PDSCH_DMRS: fl=NR_SENSE_Q_DMRS_INTERP|((hint&1)?NR_SENSE_Q_DMRS_T2:0u); break;
+    case NR_SENSE_SRC_PDSCH_DATA: fl=NR_SENSE_Q_DATA_AIDED|NR_SENSE_Q_QM(2*((hint>>2)&15))|((hint&2)?(NR_SENSE_Q_WINDOW|((unsigned)(hint>>8)<<16)):0u); break;
+    case NR_SENSE_SRC_PUSCH_DATA: fl=NR_SENSE_Q_UL_DELAY|NR_SENSE_Q_DATA_AIDED|NR_SENSE_Q_QM(2*((hint>>2)&15)); break;
+    case NR_SENSE_SRC_SRS: case NR_SENSE_SRC_PUSCH_DMRS: fl=NR_SENSE_Q_UL_DELAY; break;
+    default: break;
+  }
   if (!keep || n_ant<1) { *ok=false; return; }
   const uint16_t *k=(const uint16_t *)(p+FRAME_HEADER);
   const uint8_t *l=p+FRAME_HEADER+2*(size_t)keep;
   const float *iq=(const float *)(p+((FRAME_HEADER+3*(size_t)keep+3)&~(size_t)3));
-  nr_sense_quality_compute_ex(n_ant,iq,(int)keep,(int)keep,k,l,noise,p[16]==NR_SENSE_SRC_CSIRS?NR_SENSE_Q_SPARSE:p[16]==NR_SENSE_SRC_PDSCH_DMRS?NR_SENSE_Q_DMRS_INTERP:(p[16]==NR_SENSE_SRC_SRS||p[16]==NR_SENSE_SRC_PUSCH_DMRS||p[16]==NR_SENSE_SRC_PUSCH_DATA)?NR_SENSE_Q_UL_DELAY:0u,q);
+  nr_sense_quality_compute_ex(n_ant,iq,(int)keep,(int)keep,k,l,noise,fl,q);
   *ok=true;
 #else
   (void)p; (void)q; *ok=false;
@@ -318,6 +330,7 @@ static void *run_writer(void *arg)
         const uint64_t t_q=nr_sense_now_ns();
         memcpy(&fid[fn],p+8,8);
         frame_quality(p,&fq[fn],&fok[fn]);
+        { uint8_t *w=(uint8_t *)p; w[18]=w[19]=0; } /* the hint is in-process only: the written frame keeps its reserved bytes 0 */
         fcost[fn]=(uint32_t)(nr_sense_now_ns()-t_q);
         nr_sense_cost_add(NR_SENSE_COST_REC,(nr_sense_src_t)(p[16]<NR_SENSE_SRC_COUNT?p[16]:0),nr_sense_now_ns()-t_q);
         fn++;
@@ -487,6 +500,7 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
                          const void *k_abs, const void *l_sym, bool wide, uint64_t abs_slot, float slot_frac,
                          float noise_var, uint32_t epoch, uint32_t identity_gen, bool *truncated)
 {
+  const uint16_t hint_in=nr_isac_mode()==NR_ISAC_MODE_SENSING?tl_q_hint:0; tl_q_hint=0; /* the hint belongs to this push only */
   if (truncated) *truncated=false;
   if (!nr_sense_enabled()) { if (atomic_load(&closed_seen)) atomic_fetch_add(&s_after_close,1); return 0; }
   if (src<0 || src>=NR_SENSE_SRC_COUNT || n_ant<1 || n_ant>frame_ant || n_re<1 || ant_stride<n_re || !iq || !k_abs || !l_sym) {
@@ -508,7 +522,7 @@ static uint64_t push_cfr(nr_sense_src_t src, int n_ant, const float *iq, int ant
   const uint64_t t_pack=nr_sense_now_ns();
   uint8_t *p=frames+(size_t)at*frame_stride;
   memcpy(p,"NRCF",4); put16(p+4,NR_SENSE_CFR_VERSION); put16(p+6,FRAME_HEADER);
-  p[16]=(uint8_t)src; p[17]=(uint8_t)n_ant; put16(p+18,0); put32(p+20,keep); put64(p+24,abs_slot);
+  p[16]=(uint8_t)src; p[17]=(uint8_t)n_ant; put16(p+18,hint_in); put32(p+20,keep); put64(p+24,abs_slot);
   putf(p+32,slot_frac); putf(p+36,noise_var); put32(p+40,epoch); put32(p+44,identity_gen);
   size_t off=FRAME_HEADER;
   if (wide) { for(uint32_t i=0;i<keep;i++) {

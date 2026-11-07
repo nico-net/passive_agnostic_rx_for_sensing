@@ -36,6 +36,9 @@ typedef struct nr_sense_rs_meta_s {
   /* Multi-layer PDSCH data-aided CFR (one frame per layer): layer_idx1 = 1-based layer of this frame, n_layers = rank of the grant.
    * 0 = not a per-layer frame; the JSON keys are then absent (records of single-layer sources are unchanged). */
   int layer_idx1, n_layers;
+  /* quality hints from the producer (sensing mode; not printed): qm = modulation order of a data-aided grant (0 unknown), win_het = eta of the layer's LS-window rows (0 = not a window record) */
+  uint8_t qm;
+  float win_het;
   bool ta_applied_valid;
   int prach_preamble;
   float prach_energy, prach_delay;
