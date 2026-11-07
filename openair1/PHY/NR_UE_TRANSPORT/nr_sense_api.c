@@ -255,12 +255,20 @@ static int job_quality(rs_job_t *job, bool may_wait, uint32_t *qcost)
 static void *run_writer(void *arg)
 {
   nr_cell_bind((int)(intptr_t)arg); /* the writer serves the cell that opened the session (nr_core_plan_create has no cell argument) */
-  bool last_frame=false;
+  bool last_frame=false, warm_more=true;
+  unsigned warm_cur=0;
   for (;;) {
     pthread_mutex_lock(&mu);
     while (((frame_count == 0 && record_count == 0) || atomic_load(&pause_writer) ||
-            (atomic_load(&writer_limit) && atomic_load(&written_items)>=atomic_load(&writer_limit))) && !stopping)
+            (atomic_load(&writer_limit) && atomic_load(&written_items)>=atomic_load(&writer_limit))) && !stopping) {
+      if (warm_more && frame_count == 0 && record_count == 0 && nr_isac_mode()==NR_ISAC_MODE_SENSING) {
+        /* idle: build one production threshold-cache key (<= ~4 ms) here instead of on demand in the middle of a CFR burst, where a cold build stalls the writer past the 32-frame ring (nr_sense_quality_warm_step) */
+        const uint32_t na=frame_ant;
+        pthread_mutex_unlock(&mu); warm_more=nr_sense_quality_warm_step((int)na,&warm_cur); pthread_mutex_lock(&mu);
+        continue;
+      }
       pthread_cond_wait(&cv, &mu);
+    }
     if (stopping && frame_count == 0 && record_count == 0) { pthread_mutex_unlock(&mu); break; }
     /* an RS job whose frame has not been through the writer yet takes the frame stream first (its quality is computed there) */
     bool need_frame=false;

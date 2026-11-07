@@ -1315,3 +1315,54 @@ TEST(SenseQualityRound3, ThresholdCachesDoNotThrashOverTheProductionKeySet)
   printf("ADAPT sp cache: %zu production keys, %llu lookups after warm-up, %llu misses\n", keys.size(), (unsigned long long)(c1 - c0), (unsigned long long)(m1 - m0));
   EXPECT_EQ(m1 - m0, 0u);
 }
+
+/* D1 (CFR ring drops): the writer's idle warm-up builds the production sp keys with the same function as the on-demand path: after the steps, the production lookups all hit and return the on-demand values */
+TEST(SenseQualityDrop, WarmUpBuildsTheProductionKeysBitIdentically)
+{
+  const std::array<int, 5> probe[] = {{1, 1, 4, 1, 1}, {1, 64, 4, 17, 1}, {1, 255, 4, 30, 1}, {0, 4, 4, 6, 1}, {0, 6, 4, 72, 1}, {0, 8, 4, 168, 1}, {0, 8, 4, 12, 0}, {0, 6, 4, 10, 1}};
+  nr_sense_quality_test_reset_caches();
+  double ref[8];
+  for (int i = 0; i < 8; i++) ref[i] = nr_sense_quality_sp_crit(probe[i][0], probe[i][1], probe[i][2], probe[i][3], probe[i][4]);
+  nr_sense_quality_test_reset_caches();
+  unsigned cur = 0, steps = 0;
+  while (nr_sense_quality_warm_step(4, &cur)) steps++;
+  steps++; /* the last call also built a key */
+  uint64_t c0, m0, c1, m1;
+  nr_sense_quality_sp_stats(&c0, &m0);
+  EXPECT_EQ(m0, steps); /* every step is exactly one build */
+  EXPECT_EQ(steps, 22u * 30u + 3u * 178u);
+  for (int i = 0; i < 8; i++) EXPECT_EQ(ref[i], nr_sense_quality_sp_crit(probe[i][0], probe[i][1], probe[i][2], probe[i][3], probe[i][4])) << i;
+  nr_sense_quality_sp_stats(&c1, &m1);
+  EXPECT_EQ(m1, m0); /* all hits */
+  unsigned c2 = 0;
+  EXPECT_EQ(nr_sense_quality_warm_step(4, &c2) , 1); /* a second warm on a warm cache: no new build */
+  nr_sense_quality_sp_stats(&c1, &m1);
+  EXPECT_EQ(m1, m0);
+  unsigned c3 = 0;
+  EXPECT_EQ(nr_sense_quality_warm_step(0, &c3), 0); /* no antennas: nothing */
+}
+/* D2: cost pin of the hot data-aided shapes after the warm-up: no table build on the stream (the frames that stalled the writer for 2-5 ms, starving the ring during a CSI-RS burst, were cold builds) */
+TEST(SenseQualityDrop, HotShapeCostAfterWarmUp)
+{
+  nr_sense_quality_test_reset_caches();
+  unsigned cur = 0;
+  while (nr_sense_quality_warm_step(4, &cur)) {}
+  Rng r(900);
+  uint64_t c0, m0, c1, m1;
+  nr_sense_quality_sp_stats(&c0, &m0);
+  std::vector<double> us;
+  for (int i = 0; i < 160; i++) {
+    const int qm = 2 * (2 + i % 3); /* 16/64/256QAM */
+    Cfr c = da_rec(51 + int(r.g() % 223), 3 + int(r.g() % 12), qm, 8.f, false, 4, r);
+    nr_sense_quality_t q;
+    auto a = std::chrono::steady_clock::now();
+    nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 1.f, NR_SENSE_Q_DATA_AIDED | NR_SENSE_Q_QM(qm), &q);
+    us.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
+  }
+  nr_sense_quality_sp_stats(&c1, &m1);
+  std::sort(us.begin(), us.end());
+  double mean = 0; for (double x : us) mean += x / us.size();
+  printf("COST hot data-aided shapes after warm-up (160 records, 51..273 PRB, 4 ant): mean %.0f us, p90 %.0f us, worst %.0f us, sp misses %llu\n", mean, us[us.size() * 9 / 10], us.back(), (unsigned long long)(m1 - m0));
+  EXPECT_EQ(m1 - m0, 0u);
+  EXPECT_LT(us.back(), 2000.0); /* a cold build is 2-5 ms; 273 PRB x 4 ant x 168 RE steady costs ~0.4 ms: 5x margin for a loaded host */
+}

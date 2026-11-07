@@ -74,6 +74,7 @@ double nr_sense_quality_dmrs_rho_model(int dmrs_type); /* the operator's value: 
 void nr_sense_quality_gcrit_stats(uint64_t *calls, uint64_t *misses); /* test hook: this thread's Gamma/F threshold-cache lookups and misses */
 void nr_sense_quality_sp_stats(uint64_t *calls, uint64_t *misses);    /* test hook: this thread's heterogeneous-noise (Laplace inversion) threshold-cache lookups and misses */
 void nr_sense_quality_test_reset_caches(void);                        /* test hook (not a flag): empties this thread's threshold caches and counters, so a test can run truly cold */
+int nr_sense_quality_warm_step(int n_ant, unsigned *cursor);                 /* builds one production threshold-cache key on this thread (idle-time warm-up); 1 while keys remain */
 double nr_sense_quality_sp_crit(int kind, int par, int na, int N, int upper); /* test hooks: the production threshold of a key (kind 0 QAM order par, kind 1 window eta par/255) ... */
 double nr_sense_quality_sp_tail(int kind, int par, int na, int N, double t, int M); /* ... and the tail at t (M = 0: the production choice of the inversion order) */
 #define NR_SENSE_SPARSE_SYM_MIN 0.5f /* general bound (half the coherent amplitude), not tuned on any cell */

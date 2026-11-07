@@ -274,6 +274,25 @@ static double sp_crit(int kind, int par, int na, int N, int upper)
   return e->x;
 }
 double nr_sense_quality_sp_crit(int kind, int par, int na, int N, int upper) { return sp_crit(kind, par, na, N, upper); }
+/* Idle-time warm-up of this thread's heterogeneous-noise threshold cache over the production key set (the I3 test set: window eta grid x RE-per-row 1..30 for n_ant antennas, QAM orders 16/64/256 x RE
+ * counts 1..168 (SNR test: 14 symbols x 12) and 3..12 (residual test)). A cold key costs up to ~4 ms on the writer thread, and several in one frame stall it past the CFR frame ring (32 frames) during the first minutes of a run: the writer calls one
+ * step whenever it has nothing queued, so a key is built off the critical path by the very function that would build it on demand (the cached value is bit-identical). Returns 1 while keys remain. */
+int nr_sense_quality_warm_step(int n_ant, unsigned *cursor)
+{
+  const int eta[] = {1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 25, 32, 40, 50, 64, 80, 100, 128, 160, 200, 255};
+  const unsigned n_eta = sizeof eta / sizeof *eta, n_win = n_eta * 30u, n_qam = 3u * (168u + 10u);
+  if (n_ant < 1) return 0;
+  if (n_ant > 8) n_ant = 8; /* QMAXANT, defined below */
+  const unsigned i = (*cursor)++;
+  if (i < n_win) sp_crit(1, eta[i / 30u], n_ant, (int)(i % 30u) + 1, 1);
+  else if (i < n_win + n_qam) {
+    const unsigned j = (i - n_win) % 178u, q = (i - n_win) / 178u;
+    const int qm = 4 + 2 * (int)q;
+    if (j < 168) sp_crit(0, qm, n_ant, (int)j + 1, 1); /* SNR test: N = REs of the PRB (any count: DM-RS and CSI-RS holes) */
+    else sp_crit(0, qm, n_ant, 3 + (int)(j - 168), 0); /* residual test: N = REs of the PRB's fit symbol (3..12) */
+  } else return 0;
+  return i + 1 < n_win + n_qam;
+}
 double nr_sense_quality_sp_tail(int kind, int par, int na, int N, double t, int M)
 {
   sdist_t d;
