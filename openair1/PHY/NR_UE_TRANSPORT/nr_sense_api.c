@@ -209,7 +209,7 @@ static void frame_quality(const uint8_t *p, nr_sense_quality_t *q, bool *ok)
   const uint16_t *k=(const uint16_t *)(p+FRAME_HEADER);
   const uint8_t *l=p+FRAME_HEADER+2*(size_t)keep;
   const float *iq=(const float *)(p+((FRAME_HEADER+3*(size_t)keep+3)&~(size_t)3));
-  nr_sense_quality_compute_ex(n_ant,iq,(int)keep,(int)keep,k,l,noise,p[16]==NR_SENSE_SRC_CSIRS?NR_SENSE_Q_SPARSE:(p[16]==NR_SENSE_SRC_SRS||p[16]==NR_SENSE_SRC_PUSCH_DMRS||p[16]==NR_SENSE_SRC_PUSCH_DATA)?NR_SENSE_Q_UL_DELAY:0u,q);
+  nr_sense_quality_compute_ex(n_ant,iq,(int)keep,(int)keep,k,l,noise,p[16]==NR_SENSE_SRC_CSIRS?NR_SENSE_Q_SPARSE:p[16]==NR_SENSE_SRC_PDSCH_DMRS?NR_SENSE_Q_DMRS_INTERP:(p[16]==NR_SENSE_SRC_SRS||p[16]==NR_SENSE_SRC_PUSCH_DMRS||p[16]==NR_SENSE_SRC_PUSCH_DATA)?NR_SENSE_Q_UL_DELAY:0u,q);
   *ok=true;
 #else
   (void)p; (void)q; *ok=false;
@@ -232,7 +232,7 @@ static int job_quality(rs_job_t *job, bool may_wait, uint32_t *qcost)
   if (r && m->q_valid) {
     if (m->recon_valid) { q.recon_conf=m->q.recon_conf; nr_sense_quality_apply_recon(&q,m->recon_prb_ok); }
     m->inval_on=false;
-    if ((job->src==NR_SENSE_SRC_PDSCH_DMRS || job->src==NR_SENSE_SRC_PDSCH_DATA) && m->nb_rb>=128) { /* sensing mode only (want_q): why a wide record lost PRBs; counts, changes no rule */
+    if ((job->src==NR_SENSE_SRC_PDSCH_DMRS || job->src==NR_SENSE_SRC_PDSCH_DATA) && m->nb_rb>=nr_isac_sense_min_prb()) { /* sensing mode only (want_q): why a wide record lost PRBs; counts, changes no rule */
       m->inval_on=nr_sense_quality_absent(&q,m->nb_rb,m->truncated,m->tb_cb_total>0)>0;
       nr_sense_wbq_note(&q);
     }

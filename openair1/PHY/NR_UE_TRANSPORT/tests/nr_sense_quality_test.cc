@@ -180,8 +180,12 @@ TEST(SenseQuality, SnrGateAt6And1Db)
    * >= 3 sigma from those (6 dB valid >= 125 is 6 sigma; p50 +-0.5 is 8 sigma; 1 dB <= 4 is 5.7 sigma). */
   EXPECT_GE(q6.valid_cfr_prbs, 125);
   EXPECT_NEAR(q6.snr_db_p50, 6.f, 0.5f);
+  /* The fixed 3 dB bar is gone: a PRB of 12 REs x 4 antennas is valid when its power sum is above the noise-only 1e-3 tail (about -3 dB SNR), so 1 dB now passes and the
+   * rejection point moved down (SenseQualityAdaptive.SnrBarFallsWithNp measures it). Well below the bar nothing passes. */
   auto q1 = run(make(128, [](int) { return 1.f; }, 1.f), 1.f);
-  EXPECT_LE(q1.valid_cfr_prbs, 4); /* the old (S+N)/N SNR reads 3.5 dB here and passes ~40 */
+  EXPECT_GE(q1.valid_cfr_prbs, 120);
+  auto qm = run(make(128, [](int) { return -10.f; }, 1.f), 1.f);
+  EXPECT_LE(qm.valid_cfr_prbs, 4);
 }
 TEST(SenseQuality, NonZeroFirstPrbMaskOffset)
 {
@@ -649,4 +653,181 @@ TEST(SenseQuality, CleanWideRecordHasNothingRemoved)
   nr_sense_quality_t q = run(c, 1.f);
   EXPECT_EQ(nr_sense_quality_absent(&q, 140, false, false), 0);
   EXPECT_EQ(q.valid_cfr_prbs, 140);
+}
+
+
+/* ---- adaptive per-PRB tests (one false-reject level NR_SENSE_PRB_ALPHA = 1e-3, noise from the record) ---- */
+namespace {
+struct Rng {
+  std::mt19937_64 g;
+  explicit Rng(unsigned s) : g(s) {}
+  float n() { double u1 = ((g() >> 11) + 1) * (1.0 / 9007199254740993.0), u2 = (g() >> 11) * (1.0 / 9007199254740992.0); return float(std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2)); }
+  cf c() { return cf(n(), n()) * float(std::sqrt(0.5)); } /* unit-variance complex */
+};
+/* the estimator's noise path, simulated independently of nr_sense_quality.c: pilot-pair LS noise (variance 2 per pair mean => s2_p = 2 here, pair mean variance 1) per 4-subcarrier block, then the
+ * chest's 16-tap filters (nr_dl_channel_estimation.c TYPE1_linear_interp, UL filters /16384) written at the advancing offset; returns the per-subcarrier noise of nprb PRBs, unit gain. */
+std::vector<cf> interp_noise(int nprb, Rng &r, const std::vector<cf> &sig)
+{
+  const int ns = nprb * 12, cnt = ns / 2;
+  std::vector<cf> ls(nprb * 3);
+  for (int b = 0; b < nprb * 3; b++) ls[b] = r.c() + sig[b * 4]; /* LS value of block b: signal at its first subcarrier + noise */
+  std::vector<cf> y(ns + 16, cf(0, 0));
+  const float p0[16] = {.25f, .25f, .25f, .25f, .25f, .25f, .25f, .25f}, p12[16] = {.25f, .25f, .25f, .25f, .125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f},
+              mid[16] = {.125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f, .125f}, last[16] = {.25f, .25f, .25f, .25f, .5f, .5f, .5f, .5f};
+  int ptr = 0;
+  for (int c = 0; c < cnt; c++) {
+    const float *f = c == 0 ? p0 : (c == 1 || c == 2) ? p12 : c == cnt - 1 ? last : mid;
+    for (int t = 0; t < 16; t++) y[ptr + t] += f[t] * ls[c / 2];
+    if (c > 2 && c != cnt - 1 && c % 2 == 0) ptr += 4;
+  }
+  y.resize(ns);
+  return y;
+}
+/* white-noise records: n_sym symbols x 12 REs (full grid) or 6-RE comb; flat channel of power snr over noise 1 */
+Cfr white_rec(int nprb, int nsym, bool comb, float snr_db, int n_ant, Rng &r, int start_sym = 2)
+{
+  Cfr c; c.n_ant = n_ant;
+  for (int s = 0; s < nsym; s++) for (int p = 0; p < nprb; p++) for (int i = 0; i < (comb ? 6 : 12); i++) { c.k.push_back(12 * p + (comb ? 2 * i : i)); c.l.push_back(start_sym + s); }
+  c.n_re = c.k.size(); c.iq.resize(2 * n_ant * c.n_re);
+  const float a = std::sqrt(std::pow(10.f, snr_db / 10.f));
+  for (int ant = 0; ant < n_ant; ant++) for (int i = 0; i < c.n_re; i++) { cf h = cf(a, 0) * std::polar(1.f, 0.9f * ant) + r.c(); c.iq[2 * (ant * c.n_re + i)] = h.real(); c.iq[2 * (ant * c.n_re + i) + 1] = h.imag(); }
+  return c;
+}
+/* DM-RS decoder-estimate record: comb of the interpolated chest, one symbol, flat channel (unit-gain filters keep it flat) */
+Cfr dmrs_rec(int nprb, float snr_db, int n_ant, Rng &r, float a_scale = 1.f)
+{
+  Cfr c; c.n_ant = n_ant;
+  for (int p = 0; p < nprb; p++) for (int i = 0; i < 6; i++) { c.k.push_back(12 * p + 2 * i); c.l.push_back(3); }
+  c.n_re = c.k.size(); c.iq.resize(2 * n_ant * c.n_re);
+  const float a = a_scale * std::sqrt(std::pow(10.f, snr_db / 10.f) * 0.109375f); /* H noise var of the type-1 chest is 0.109375 s2_p; s2_p = 2 here -> 0.21875: scale the signal to snr over THAT */
+  (void)a;
+  const float amp = std::sqrt(std::pow(10.f, snr_db / 10.f) * 0.21875f) * a_scale;
+  for (int ant = 0; ant < n_ant; ant++) {
+    std::vector<cf> sig(nprb * 12, std::polar(amp, 0.9f * ant));
+    std::vector<cf> y = interp_noise(nprb, r, sig);
+    for (int i = 0; i < c.n_re; i++) { c.iq[2 * (ant * c.n_re + i)] = y[c.k[i]].real(); c.iq[2 * (ant * c.n_re + i) + 1] = y[c.k[i]].imag(); }
+  }
+  return c;
+}
+int count_valid_inner(const nr_sense_quality_t &q, int lo, int hi) { int n = 0; for (int p = lo; p < hi; p++) n += bit(q, p); return n; }
+}
+
+TEST(SenseQualityAdaptive, DmrsOperatorMatchesIndependentDerivation)
+{
+  double m[5];
+  nr_sense_quality_dmrs_model(m); /* kT, thT, kR, thR, E[S]/s2 per antenna; python derivation of the same filter chain (interior PRB, type 1) */
+  EXPECT_NEAR(m[0], 1.3653, 1e-3);
+  EXPECT_NEAR(m[0] * m[1], 6.0, 1e-9); /* E[T] = 6 s2 */
+  EXPECT_NEAR(m[2], 1.9672, 1e-3);
+  EXPECT_NEAR(m[4], 0.16874, 1e-4);
+  EXPECT_NEAR(m[2] * m[3], m[4], 1e-9);
+  printf("DMRS_MODEL kT=%.4f thT=%.4f kR=%.4f thR=%.5f mR=%.5f\n", m[0], m[1], m[2], m[3], m[4]);
+}
+/* (i) noise only: PRBs declared valid at ~alpha. White with the exact Gamma: inside binomial bounds. */
+TEST(SenseQualityAdaptive, WhiteNoiseOnlyValidAtAlpha)
+{
+  Rng r(11);
+  long valid = 0, tot = 0;
+  for (int rec = 0; rec < 1100; rec++) {
+    Cfr c = white_rec(100, 2, true, -300.f, 4, r);
+    valid += run(c, 1.f).valid_cfr_prbs; tot += 100;
+  }
+  const double a = 1e-3, mean = a * tot, sd = std::sqrt(tot * a * (1 - a));
+  printf("ADAPT white noise-only valid %ld / %ld (alpha*N = %.0f)\n", valid, tot, mean);
+  EXPECT_GT(tot, 100000);
+  EXPECT_LT(std::fabs(valid - mean), 4 * sd);
+}
+/* (i) with the noise taken from the record (median reference) the rate stays within a factor 2 of alpha */
+TEST(SenseQualityAdaptive, WhiteNoiseOnlyMedianReference)
+{
+  Rng r(12);
+  long valid = 0, tot = 0;
+  for (int rec = 0; rec < 1100; rec++) { Cfr c = white_rec(100, 2, true, -300.f, 4, r); valid += run(c, 0.f).valid_cfr_prbs; tot += 100; }
+  printf("ADAPT white noise-only valid (median ref) %ld / %ld\n", valid, tot);
+  EXPECT_LT(valid, 2.0 * 1e-3 * tot);
+}
+TEST(SenseQualityAdaptive, DmrsInterpolatedNoiseOnlyValidAtAlpha)
+{
+  Rng r(13);
+  long valid = 0, tot = 0;
+  for (int rec = 0; rec < 1300; rec++) {
+    Cfr c = dmrs_rec(100, -300.f, 4, r);
+    nr_sense_quality_t q; nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 5.f /* ignored */, NR_SENSE_Q_DMRS_INTERP, &q);
+    valid += count_valid_inner(q, 3, 97); tot += 94;
+  }
+  printf("ADAPT dmrs-interp noise-only valid %ld / %ld (alpha*N = %.0f)\n", valid, tot, 1e-3 * tot);
+  EXPECT_GT(tot, 100000);
+  EXPECT_LT(valid, 3.0 * 1e-3 * tot); /* Satterthwaite tail approximation: bounded within a factor 3 of alpha */
+  EXPECT_GT(valid, 0.2 * 1e-3 * tot);
+}
+/* (ii) signal + noise, model fits: the residual test rejects at ~alpha */
+TEST(SenseQualityAdaptive, ResidualRejectsAtAlphaWhenModelFits)
+{
+  Rng r(14);
+  long rej = 0, tot = 0;
+  for (int rec = 0; rec < 1100; rec++) { Cfr c = white_rec(100, 2, true, 15.f, 4, r); auto q = run(c, 1.f); rej += q.inval[NR_SENSE_INV_RESID]; tot += 100; }
+  printf("ADAPT white resid rejects %ld / %ld\n", rej, tot);
+  EXPECT_LT(std::fabs(rej - 1e-3 * tot), 4 * std::sqrt(1e-3 * tot));
+  rej = 0; tot = 0;
+  for (int rec = 0; rec < 1300; rec++) {
+    Cfr c = dmrs_rec(100, 15.f, 4, r);
+    nr_sense_quality_t q; nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), NAN, NR_SENSE_Q_DMRS_INTERP, &q);
+    rej += q.inval[NR_SENSE_INV_RESID]; tot += 100;
+  }
+  printf("ADAPT dmrs resid rejects %ld / %ld\n", rej, tot);
+  EXPECT_LT(rej, 3.0 * 1e-3 * tot);
+}
+/* 2. another user's REs in one PRB at SNR 10 dB are rejected by the residual test */
+TEST(SenseQualityAdaptive, PlantedInterfererRejectedByResidual)
+{
+  Rng r(15);
+  int hit = 0, others_bad = 0;
+  for (int rec = 0; rec < 50; rec++) {
+    Cfr c = white_rec(60, 2, true, 10.f, 4, r);
+    for (int i = 0; i < c.n_re; i++) if (c.k[i] / 12 == 25 && (c.k[i] % 12) == 6) for (int a = 0; a < 4; a++) { c.iq[2 * (a * c.n_re + i)] += 12.f; c.iq[2 * (a * c.n_re + i) + 1] -= 7.f; }
+    for (float nv : {1.f, 0.f}) {
+      auto q = run(c, nv);
+      hit += !bit(q, 25) && q.inval[NR_SENSE_INV_RESID] >= 1;
+      others_bad += 59 - (q.valid_cfr_prbs - bit(q, 25));
+    }
+  }
+  EXPECT_EQ(hit, 100);
+  EXPECT_LE(others_bad, 15); /* 5900 other PRBs at alpha 1e-3 = 5.9 expected, plus the median reference's own spread (nv = 0 arm) */
+}
+/* 3. the SNR bar falls as N_p grows: first SNR (0.25 dB steps) where half the PRBs pass */
+static double bar50(bool dmrs, Rng &r)
+{
+  for (double s = -12; s < 12; s += 0.25) {
+    int ok = 0, n = 0;
+    for (int rec = 0; rec < 20; rec++) {
+      Cfr c = dmrs ? dmrs_rec(50, (float)s, 4, r) : white_rec(50, 13, false, (float)s, 4, r);
+      nr_sense_quality_t q;
+      if (dmrs) nr_sense_quality_compute_ex(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), NAN, NR_SENSE_Q_DMRS_INTERP, &q);
+      else nr_sense_quality_compute(c.n_ant, c.iq.data(), c.n_re, c.n_re, c.k.data(), c.l.data(), 1.f, &q);
+      ok += count_valid_inner(q, 3, 47); n += 44;
+    }
+    if (ok * 2 >= n) return s;
+  }
+  return 99;
+}
+TEST(SenseQualityAdaptive, SnrBarFallsWithNp)
+{
+  Rng r(16);
+  const double dm = bar50(true, r), da = bar50(false, r);
+  printf("ADAPT SNR bar (50%% pass) dm-rs PRB (6 RE) %.2f dB, data PRB (156 RE) %.2f dB\n", dm, da);
+  EXPECT_LT(da, dm - 3.0);
+}
+/* 4. one PRB with 20 dB extra noise leaves the other PRBs' verdicts unchanged and is itself rejected */
+TEST(SenseQualityAdaptive, MedianReferenceIgnoresOneBadPrb)
+{
+  Rng r(17);
+  for (int rec = 0; rec < 20; rec++) {
+    Cfr c = white_rec(60, 2, true, 12.f, 4, r);
+    auto base = run(c, 0.f);
+    Rng r2(1000 + rec);
+    for (int i = 0; i < c.n_re; i++) if (c.k[i] / 12 == 30) for (int a = 0; a < 4; a++) { cf x = 10.f * r2.c(); c.iq[2 * (a * c.n_re + i)] += x.real(); c.iq[2 * (a * c.n_re + i) + 1] += x.imag(); }
+    auto bad = run(c, 0.f);
+    EXPECT_FALSE(bit(bad, 30));
+    for (int p = 0; p < 60; p++) if (p != 30) EXPECT_EQ(bit(bad, p), bit(base, p)) << p;
+  }
 }

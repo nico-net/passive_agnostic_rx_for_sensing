@@ -6,7 +6,7 @@ static nr_isac_mode_t g_mode = NR_ISAC_MODE_LEGACY; /* written once at init, bef
 nr_isac_mode_t nr_isac_mode(void) { return g_mode; }
 void nr_isac_mode_set(nr_isac_mode_t m) { g_mode = m; }
 
-#define SENSE_MIN_PRB_DEFAULT 128
+#define SENSE_MIN_PRB_DEFAULT 51
 static int g_min_prb = SENSE_MIN_PRB_DEFAULT; /* written once at init */
 int nr_isac_sense_min_prb(void) { return g_min_prb; }
 bool nr_isac_sense_min_prb_set(int v)

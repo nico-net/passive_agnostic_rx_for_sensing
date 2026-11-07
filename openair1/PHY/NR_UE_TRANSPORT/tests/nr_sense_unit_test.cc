@@ -19,11 +19,12 @@ class Unit : public ::testing::Test {
   void SetUp() override
   {
     nr_isac_mode_set(NR_ISAC_MODE_SENSING);
+    nr_isac_sense_min_prb_set(128); /* these tests were written for wide = 128 (the former default, still a valid explicit value) */
     nr_cell_bind(0);
     nr_sense_unit_test_seam(nullptr);
     for (int c = 0; c < 3; c++) nr_sense_unit_reset(c);
   }
-  void TearDown() override { nr_isac_mode_set(NR_ISAC_MODE_LEGACY); nr_cell_bind(0); }
+  void TearDown() override { nr_isac_mode_set(NR_ISAC_MODE_LEGACY); nr_isac_sense_min_prb_set(51); nr_cell_bind(0); }
   static int snap(int cell, uint64_t now, nr_sense_unit_view_t *v) { return nr_sense_unit_snapshot_at(cell, now, v, 256); }
 };
 
@@ -761,4 +762,18 @@ TEST_F(Unit, WbqCountsRulesOfShortWideRecords)
   EXPECT_EQ(w.hit[NR_SENSE_INV_RECON], 2u); EXPECT_EQ(w.first[NR_SENSE_INV_RECON], 1u); EXPECT_EQ(w.prbs[NR_SENSE_INV_RECON], 13u);
   EXPECT_EQ(w.hit[NR_SENSE_INV_RESID], 0u);
   nr_sense_wbq_stats(1, &w); EXPECT_EQ(w.wide, 0u); // per cell
+}
+/* short = below the CONFIGURED sense_min_prb (default 51), not a fixed 128 */
+TEST_F(Unit, WbqShortFollowsConfiguredMinPrb)
+{
+  ASSERT_TRUE(nr_isac_sense_min_prb_set(51)); /* the default */
+  nr_sense_quality_t q{};
+  q.valid_cfr_prbs = 60; q.inval[NR_SENSE_INV_SNR] = 5; nr_sense_wbq_note(&q); /* >= 51: not short */
+  nr_sense_wbq_stats_t w; nr_sense_wbq_stats(0, &w);
+  EXPECT_EQ(w.shorts, 0u);
+  ASSERT_TRUE(nr_isac_sense_min_prb_set(64));
+  nr_sense_wbq_note(&q); /* 60 < 64: short */
+  nr_sense_wbq_stats(0, &w);
+  EXPECT_EQ(w.shorts, 1u); EXPECT_EQ(w.wide, 2u);
+  nr_isac_sense_min_prb_set(51);
 }

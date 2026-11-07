@@ -68,7 +68,7 @@ void nr_sense_wbg_cfr(uint16_t valid_prbs, uint64_t t_ns);
 void nr_sense_wbg_refund(void);
 void nr_sense_wbg_wasted(uint64_t cpu_ns);
 /* offered_wbg_overcap: wide grants offered by a cell at or beyond NR_SENSE_CELLS (no scheduler decision, hence no rate, hence no tap), per cell, in stats.overcap. NR_SENSE_CELLS is not raised. */
-/* Valid-PRB bookkeeping of wide (nb_rb >= 128) PDSCH records, writer thread (its cell), after nr_sense_quality_absent. wide = records, short = those with valid_cfr_prbs < 128 (sense_min_prb);
+/* Valid-PRB bookkeeping of wide (nb_rb >= sense_min_prb) PDSCH records, writer thread (its cell), after nr_sense_quality_absent. wide = records, short = those with valid_cfr_prbs < sense_min_prb;
  * over the short ones: hit[r] = records where rule r removed >= 1 PRB, first[r] = records whose first rule (enum order) was r, prbs[r] = PRBs removed by r. Cumulative. */
 void nr_sense_wbq_note(const nr_sense_quality_t *q);
 typedef struct { uint64_t wide, shorts, hit[NR_SENSE_INV_N], first[NR_SENSE_INV_N], prbs[NR_SENSE_INV_N]; } nr_sense_wbq_stats_t;

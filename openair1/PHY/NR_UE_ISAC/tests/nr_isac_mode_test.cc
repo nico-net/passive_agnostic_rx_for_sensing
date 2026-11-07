@@ -73,7 +73,7 @@ TEST(IsacMode, SensingDefaults)
                            | bit(NR_ISAC_SRC_PUSCH_DMRS) | bit(NR_ISAC_SRC_SRS)); // no PRACH unless explicit
   EXPECT_EQ(o.pdsch_decode, 2);
   EXPECT_EQ(o.pusch_decode, 1);
-  EXPECT_EQ(o.min_prb, 128);
+  EXPECT_EQ(o.min_prb, 51);
   EXPECT_FALSE(o.narrowed);
 }
 
@@ -107,14 +107,14 @@ TEST(IsacMode, SensingNarrowedByExplicitSources)
 
 TEST(IsacMode, MinPrbKey)
 {
-  EXPECT_EQ(nr_isac_sense_min_prb(), 128);
+  EXPECT_EQ(nr_isac_sense_min_prb(), 51);
   EXPECT_TRUE(nr_isac_sense_min_prb_set(64));
   EXPECT_EQ(nr_isac_sense_min_prb(), 64);
   EXPECT_FALSE(nr_isac_sense_min_prb_set(0));
-  EXPECT_EQ(nr_isac_sense_min_prb(), 128);
+  EXPECT_EQ(nr_isac_sense_min_prb(), 51);
   EXPECT_TRUE(nr_isac_sense_min_prb_set(64));
   EXPECT_FALSE(nr_isac_sense_min_prb_set(-5));
-  EXPECT_EQ(nr_isac_sense_min_prb(), 128);
+  EXPECT_EQ(nr_isac_sense_min_prb(), 51);
 }
 
 TEST(IsacMode, ContinuityKeys)

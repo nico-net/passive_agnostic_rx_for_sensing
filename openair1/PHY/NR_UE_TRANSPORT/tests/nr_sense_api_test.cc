@@ -346,7 +346,7 @@ TEST_F(QRing, QualityMatchesComputeAndWideU32Path)
   nr_isac_mode_set(NR_ISAC_MODE_SENSING);
   open(4);
   nr_sense_quality_t want, got;
-  nr_sense_quality_compute(1,iq.data(),(int)k.size(),(int)k.size(),k.data(),l.data(),1.f,&want);
+  nr_sense_quality_compute_ex(1,iq.data(),(int)k.size(),(int)k.size(),k.data(),l.data(),1.f,NR_SENSE_Q_DMRS_INTERP,&want); /* push() is PDSCH_DMRS */
   const uint64_t a=push(1);
   ASSERT_TRUE(wait_q(a,&got));
   EXPECT_EQ(memcmp(got.valid_mask,want.valid_mask,sizeof want.valid_mask),0);
@@ -356,6 +356,7 @@ TEST_F(QRing, QualityMatchesComputeAndWideU32Path)
   std::vector<uint32_t> k32(k.begin(),k.end()), l32(l.begin(),l.end());   /* the u32 entry point (data-aided / nr_isac) */
   const uint64_t b=nr_sense_push_cfr_u32(NR_SENSE_SRC_PDSCH_DATA,1,iq.data(),(int)k.size(),(int)k.size(),k32.data(),l32.data(),2,0,1.f,0,0,nullptr);
   ASSERT_TRUE(wait_q(b,&got));
+  nr_sense_quality_compute(1,iq.data(),(int)k.size(),(int)k.size(),k.data(),l.data(),1.f,&want); /* PDSCH_DATA: plain flags */
   EXPECT_EQ(memcmp(got.valid_mask,want.valid_mask,sizeof want.valid_mask),0);
   EXPECT_EQ(got.valid_cfr_prbs,want.valid_cfr_prbs);
   EXPECT_EQ(got.snr_db_p50,want.snr_db_p50);
@@ -471,7 +472,7 @@ TEST_F(QRing, SrsQualityWithTimingRamp)
       for (int i = 0; i < nk; i++) {
         std::complex<float> x;
         if ((i - 1) % comb == 0) x = e[i];
-        else { int a0 = i - ((i - 1) % comb + comb) % comb, a1 = a0 + comb; if (a1 >= nk) a1 = a0; x = 0.5f * (e[a0] + e[a1]); }
+        else { int a0 = i - ((i - 1) % comb + comb) % comb, a1 = a0 + comb; if (a1 >= nk) a1 = a0; if (a0 < 0) a0 = a1; /* (the first RE had a0 = -1: an out-of-range read the 3 dB bar hid; the noise-based residual test shows it) */ x = 0.5f * (e[a0] + e[a1]); }
         const double ph = 2 * M_PI * ta * (12 * first + i) / 4096.0;
         x *= std::complex<float>(cosf(ph), sinf(ph));
         v[2 * ((size_t)a * nk + i)] = x.real(); v[2 * ((size_t)a * nk + i) + 1] = x.imag();
@@ -481,7 +482,7 @@ TEST_F(QRing, SrsQualityWithTimingRamp)
     const uint64_t id = nr_sense_push_cfr(NR_SENSE_SRC_SRS, nant, v.data(), nk, nk, kk.data(), ll.data(), 7, 0.857f, nv, 0, 0, nullptr);
     ASSERT_NE(id, 0u);
     ASSERT_TRUE(wait_q(id, &q));
-    SCOPED_TRACE(testing::Message() << "comb " << comb << " snr " << snr << " ta " << ta);
+    SCOPED_TRACE(testing::Message() << "comb " << comb << " snr " << snr << " ta " << ta << " inval snr/resid " << q.inval[NR_SENSE_INV_SNR] << "/" << q.inval[NR_SENSE_INV_RESID]);
     EXPECT_EQ(q.first_prb, first);
     EXPECT_EQ(q.allocated_prbs, nprb);
     if (snr >= 12) EXPECT_EQ(q.valid_cfr_prbs, nprb);
@@ -502,7 +503,9 @@ TEST_F(QRing, SrsQualityWithTimingRamp)
     nr_sense_quality_t q;
     const uint64_t id = nr_sense_push_cfr(NR_SENSE_SRC_SRS, nant, v.data(), nk, nk, kk.data(), ll.data(), 8, 0.857f, nv, 0, 0, nullptr);
     ASSERT_TRUE(wait_q(id, &q));
-    EXPECT_EQ(q.valid_cfr_prbs, 0) << "snr " << snr;
+    /* no signal: nothing valid. 0 dB over 12 REs x 4 antennas is far above the noise-only 1e-3 tail, so it is valid now (the fixed 3 dB bar would have refused it) */
+    if (snr < -50) EXPECT_EQ(q.valid_cfr_prbs, 0) << "snr " << snr;
+    else EXPECT_GE(q.valid_cfr_prbs, 36) << "snr " << snr;
   }
 }
 
@@ -544,9 +547,9 @@ TEST_F(QRing, UlSourcesQualityWithTimingRamp)
     ASSERT_TRUE(wait_q(id, &q));
     SCOPED_TRACE(testing::Message() << pt.name << " src " << src << " snr " << snr << " ta " << ta);
     EXPECT_EQ(q.first_prb, first);
-    if (snr >= 12) { EXPECT_EQ(q.valid_cfr_prbs, nprb); EXPECT_NEAR(q.snr_db_p50, snr, 2.5); }
+    if (snr >= 12) { EXPECT_GE(q.valid_cfr_prbs, nprb - 1) << "alpha 1e-3 per PRB over ~3600 PRBs of this sweep: one false reject is expected now and then"; EXPECT_NEAR(q.snr_db_p50, snr, 2.5); }
     else if (snr >= 6) EXPECT_GE(q.valid_cfr_prbs, nprb / 2) << "6 dB is 3 dB above the threshold";
-    else if (snr <= 0) EXPECT_LE(q.valid_cfr_prbs, nprb / 8) << "at 0 dB (3 dB under the threshold) only fluctuations pass (noise-only: nr_ul_noise_only_test.cc, 0 of 1e5 PRBs)";
+    /* (was: at 0 dB at most nprb/8 valid, from the fixed 3 dB bar; the alpha-level detection test passes PRBs with enough REs well below that, see SenseQualityAdaptive.SnrBarFallsWithNp) */
     EXPECT_EQ(q.delay_step, 1) << "ramp estimated";
 
   }

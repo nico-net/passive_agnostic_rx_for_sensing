@@ -520,7 +520,7 @@ struct S3Sink {
     nr_sense_cfg_t cfg{}; cfg.records_path=rec; cfg.cfr_path=cfr; cfg.rec_ring_slots=16; cfg.cfr_ring_frames=ring; cfg.cfr_max_re=4096;
     EXPECT_EQ(nr_sense_open(&cfg),0);
   }
-  ~S3Sink() { nr_sense_test_pause_writer(false); nr_sense_close(); nr_isac_mode_set(NR_ISAC_MODE_LEGACY); nr_isac_sense_min_prb_set(128); unlink(rec); unlink(cfr); }
+  ~S3Sink() { nr_sense_test_pause_writer(false); nr_sense_close(); nr_isac_mode_set(NR_ISAC_MODE_LEGACY); nr_isac_sense_min_prb_set(51); unlink(rec); unlink(cfr); }
 };
 /* captured from nr_sense_rs_to_json BEFORE the S3 change (pre-S3 binary), same meta */
 /* UL and SSB goldens: current formatter output with q_valid=false; that path is textually the pre-S3 code (git diff 5f6733d34d shows only the dir ternary, since reverted, and the appended q_valid block) */
@@ -567,7 +567,7 @@ TEST(SenseRecordsS3, QualityKeysInSensingMode)
   nr_isac_mode_set(NR_ISAC_MODE_SENSING);
   nr_isac_sense_min_prb_set(10);
   nr_sense_quality_t want; /* the S2 function on the same input is the reference for the numbers */
-  nr_sense_quality_compute(c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),1.f,&want);
+  nr_sense_quality_compute_ex(c.n_ant,c.iq.data(),c.n_re,c.n_re,c.k.data(),c.l.data(),1.f,NR_SENSE_Q_DMRS_INTERP,&want); /* the writer's flag for PDSCH_DMRS */
   ASSERT_EQ(want.valid_cfr_prbs,20);
   S3Sink sink;
   nr_sense_rs_meta_t dl=s3_meta(0x1234,7); dl.prg_valid=true; dl.prg_size=2;

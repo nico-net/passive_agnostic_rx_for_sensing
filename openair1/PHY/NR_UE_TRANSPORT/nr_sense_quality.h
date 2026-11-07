@@ -6,13 +6,13 @@
 extern "C" {
 #endif
 #define NR_SENSE_MAX_PRB 275
-/* Provisional (spec §9.1): set only from general principles or sens6 lab references, never from DEIB/OTA cells. */
-#define NR_SENSE_PRB_SNR_MIN_DB 3.0f
-#define NR_SENSE_PRB_RESID_MAX 0.25f
 /* Spec 4(d), data-aided only: a PRB fails the reconstruction check when its symbol agreement is SIGNIFICANTLY BELOW the agreement expected from the
  * record's own SNR and Qm (one-sided exact binomial tail < alpha, nr_pdsch_da_recon.h). alpha is a false-reject bound, not a calibrated level;
  * there is no absolute agreement threshold. */
 #define NR_SENSE_PRB_RECON_ALPHA 1e-3
+/* Per-PRB validity tests (nr_sense_quality.c) have ONE false-reject level, the reconstruction check's: no threshold is set on any cell. SNR test: the PRB's power sum is
+ * significantly above what noise alone gives (upper tail < alpha); residual test: the affine-fit residual is NOT significantly above what noise alone leaves (upper tail >= alpha). */
+#define NR_SENSE_PRB_ALPHA NR_SENSE_PRB_RECON_ALPHA
 /* Floor on the expected symbol DISagreement (expected agreement <= 1 - 1e-3): a general implementation-loss bound (transmitter EVM, phase noise,
  * ADC quantisation and interference put an effective SNR ceiling of ~30 dB on any receiver; 1e-3 is the order of the symbol error rate that
  * ceiling gives for the densest constellations (~256QAM at 30 dB; QPSK and 16QAM are far below it, so there the floor is a conservative bound), NOT tuned on any cell. Without it a high-SNR PRB with one real mismatch would fail. */
@@ -21,6 +21,8 @@ extern "C" {
  * PRBs of the grant (nb_rb) that have no RE in the frame. TRUNC: the frame was cut at cfr_max_re; PARTIAL: data-aided partial TB (invalid REs left out); ABSENT: any other (e.g. REs not exported). */
 enum { NR_SENSE_INV_TRUNC, NR_SENSE_INV_PARTIAL, NR_SENSE_INV_ABSENT, NR_SENSE_INV_FEW_RE, NR_SENSE_INV_NOSIG, NR_SENSE_INV_SNR, NR_SENSE_INV_RESID, NR_SENSE_INV_SYM, NR_SENSE_INV_RECON, NR_SENSE_INV_N };
 const char *nr_sense_inv_name(int rule);
+/* DM-RS interpolation noise model, per antenna: {kT, thT, kR, thR, E[S]/s2} (Gamma shape and scale of the PRB power sum and of the affine-fit residual, units of the per-RE noise variance). Test hook. */
+void nr_sense_quality_dmrs_model(double out[5]);
 typedef struct {
   uint16_t inval[NR_SENSE_INV_N]; /* PRBs removed per rule (diagnostic only; no rule or threshold depends on it) */
   uint16_t allocated_prbs, estimated_usable_prbs, valid_cfr_prbs;
@@ -42,13 +44,17 @@ typedef struct {
  * O(n_ant * n_re). Every computation is per PRB: nothing fits/smooths/correlates across a PRG boundary. At most 8
  * antennas are used. */
 /* Sparse sources (CSI-RS: 1 RE per PRB, one or few symbols; DM-RS of a precoded PDSCH/PUSCH is NOT sparse in this sense): a PRB is valid with >= 1 RE when the producer's noise estimate
- * (derived from the frame itself, three equally spaced PRBs' second difference; the producer's noise_var only stands when the frame has no such triple) gives SNR >= NR_SENSE_PRB_SNR_MIN_DB; no local fit, no residual (resid_db NAN). With >= 2 symbols sharing subcarriers the record's symbol consistency
+ * (derived from the frame itself, three equally spaced PRBs' second difference; the producer's noise_var only stands when the frame has no such triple) passes the SNR test (NR_SENSE_PRB_ALPHA); no local fit, no residual (resid_db NAN). With >= 2 symbols sharing subcarriers the record's symbol consistency
  * must reach NR_SENSE_SPARSE_SYM_MIN, else the record has no valid PRB. */
 #define NR_SENSE_Q_SPARSE 1u
 /* UL source whose H is expressed in the DL frame (SRS, PUSCH DM-RS, PUSCH data): the common timing-advance phase ramp is removed before the per-PRB local fit (see nr_sense_quality.c). Dense sources only. */
 /* ORDER ASSUMPTION: the REs of a symbol are consecutive and k ascending (symbol-major, as the SRS, PUSCH DM-RS and PUSCH data producers write them); a record in another order
  * gets no derotation (delay_step 2, counted in sense_ul_delay_skip) and is then judged by the plain rule: never more valid, only fewer. */
 #define NR_SENSE_Q_UL_DELAY 2u
+/* Decoder-estimate PDSCH DM-RS (src PDSCH_DMRS, comb-2 H of the linear-interpolation chest): its noise is correlated across the PRB's 6 REs and the producer's nvar (the LS-pair residual) is NOT in
+ * H scale (3.3x the H noise for type 1, 1.75x for type 2), so the noise comes from the record's median fit residual and the chi-square degrees of freedom from the interpolation operator
+ * (nr_sense_quality.c; DM-RS type 1 operator, the type is not carried by the frame). Set by the frame reader for that source only. */
+#define NR_SENSE_Q_DMRS_INTERP 4u
 #define NR_SENSE_SPARSE_SYM_MIN 0.5f /* general bound (half the coherent amplitude), not tuned on any cell */
 void nr_sense_quality_compute_ex(int n_ant, const float *iq, int ant_stride, int n_re, const uint16_t *k_abs,
                                  const uint8_t *l_sym, float noise_var, unsigned flags, nr_sense_quality_t *q);
