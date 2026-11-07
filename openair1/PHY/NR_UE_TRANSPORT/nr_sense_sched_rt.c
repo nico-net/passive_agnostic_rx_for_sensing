@@ -377,7 +377,9 @@ void nr_sense_sched_start(void)
   atomic_store(&g_stop, 0);
   pthread_attr_t at;
   pthread_attr_init(&at);
-  pthread_attr_setstacksize(&at, 2u << 20);
+  /* 4 MB (was 2 MB): a thread's static TLS block lives in its stack, and the process's static TLS (nr-uesoftmodem PT_TLS 2.03-2.13 MB, mostly the data-aided / decode scratch of other modules) was within
+   * 70 KB of 2 MB; round 3 of the quality work crossed it and pthread_create failed ("SENSE_SCHED thread not started"). Virtual memory only: untouched pages are not committed. */
+  pthread_attr_setstacksize(&at, 4u << 20);
   struct sched_param sp = {.sched_priority = 0};
   pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED); /* SCHED_OTHER whatever the creator runs as ... */
   pthread_attr_setschedpolicy(&at, SCHED_OTHER);

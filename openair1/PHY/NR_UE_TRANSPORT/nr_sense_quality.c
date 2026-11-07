@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <complex.h>
 #define RHO_USED_T1 3.05 /* measured (test_nr_sense_chest_noise, 2026-11-07, DGX): rho 3.18-3.29, smallest one-sided 99 % lower bound 3.09 */
@@ -79,7 +80,10 @@ static double ftail(double a, double nu, double x) { return nu > 0 ? betai(nu, a
  *  upper = 0 (residual test: a smaller threshold rejects more): a rounded UP, nu rounded UP (nu > 4000 = exact), the bisection returns the end with tail > alpha.
  * The returned threshold is rescaled by a / a_grid. The bracket keeps tail(lo) > alpha > tail(hi) by construction. The cache is hashed on both keys and the direction. */
 typedef struct { float a, nu; double x; char up, used; } gce_t;
-static __thread gce_t g_gc[256][8]; /* 8-way set associative, 2048 entries (48 KB of thread-local storage) */
+/* 8-way set associative, 2048 entries (48 KB). HEAP, allocated once per thread on first use, NOT static TLS: every thread's static TLS block lives in its stack, and the scheduler thread's 2 MB stack
+ * (nr_sense_sched_rt.c) is already within ~100 KB of the whole TLS size of the process: a 98 KB static-TLS version of these caches made pthread_create fail ("SENSE_SCHED thread not started", found in the
+ * replay, not in any test). The first call of a thread allocates; a failed allocation computes without caching. */
+static __thread gce_t (*g_gc)[8];
 static __thread uint8_t g_gc_rr[256];
 static __thread uint64_t g_gc_calls, g_gc_miss;
 void nr_sense_quality_gcrit_stats(uint64_t *calls, uint64_t *misses) { *calls = g_gc_calls; *misses = g_gc_miss; }
@@ -96,7 +100,10 @@ static double gcrit(double a, double nu, int upper)
   }
   const uint32_t hs = (((uint32_t)(aq * 16.f) * 2654435761u) ^ (((uint32_t)(nq * 8.f) + 1u + (upper ? 7919u : 0u)) * 0x9E3779B1u)) >> 24;
   g_gc_calls++;
-  gce_t *set = g_gc[hs], *e = NULL;
+  if (!g_gc) g_gc = calloc(256, sizeof *g_gc);
+  gce_t scratch_set[8];
+  memset(scratch_set, 0, sizeof scratch_set);
+  gce_t *set = g_gc ? g_gc[hs] : scratch_set, *e = NULL;
   for (int w = 0; w < 8; w++)
     if (set[w].used && set[w].a == aq && set[w].nu == nq && set[w].up == (char)upper) { e = &set[w]; break; }
   if (!e) {
@@ -220,13 +227,15 @@ static double sp_tail(const sdist_t *d, int na, double N, double t)
 /* 16-way set associative, 4096 entries of 12 bytes (48 KB of thread-local storage): the production key set (window eta grid x rows x antennas, QAM orders x RE counts, both tests) is ~1.5k keys and
  * must not thrash (the direct-mapped 1024-entry table of round 2 put 26 % of the window keys in a shared slot); misses are counted (nr_sense_quality_sp_stats) and a test alternates the whole production set and asserts none after warm-up. */
 typedef struct { float x; uint16_t N; uint8_t kind, par, na, flags; } spe_t; /* flags: bit0 upper, bit1 used */
-static __thread spe_t g_sp[256][16];
+static __thread spe_t (*g_sp)[16]; /* heap, once per thread, see g_gc */
 static __thread uint8_t g_sp_rr[256];
 static __thread uint64_t g_sp_calls, g_sp_miss;
 void nr_sense_quality_sp_stats(uint64_t *calls, uint64_t *misses) { *calls = g_sp_calls; *misses = g_sp_miss; }
 void nr_sense_quality_test_reset_caches(void)
 {
-  memset(g_gc, 0, sizeof g_gc); memset(g_gc_rr, 0, sizeof g_gc_rr); memset(g_sp, 0, sizeof g_sp); memset(g_sp_rr, 0, sizeof g_sp_rr);
+  if (g_gc) memset(g_gc, 0, 256 * sizeof *g_gc);
+  if (g_sp) memset(g_sp, 0, 256 * sizeof *g_sp);
+  memset(g_gc_rr, 0, sizeof g_gc_rr); memset(g_sp_rr, 0, sizeof g_sp_rr);
   g_gc_calls = g_gc_miss = g_sp_calls = g_sp_miss = 0;
 }
 static void sp_law(int kind, int par, sdist_t *d)
@@ -238,7 +247,10 @@ static double sp_crit(int kind, int par, int na, int N, int upper)
 {
   const uint32_t hs = (((uint32_t)(kind * 1000003 + par * 7919 + na * 104729 + N * 3 + upper)) * 2654435761u) >> 24;
   g_sp_calls++;
-  spe_t *set = g_sp[hs], *e = NULL;
+  if (!g_sp) g_sp = calloc(256, sizeof *g_sp);
+  spe_t scratch_set[16];
+  memset(scratch_set, 0, sizeof scratch_set);
+  spe_t *set = g_sp ? g_sp[hs] : scratch_set, *e = NULL;
   const uint8_t fl = (uint8_t)(2 | (upper ? 1 : 0));
   for (int w = 0; w < 16; w++)
     if (set[w].flags == fl && set[w].kind == kind && set[w].par == par && set[w].na == na && set[w].N == N) { e = &set[w]; break; }

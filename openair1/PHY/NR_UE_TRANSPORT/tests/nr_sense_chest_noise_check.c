@@ -1,3 +1,4 @@
+#define _GNU_SOURCE /* dl_iterate_phdr (static-TLS guard below) */
 /* The real OAI DM-RS channel estimator (nr_pdsch_channel_estimation, chest_freq 0 = linear interpolation, CPU path, 1 RX, DM-RS type 1 and 2) fed with noise only, against the noise model of
  * nr_sense_quality.c (nr_sense_quality_dmrs_model / nr_sense_quality_dmrs_rho_model): on the exported comb-2 H of interior PRBs it checks the mean and relative variance of the affine-fit residual S, the
  * relative variance of the PRB power sum T, and the ratio of the chest's own nvar to the H noise variance (rho: the SNR reference of DM-RS records is nvar / rho).
@@ -300,6 +301,37 @@ static void check_rho_and_null(void)
     CHECK((double)n.prbs_valid / n.prbs_tot <= 3e-3, "type %d: noise-only valid rate %.2f alpha", type, (double)n.prbs_valid / n.prbs_tot / 1e-3);
   }
 }
+
+/* Static-TLS guard. Every thread's static TLS block lives in its own stack and the SENSE_SCHED thread is created with a 4 MB stack (nr_sense_sched_rt.c; it was 2 MB until round 3, when 98 KB of static TLS in
+ * the quality caches pushed nr-uesoftmodem's PT_TLS from 2.03 to 2.13 MB and pthread_create failed: "SENSE_SCHED thread not started", seen only in the replay). This executable links the same modules; the
+ * guard asserts that the process's static TLS (PT_TLS of every loaded object) leaves the scheduler thread 1.5 MB of its stack (the decision's candidate table is ~250 KB), and that a thread with the
+ * scheduler's stack can be created. */
+#include <link.h>
+#include <pthread.h>
+static int tls_cb(struct dl_phdr_info *info, size_t sz, void *data)
+{
+  (void)sz;
+  for (int i = 0; i < info->dlpi_phnum; i++)
+    if (info->dlpi_phdr[i].p_type == PT_TLS) *(size_t *)data += info->dlpi_phdr[i].p_memsz;
+  return 0;
+}
+static void *tls_probe(void *a) { (void)a; return (void *)1; }
+static void check_sched_thread_stack_fits_tls(void)
+{
+  size_t tls = 0;
+  dl_iterate_phdr(tls_cb, &tls);
+  printf("TLS static TLS of this process: %zu bytes (scheduler stack 4 MB)\n", tls);
+  CHECK(tls + (1536u << 10) <= (4u << 20), "static TLS %zu bytes leaves the 4 MB scheduler stack less than 1.5 MB", tls);
+  pthread_attr_t at;
+  pthread_attr_init(&at);
+  pthread_attr_setstacksize(&at, 4u << 20);
+  pthread_t th;
+  void *ret = NULL;
+  const int rc = pthread_create(&th, &at, tls_probe, NULL);
+  CHECK(rc == 0, "pthread_create with the scheduler's stack failed (%d)", rc);
+  if (rc == 0) pthread_join(th, &ret);
+  pthread_attr_destroy(&at);
+}
 int main(void)
 {
   char arg0[] = "test_nr_sense_chest_noise";
@@ -309,6 +341,7 @@ int main(void)
   set_glog(OAILOG_ERR);
   load_dftslib();
   srand(7);
+  check_sched_thread_stack_fits_tls();
   check_type(1, 51);
   check_type(2, 51);
   check_rho_and_null();

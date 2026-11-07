@@ -3368,10 +3368,10 @@ openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	310	nr_sense_inv_name::n	func_st
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	40	gcrit::cache	tls	struct {}[64]	TLS	CELLFEAT	per-thread cache of the gamma critical values of the quality tests (pure function of the shape)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	59	g_dm_once	file_static	pthread_once_t	PROCESS	CELLFEAT	pthread_once guard of g_dm
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_api.c	202	tl_q_hint	tls	uint16_t	TLS	CELLFEAT	per-thread quality hint set by the producer just before a CFR push and consumed (cleared) by that push
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	82	g_gc	tls	gce_t[256][8]	TLS	CELLFEAT	per-thread 8-way cache of the quality tests' Gamma/F critical values (pure function of shape and reference dof)
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	82	g_gc	tls	gce_t (*)[8]	TLS	CELLFEAT	per-thread pointer to a heap 8-way cache of the quality tests' Gamma/F critical values (pure function of shape and reference dof)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	76	g_gc_calls	tls	uint64_t	TLS	CELLFEAT	per-thread counter of critical-value lookups (test hook)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	76	g_gc_miss	tls	uint64_t	TLS	CELLFEAT	per-thread counter of critical-value cache misses (test hook)
-openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	223	g_sp	tls	spe_t[256][16]	TLS	CELLFEAT	per-thread 16-way cache of the Laplace-inversion thresholds of heterogeneous-noise records (4096 entries, 12 bytes)
+openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	223	g_sp	tls	spe_t (*)[16]	TLS	CELLFEAT	per-thread pointer to a heap 16-way cache of the Laplace-inversion thresholds of heterogeneous-noise records (4096 entries, 12 bytes; heap, not static TLS: see the TLS guard in test_nr_sense_chest_noise)
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	241	g_eta	file_static	double[5]	PROCESS	CELLFEAT	QAM noise-heterogeneity factors: computed once by pthread_once from the constellations, read-only afterwards, same for every cell
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	242	g_eta_once	file_static	pthread_once_t	PROCESS	CELLFEAT	pthread_once guard of g_eta
 openair1/PHY/NR_UE_TRANSPORT/nr_sense_quality.c	185	g_dm	file_static	dm_t[2]	PROCESS	CELLFEAT	DM-RS interpolation noise model constants (type 1 and 2): derived once by pthread_once from fixed filters, read-only afterwards, same for every cell
