@@ -1,0 +1,62 @@
+
+## 415
+| metric | BASE | NEW | NEW mean range vs BASE min-max (all 5 NEW runs) |
+|---|---|---|---|
+| wide dec/s | 17.182 (13.038-24.813) | 24.285 (18.166-32.008) | inside |
+| wide proven/s | 13.893 (10.159-20.431) | 18.942 (14.789-23.697) | inside |
+| dmrs v128 per wide grant | 0.520 (0.420-0.573) | 0.535 (0.510-0.554) | inside |
+| data v128 per wide grant | 0.607 (0.512-0.705) | 0.620 (0.521-0.738) | inside |
+| dmrs v128+data v128 per wide grant | 1.127 (1.023-1.273) | 1.154 (1.075-1.248) | inside |
+| scanq drop % (full+stale+epoch) | 0.246 (0.077-0.552) | 0.141 (0.031-0.239) | inside |
+| scanq full % | 0.159 (0.000-0.461) | 0.007 (0.000-0.013) | inside |
+| scanq stale % | 0.087 (0.060-0.110) | 0.134 (0.018-0.239) | inside |
+| pdschq full % | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| pdschq stale % | 0.363 (0.203-0.518) | 0.580 (0.480-0.737) | inside |
+| sense ring rec drop /1e6 recs | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| sense_cfr_drop (count) | 153.667 (98.000-192.000) | 88.333 (32.000-153.000) | inside |
+| DA async drop pdsch_data % of queued | 0.481 (0.080-1.004) | 1.441 (0.406-3.052) | inside |
+| DA async drop pdsch_dmrs (count) | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| records total (sense_rec_count) | 4551.201 (4398.149-4772.697) | 4963.828 (4458.387-5317.039) | inside |
+| lat wide p50 ms | 1.607 (1.496-1.713) | 1.662 (1.390-1.936) | inside |
+| lat wide p99 ms | 10.019 (8.567-12.868) | 19.319 (11.042-27.114) | inside |
+| lat all p50 ms | 0.744 (0.722-0.762) | 0.811 (0.742-0.934) | inside |
+| lat all p99 ms | 5.039 (4.159-6.466) | 6.792 (6.370-7.220) | inside |
+base cfr_est all dmrs recs (5 runs summed): {'decoder': 66594, 'decoder_seg': 33481, 'own': 103} | v128: {'decoder': 4631, 'decoder_seg': 1104, 'own': 37} | partial_tb dmrs recs 1616 of which v128 376
+base funnel proven wide (summed, 5 runs): {'v128': 6665, 'lt128': 2134} tot 8799
+fix cfr_est all dmrs recs (5 runs summed): {'decoder': 58104, 'decoder_seg': 42150, 'own': 388} | v128: {'decoder_seg': 1372, 'own': 200, 'decoder': 6685} | partial_tb dmrs recs 3714 of which v128 670
+fix funnel proven wide (summed, 5 runs): {'v128': 8894, 'lt128': 3060} tot 11954
+pdsch_data partial/whole per s: NEW 6.710 (2.778-14.152) 229.784 (151.201-298.960)
+tap totals NEW (last line per run):
+   qd_415D1 decoder_estimate=30878 own_fep_chest=123 | exact=19742 seg=11136 band=0 nodec=4 pass_noest=0 gw=0 single_branch=0 seg_cpu=119 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   qd_415D2 decoder_estimate=47786 own_fep_chest=215 | exact=26797 seg=20989 band=0 nodec=8 pass_noest=0 gw=0 single_branch=0 seg_cpu=207 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+   qd_415D3 decoder_estimate=20951 own_fep_chest=50 | exact=11172 seg=9779 band=0 nodec=3 pass_noest=0 gw=0 single_branch=0 seg_cpu=47 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0
+
+## 923
+| metric | BASE | NEW | NEW mean range vs BASE min-max (all 5 NEW runs) |
+|---|---|---|---|
+| wide dec/s | 6.455 (6.455-6.455) | 11.127 (11.127-11.127) | above |
+| wide proven/s | 1.717 (1.717-1.717) | 4.172 (4.172-4.172) | above |
+| dmrs v128 per wide grant | 0.773 (0.773-0.773) | 0.640 (0.640-0.640) | below |
+| data v128 per wide grant | 0.197 (0.197-0.197) | 0.492 (0.492-0.492) | above |
+| dmrs v128+data v128 per wide grant | 0.970 (0.970-0.970) | 1.132 (1.132-1.132) | above |
+| scanq drop % (full+stale+epoch) | 0.037 (0.037-0.037) | 1.027 (1.027-1.027) | above |
+| scanq full % | 0.000 (0.000-0.000) | 0.166 (0.166-0.166) | above |
+| scanq stale % | 0.037 (0.037-0.037) | 0.861 (0.861-0.861) | above |
+| pdschq full % | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| pdschq stale % | 0.337 (0.337-0.337) | 0.309 (0.309-0.309) | below |
+| sense ring rec drop /1e6 recs | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| sense_cfr_drop (count) | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| DA async drop pdsch_data % of queued | 0.786 (0.786-0.786) | 0.209 (0.209-0.209) | below |
+| DA async drop pdsch_dmrs (count) | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) | inside |
+| records total (sense_rec_count) | 2636.171 (2636.171-2636.171) | 3467.480 (3467.480-3467.480) | above |
+| lat wide p50 ms | 1.847 (1.847-1.847) | 1.912 (1.912-1.912) | above |
+| lat wide p99 ms | 9.102 (9.102-9.102) | 10.359 (10.359-10.359) | above |
+| lat all p50 ms | 0.700 (0.700-0.700) | 0.713 (0.713-0.713) | above |
+| lat all p99 ms | 3.198 (3.198-3.198) | 3.430 (3.430-3.430) | above |
+base cfr_est all dmrs recs (5 runs summed): {'decoder_seg': 7530, 'decoder': 35822, 'own': 624, 'decoder_band': 6} | v128: {'decoder_seg': 212, 'decoder': 800, 'own': 52} | partial_tb dmrs recs 308 of which v128 48
+base funnel proven wide (summed, 5 runs): {'v128': 325, 'lt128': 41} tot 366
+fix cfr_est all dmrs recs (5 runs summed): {'decoder': 47699, 'decoder_seg': 11948, 'own': 1409, 'decoder_band': 3} | v128: {'decoder': 1060, 'own': 76, 'decoder_seg': 374} | partial_tb dmrs recs 545 of which v128 116
+fix funnel proven wide (summed, 5 runs): {'lt128': 77, 'v128': 807} tot 884
+pdsch_data partial/whole per s: NEW 4.941 (4.941-4.941) 500.052 (500.052-500.052)
+tap totals NEW (last line per run):
+   qd_923D1 decoder_estimate=59592 own_fep_chest=1409 | exact=47641 seg=11948 band=3 nodec=106 pass_noest=0 gw=0 single_branch=0 seg_cpu=1303 buf=0 early=0 g_id=0 g_shape=0 g_width=0 g_sym=0 nvar0=0

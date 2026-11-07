@@ -1,0 +1,253 @@
+Excluded / flagged arms: []
+
+### cell 415 | BASE arms ['qd_415Q1', 'qd_415Q2', 'qd_415Q3'] | NEW arms ['qd_415D1', 'qd_415D2', 'qd_415D3']
+
+#### 1. headline: records/s with valid PRBs >= 51 / >= 128 (rate = count / rs-record span)
+| source/layers | BASE | NEW |
+|---|---|---|
+| pdsch_data/L2 v>=51 /s | 13.36 (7.52-16.65) | 19.80 (12.54-23.50) |
+| pdsch_data/L2 v>=128 /s | 7.34 (4.14-10.03) | 8.48 (6.72-11.65) |
+| pdsch_data/L3 v>=51 /s | 1.83 (0.01-4.31) | 7.42 (2.18-12.36) |
+| pdsch_data/L3 v>=128 /s | 1.47 (0.01-3.63) | 4.50 (1.11-6.48) |
+| pdsch_data/L4 v>=51 /s | 0.44 (0.02-0.78) | 1.98 (0.21-4.08) |
+| pdsch_data/L4 v>=128 /s | 0.32 (0.00-0.70) | 1.09 (0.11-2.97) |
+| pdsch_data/Lall v>=51 /s | 17.55 (14.10-21.88) | 30.30 (21.14-40.83) |
+| pdsch_data/Lall v>=128 /s | 10.05 (8.27-12.70) | 14.56 (13.40-16.69) |
+| pdsch_data/Lna v>=51 /s | 1.91 (0.72-3.52) | 1.10 (0.68-1.60) |
+| pdsch_data/Lna v>=128 /s | 0.92 (0.41-1.63) | 0.49 (0.30-0.64) |
+| pdsch_dmrs/L1 v>=51 /s | 2.66 (1.20-4.45) | 2.27 (1.77-2.79) |
+| pdsch_dmrs/L1 v>=128 /s | 1.78 (0.78-3.00) | 1.55 (1.18-1.83) |
+| pdsch_dmrs/L2 v>=51 /s | 8.96 (4.57-14.21) | 10.97 (7.87-12.94) |
+| pdsch_dmrs/L2 v>=128 /s | 6.16 (3.17-10.44) | 7.22 (5.12-8.73) |
+| pdsch_dmrs/L3 v>=51 /s | 1.26 (0.12-3.15) | 4.39 (1.86-7.21) |
+| pdsch_dmrs/L3 v>=128 /s | 0.85 (0.07-2.21) | 3.04 (1.19-5.16) |
+| pdsch_dmrs/L4 v>=51 /s | 0.37 (0.01-0.59) | 1.26 (0.11-3.42) |
+| pdsch_dmrs/L4 v>=128 /s | 0.27 (0.00-0.41) | 0.96 (0.08-2.63) |
+| pdsch_dmrs/Lall v>=51 /s | 13.35 (9.48-19.85) | 19.35 (14.01-25.73) |
+| pdsch_dmrs/Lall v>=128 /s | 9.12 (5.75-14.21) | 13.09 (9.27-17.72) |
+| pdsch_dmrs/Lna v>=51 /s | 0.09 (0.04-0.16) | 0.46 (0.17-0.76) |
+| pdsch_dmrs/Lna v>=128 /s | 0.06 (0.02-0.11) | 0.32 (0.11-0.51) |
+
+#### 1b. proven wide grants (CRC-ok or partial-TB proven) with a pdsch record of valid >= 51 / >= 128
+| allocation / record threshold | BASE | NEW |
+|---|---|---|
+| alloc51 grants proven (n/arm) | 4234 (3216-6045) | 6494 (4210-9247) |
+| alloc51: any pdsch record | 100.0 (100.0-100.0) | 100.0 (100.0-100.0) |
+| alloc51: record valid>=51 % | 80.3 (78.2-82.6) | 78.3 (69.5-82.8) |
+| alloc51: record valid>=128 % | 52.2 (44.8-57.7) | 48.0 (39.0-56.0) |
+| alloc128 grants proven (n/arm) | 2933 (2179-4276) | 3985 (3114-4970) |
+| alloc128: any pdsch record | 100.0 (100.0-100.0) | 100.0 (100.0-100.0) |
+| alloc128: record valid>=51 % | 88.5 (84.9-91.5) | 88.2 (87.0-89.5) |
+| alloc128: record valid>=128 % | 75.4 (70.4-79.2) | 74.7 (72.2-76.2) |
+
+#### 2. per-rule PRBs removed in wide records (records' inval; per 1000 records with nb_rb>=T) and SENSE_WBQ last line
+| item | BASE | NEW |
+|---|---|---|
+| inval pdsch_dmrs/nb128 records n/arm | 1959 (1272-3014) | 2799 (1983-3770) |
+| inval pdsch_dmrs/nb128 records with any removal % | 87.9 (77.4-96.7) | 89.9 (88.9-91.9) |
+| inval pdsch_dmrs/nb128 PRBs removed by absent /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb128 PRBs removed by da_partial /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb128 PRBs removed by recon /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb128 PRBs removed by resid /1000 rec | 5682 (4057-7623) | 4996 (4128-6274) |
+| inval pdsch_dmrs/nb128 PRBs removed by snr /1000 rec | 1710 (534-3333) | 1450 (390-2457) |
+| inval pdsch_data/nb128 records n/arm | 2294 (1938-2840) | 3312 (2930-3855) |
+| inval pdsch_data/nb128 records with any removal % | 27.1 (22.1-34.4) | 23.2 (13.2-32.8) |
+| inval pdsch_data/nb128 PRBs removed by absent /1000 rec | 1114 (145-2854) | 545 (0-971) |
+| inval pdsch_data/nb128 PRBs removed by da_partial /1000 rec | 484 (150-997) | 1542 (708-2286) |
+| inval pdsch_data/nb128 PRBs removed by recon /1000 rec | 232 (115-418) | 74 (65-87) |
+| inval pdsch_data/nb128 PRBs removed by resid /1000 rec | 4889 (1966-9040) | 3005 (1026-5943) |
+| inval pdsch_data/nb128 PRBs removed by snr /1000 rec | 4436 (3398-5125) | 5666 (2031-9941) |
+| inval pdsch_dmrs/nb51 records n/arm | 2847 (2074-4190) | 4106 (2959-5446) |
+| inval pdsch_dmrs/nb51 records with any removal % | 79.3 (70.6-84.2) | 80.4 (79.0-81.8) |
+| inval pdsch_dmrs/nb51 PRBs removed by absent /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb51 PRBs removed by da_partial /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb51 PRBs removed by recon /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb51 PRBs removed by resid /1000 rec | 4488 (3422-5639) | 3998 (3375-4884) |
+| inval pdsch_dmrs/nb51 PRBs removed by snr /1000 rec | 1523 (466-3047) | 1319 (413-2070) |
+| inval pdsch_data/nb51 records n/arm | 3838 (3168-4705) | 6573 (4539-8767) |
+| inval pdsch_data/nb51 records with any removal % | 24.9 (15.7-33.8) | 18.4 (12.8-21.9) |
+| inval pdsch_data/nb51 PRBs removed by absent /1000 rec | 649 (155-1555) | 299 (0-577) |
+| inval pdsch_data/nb51 PRBs removed by da_partial /1000 rec | 293 (116-561) | 782 (465-1028) |
+| inval pdsch_data/nb51 PRBs removed by recon /1000 rec | 191 (91-362) | 56 (46-73) |
+| inval pdsch_data/nb51 PRBs removed by resid /1000 rec | 4242 (1357-8515) | 2332 (633-4387) |
+| inval pdsch_data/nb51 PRBs removed by snr /1000 rec | 3082 (2573-3737) | 3278 (1631-5005) |
+| WBQ wide (limit: BASE 128 / NEW 51, NOT comparable) | 6658 (5422-8840) | 10667 (7496-14210) |
+| WBQ short (limit: BASE 128 / NEW 51, NOT comparable) | 138 (107-197) | 233 (97-353) |
+| WBQ prbs absent (hit/first) | 242 (160-294) | 703 (0-1174) |
+| WBQ prbs da_partial (hit/first) | 211 (84-400) | 927 (211-1749) |
+| WBQ prbs few_re (hit/first) | 0 (0-0) | 0 (0-0) |
+| WBQ prbs nosig (hit/first) | 0 (0-0) | 0 (0-0) |
+| WBQ prbs recon (hit/first) | 24 (12-39) | 35 (0-99) |
+| WBQ prbs resid (hit/first) | 7580 (2170-17553) | 9891 (2421-22635) |
+| WBQ prbs snr (hit/first) | 6070 (3293-7995) | 15389 (4737-25932) |
+| WBQ prbs sym (hit/first) | 0 (0-0) | 0 (0-0) |
+| WBQ prbs trunc (hit/first) | 0 (0-0) | 0 (0-0) |
+
+#### 3. median snr_db_p10 (dB), records with valid >= 51 (v51) / >= 128 (v128)
+| source | BASE | NEW |
+|---|---|---|
+| pdsch_dmrs/Lall v51 | 17.64 (15.42-21.40) | 17.48 (17.22-17.83) |
+| pdsch_dmrs/Lall v128 | 17.96 (15.77-22.10) | 17.42 (16.95-18.13) |
+| pdsch_data/Lall v51 | 12.19 (10.90-13.23) | 12.79 (12.04-13.24) |
+| pdsch_data/Lall v128 | 12.36 (10.56-13.50) | 12.60 (11.52-13.15) |
+
+#### 4. decode, drops, CPU
+| item | BASE | NEW |
+|---|---|---|
+| wide(>=128) grants decoded/s | 17.18 (13.04-24.81) | 24.28 (18.17-32.01) |
+| wide(>=128) CRC-ok/s | 12.75 (8.67-19.03) | 17.01 (13.71-21.01) |
+| wide(>=128) partial-TB proven/s | 1.15 (0.54-1.49) | 1.94 (1.08-2.68) |
+| wide(>=51) grants decoded/s | 26.87 (20.13-37.15) | 43.36 (24.90-70.55) |
+| wide(>=51) CRC-ok/s | 18.30 (13.63-26.88) | 26.60 (18.59-35.16) |
+| wide(>=51) partial-TB proven/s | 1.75 (0.82-2.42) | 4.28 (1.40-8.93) |
+| sense_rec_drop (record ring/writer) count | 0 (0-0) | 0 (0-0) |
+| sense_io_errors | 0 (0-0) | 0 (0-0) |
+| CFR ring full drops pdsch_dmrs (count) | 17 (4-41) | 2 (1-5) |
+| DA async drop pdsch_dmrs % of queued | 0.00 (0.00-0.00) | 0.00 (0.00-0.00) |
+| CFR ring full drops pdsch_data (count) | 19 (6-41) | 7 (0-19) |
+| DA async drop pdsch_data % of queued | 0.48 (0.08-1.00) | 1.44 (0.41-3.05) |
+| sense_cfr_drop total (count) | 154 (98-192) | 88 (32-153) |
+| scanq drop % (full/stale/epoch) | 0.25 (0.08-0.55) | 0.14 (0.03-0.24) |
+| scanq full % | 0.159 (0.000-0.461) | 0.007 (0.000-0.013) |
+| scanq stale % | 0.087 (0.060-0.110) | 0.134 (0.018-0.239) |
+| pdschq full % | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) |
+| pdschq stale % | 0.363 (0.203-0.518) | 0.580 (0.480-0.737) |
+| CPU cores | 7.26 (7.17-7.31) | 7.07 (6.82-7.40) |
+
+#### integrity per arm
+| arm | sched_fail | pthread | noqual pdsch_dmrs / cfr_drop | noqual pdsch_data / cfr_drop | noqual all sources | sync_losses |
+|---|---|---|---|---|---|---|
+| qd_415Q1 | 0 | 0 | 6 / 6 | 6 / 6 | {'ssb': 2, 'csirs': 84, 'pdsch_data': 6, 'pdsch_dmrs': 6, 'srs': 0, 'pusch_dmrs': 0, 'prach': 1} | 0 |
+| qd_415Q2 | 0 | 0 | 4 / 4 | 9 / 9 | {'ssb': 0, 'csirs': 173, 'pdsch_data': 9, 'pdsch_dmrs': 4, 'pusch_dmrs': 6, 'prach': 2} | 0 |
+| qd_415Q3 | 0 | 0 | 41 / 41 | 41 / 41 | {'ssb': 24, 'csirs': 63, 'pdsch_data': 41, 'pdsch_dmrs': 41, 'pusch_dmrs': 2, 'prach': 3, 'srs': 0} | 0 |
+| qd_415D1 | 0 | 0 | 1 / 1 | 1 / 1 | {'ssb': 0, 'pdsch_data': 1, 'csirs': 77, 'pdsch_dmrs': 1, 'pusch_dmrs': 1, 'srs': 0} | 0 |
+| qd_415D2 | 0 | 0 | 5 / 5 | 19 / 19 | {'ssb': 3, 'pdsch_data': 19, 'csirs': 121, 'pdsch_dmrs': 5, 'pusch_dmrs': 5, 'prach': 1, 'srs': 0} | 0 |
+| qd_415D3 | 0 | 0 | 1 / 1 | 0 / 0 | {'ssb': 0, 'csirs': 31, 'pdsch_data': 0, 'pdsch_dmrs': 1, 'pusch_dmrs': 0, 'prach': 2, 'srs': 0} | 0 |
+
+### cell 923 | BASE arms ['qd_923Q1'] | NEW arms ['qd_923D1']
+
+#### 1. headline: records/s with valid PRBs >= 51 / >= 128 (rate = count / rs-record span)
+| source/layers | BASE | NEW |
+|---|---|---|
+| pdsch_data/L2 v>=51 /s | 1.70 (1.70-1.70) | 6.23 (6.23-6.23) |
+| pdsch_data/L2 v>=128 /s | 0.91 (0.91-0.91) | 3.65 (3.65-3.65) |
+| pdsch_data/L3 v>=51 /s | 0.30 (0.30-0.30) | 1.52 (1.52-1.52) |
+| pdsch_data/L3 v>=128 /s | 0.03 (0.03-0.03) | 0.57 (0.57-0.57) |
+| pdsch_data/L4 v>=51 /s | 0.00 (0.00-0.00) | 0.03 (0.03-0.03) |
+| pdsch_data/L4 v>=128 /s | 0.00 (0.00-0.00) | 0.00 (0.00-0.00) |
+| pdsch_data/Lall v>=51 /s | 2.60 (2.60-2.60) | 9.90 (9.90-9.90) |
+| pdsch_data/Lall v>=128 /s | 1.27 (1.27-1.27) | 5.47 (5.47-5.47) |
+| pdsch_data/Lna v>=51 /s | 0.61 (0.61-0.61) | 2.11 (2.11-2.11) |
+| pdsch_data/Lna v>=128 /s | 0.33 (0.33-0.33) | 1.25 (1.25-1.25) |
+| pdsch_dmrs/L1 v>=51 /s | 1.85 (1.85-1.85) | 2.80 (2.80-2.80) |
+| pdsch_dmrs/L1 v>=128 /s | 1.25 (1.25-1.25) | 1.46 (1.46-1.46) |
+| pdsch_dmrs/L2 v>=51 /s | 5.61 (5.61-5.61) | 7.42 (7.42-7.42) |
+| pdsch_dmrs/L2 v>=128 /s | 2.99 (2.99-2.99) | 3.29 (3.29-3.29) |
+| pdsch_dmrs/L3 v>=51 /s | 1.50 (1.50-1.50) | 2.99 (2.99-2.99) |
+| pdsch_dmrs/L3 v>=128 /s | 0.51 (0.51-0.51) | 1.07 (1.07-1.07) |
+| pdsch_dmrs/L4 v>=51 /s | 0.03 (0.03-0.03) | 1.59 (1.59-1.59) |
+| pdsch_dmrs/L4 v>=128 /s | 0.00 (0.00-0.00) | 0.94 (0.94-0.94) |
+| pdsch_dmrs/Lall v>=51 /s | 9.77 (9.77-9.77) | 15.70 (15.70-15.70) |
+| pdsch_dmrs/Lall v>=128 /s | 4.99 (4.99-4.99) | 7.13 (7.13-7.13) |
+| pdsch_dmrs/Lna v>=51 /s | 0.77 (0.77-0.77) | 0.90 (0.90-0.90) |
+| pdsch_dmrs/Lna v>=128 /s | 0.24 (0.24-0.24) | 0.36 (0.36-0.36) |
+
+#### 1b. proven wide grants (CRC-ok or partial-TB proven) with a pdsch record of valid >= 51 / >= 128
+| allocation / record threshold | BASE | NEW |
+|---|---|---|
+| alloc51 grants proven (n/arm) | 519 (519-519) | 1364 (1364-1364) |
+| alloc51: any pdsch record | 100.0 (100.0-100.0) | 100.0 (100.0-100.0) |
+| alloc51: record valid>=51 % | 96.7 (96.7-96.7) | 97.9 (97.9-97.9) |
+| alloc51: record valid>=128 % | 62.6 (62.6-62.6) | 59.2 (59.2-59.2) |
+| alloc128 grants proven (n/arm) | 366 (366-366) | 884 (884-884) |
+| alloc128: any pdsch record | 100.0 (100.0-100.0) | 100.0 (100.0-100.0) |
+| alloc128: record valid>=51 % | 95.6 (95.6-95.6) | 98.4 (98.4-98.4) |
+| alloc128: record valid>=128 % | 88.8 (88.8-88.8) | 91.3 (91.3-91.3) |
+
+#### 2. per-rule PRBs removed in wide records (records' inval; per 1000 records with nb_rb>=T) and SENSE_WBQ last line
+| item | BASE | NEW |
+|---|---|---|
+| inval pdsch_dmrs/nb128 records n/arm | 1195 (1195-1195) | 1865 (1865-1865) |
+| inval pdsch_dmrs/nb128 records with any removal % | 97.6 (97.6-97.6) | 98.9 (98.9-98.9) |
+| inval pdsch_dmrs/nb128 PRBs removed by absent /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb128 PRBs removed by da_partial /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb128 PRBs removed by few_re /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb128 PRBs removed by nosig /1000 rec | 0 (0-0) | 1 (1-1) |
+| inval pdsch_dmrs/nb128 PRBs removed by recon /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb128 PRBs removed by resid /1000 rec | 9955 (9955-9955) | 11921 (11921-11921) |
+| inval pdsch_dmrs/nb128 PRBs removed by snr /1000 rec | 5000 (5000-5000) | 13671 (13671-13671) |
+| inval pdsch_data/nb128 records n/arm | 309 (309-309) | 1440 (1440-1440) |
+| inval pdsch_data/nb128 records with any removal % | 42.4 (42.4-42.4) | 52.1 (52.1-52.1) |
+| inval pdsch_data/nb128 PRBs removed by absent /1000 rec | 1333 (1333-1333) | 11019 (11019-11019) |
+| inval pdsch_data/nb128 PRBs removed by da_partial /1000 rec | 7178 (7178-7178) | 5769 (5769-5769) |
+| inval pdsch_data/nb128 PRBs removed by few_re /1000 rec | 0 (0-0) | 1 (1-1) |
+| inval pdsch_data/nb128 PRBs removed by nosig /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_data/nb128 PRBs removed by recon /1000 rec | 430 (430-430) | 785 (785-785) |
+| inval pdsch_data/nb128 PRBs removed by resid /1000 rec | 2608 (2608-2608) | 4003 (4003-4003) |
+| inval pdsch_data/nb128 PRBs removed by snr /1000 rec | 3430 (3430-3430) | 12597 (12597-12597) |
+| inval pdsch_dmrs/nb51 records n/arm | 2144 (2144-2144) | 3540 (3540-3540) |
+| inval pdsch_dmrs/nb51 records with any removal % | 87.9 (87.9-87.9) | 87.9 (87.9-87.9) |
+| inval pdsch_dmrs/nb51 PRBs removed by absent /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb51 PRBs removed by da_partial /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb51 PRBs removed by few_re /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb51 PRBs removed by nosig /1000 rec | 0 (0-0) | 1 (1-1) |
+| inval pdsch_dmrs/nb51 PRBs removed by recon /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_dmrs/nb51 PRBs removed by resid /1000 rec | 6915 (6915-6915) | 7890 (7890-7890) |
+| inval pdsch_dmrs/nb51 PRBs removed by snr /1000 rec | 4138 (4138-4138) | 9296 (9296-9296) |
+| inval pdsch_data/nb51 records n/arm | 570 (570-570) | 2287 (2287-2287) |
+| inval pdsch_data/nb51 records with any removal % | 35.1 (35.1-35.1) | 44.7 (44.7-44.7) |
+| inval pdsch_data/nb51 PRBs removed by absent /1000 rec | 1481 (1481-1481) | 8010 (8010-8010) |
+| inval pdsch_data/nb51 PRBs removed by da_partial /1000 rec | 3947 (3947-3947) | 4001 (4001-4001) |
+| inval pdsch_data/nb51 PRBs removed by few_re /1000 rec | 0 (0-0) | 1 (1-1) |
+| inval pdsch_data/nb51 PRBs removed by nosig /1000 rec | 0 (0-0) | 0 (0-0) |
+| inval pdsch_data/nb51 PRBs removed by recon /1000 rec | 419 (419-419) | 600 (600-600) |
+| inval pdsch_data/nb51 PRBs removed by resid /1000 rec | 1740 (1740-1740) | 2895 (2895-2895) |
+| inval pdsch_data/nb51 PRBs removed by snr /1000 rec | 2104 (2104-2104) | 8770 (8770-8770) |
+| WBQ wide (limit: BASE 128 / NEW 51, NOT comparable) | 2710 (2710-2710) | 5825 (5825-5825) |
+| WBQ short (limit: BASE 128 / NEW 51, NOT comparable) | 77 (77-77) | 403 (403-403) |
+| WBQ prbs absent (hit/first) | 392 (392-392) | 10249 (10249-10249) |
+| WBQ prbs da_partial (hit/first) | 32 (32-32) | 3787 (3787-3787) |
+| WBQ prbs few_re (hit/first) | 0 (0-0) | 0 (0-0) |
+| WBQ prbs nosig (hit/first) | 0 (0-0) | 1 (1-1) |
+| WBQ prbs recon (hit/first) | 38 (38-38) | 14 (14-14) |
+| WBQ prbs resid (hit/first) | 456 (456-456) | 2500 (2500-2500) |
+| WBQ prbs snr (hit/first) | 3162 (3162-3162) | 28760 (28760-28760) |
+| WBQ prbs sym (hit/first) | 0 (0-0) | 0 (0-0) |
+| WBQ prbs trunc (hit/first) | 0 (0-0) | 0 (0-0) |
+
+#### 3. median snr_db_p10 (dB), records with valid >= 51 (v51) / >= 128 (v128)
+| source | BASE | NEW |
+|---|---|---|
+| pdsch_dmrs/Lall v51 | 12.64 (12.64-12.64) | 13.81 (13.81-13.81) |
+| pdsch_dmrs/Lall v128 | 12.93 (12.93-12.93) | 14.20 (14.20-14.20) |
+| pdsch_data/Lall v51 | 12.78 (12.78-12.78) | 11.38 (11.38-11.38) |
+| pdsch_data/Lall v128 | 15.70 (15.70-15.70) | 10.54 (10.54-10.54) |
+
+#### 4. decode, drops, CPU
+| item | BASE | NEW |
+|---|---|---|
+| wide(>=128) grants decoded/s | 6.46 (6.46-6.46) | 11.13 (11.13-11.13) |
+| wide(>=128) CRC-ok/s | 1.41 (1.41-1.41) | 3.37 (3.37-3.37) |
+| wide(>=128) partial-TB proven/s | 0.30 (0.30-0.30) | 0.80 (0.80-0.80) |
+| wide(>=51) grants decoded/s | 10.80 (10.80-10.80) | 18.69 (18.69-18.69) |
+| wide(>=51) CRC-ok/s | 1.96 (1.96-1.96) | 5.12 (5.12-5.12) |
+| wide(>=51) partial-TB proven/s | 0.47 (0.47-0.47) | 1.31 (1.31-1.31) |
+| sense_rec_drop (record ring/writer) count | 0 (0-0) | 0 (0-0) |
+| sense_io_errors | 0 (0-0) | 0 (0-0) |
+| CFR ring full drops pdsch_dmrs (count) | 0 (0-0) | 0 (0-0) |
+| DA async drop pdsch_dmrs % of queued | 0.00 (0.00-0.00) | 0.00 (0.00-0.00) |
+| CFR ring full drops pdsch_data (count) | 0 (0-0) | 0 (0-0) |
+| DA async drop pdsch_data % of queued | 0.79 (0.79-0.79) | 0.21 (0.21-0.21) |
+| sense_cfr_drop total (count) | 0 (0-0) | 0 (0-0) |
+| scanq drop % (full/stale/epoch) | 0.04 (0.04-0.04) | 1.03 (1.03-1.03) |
+| scanq full % | 0.000 (0.000-0.000) | 0.166 (0.166-0.166) |
+| scanq stale % | 0.037 (0.037-0.037) | 0.861 (0.861-0.861) |
+| pdschq full % | 0.000 (0.000-0.000) | 0.000 (0.000-0.000) |
+| pdschq stale % | 0.337 (0.337-0.337) | 0.309 (0.309-0.309) |
+| CPU cores | 7.34 (7.34-7.34) | 7.59 (7.59-7.59) |
+
+#### integrity per arm
+| arm | sched_fail | pthread | noqual pdsch_dmrs / cfr_drop | noqual pdsch_data / cfr_drop | noqual all sources | sync_losses |
+|---|---|---|---|---|---|---|
+| qd_923Q1 | 0 | 0 | 0 / 0 | 0 / 0 | {'ssb': 0, 'csirs': 0, 'pdsch_data': 0, 'pdsch_dmrs': 0, 'pusch_dmrs': 0, 'prach': 1} | 0 |
+| qd_923D1 | 0 | 0 | 0 / 0 | 0 / 0 | {'ssb': 0, 'csirs': 0, 'pdsch_data': 0, 'pdsch_dmrs': 0, 'pusch_dmrs': 0} | 0 |
